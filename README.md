@@ -1,34 +1,275 @@
-# Mini Grid Bot v0.2
+# Mini Grid Bot v0.3 — без Docker
 
-Простой **Spot Grid Bot**: FastAPI + PostgreSQL + отдельный worker + Bybit Demo + web-интерфейс.
+Простой **Spot Grid Bot**: FastAPI + локальный PostgreSQL + отдельный worker + Bybit Demo + web-интерфейс.
 
 > Пока использовать только Bybit Demo. Это MVP, а не production trading infrastructure.
 
-## Что изменилось в v0.2
+## Что изменилось в v0.3
 
-- несколько независимых **grid-профилей**;
-- диапазон задаётся абсолютными ценами;
-- шаг задаётся в USDT, а не в процентах;
-- web-интерфейс на `/`;
-- создание и редактирование профилей;
-- Start / Stop каждого профиля отдельно;
-- просмотр активных заявок и истории BUY / SELL по каждому профилю.
+- Docker полностью удалён;
+- PostgreSQL ожидается на `127.0.0.1:5432`;
+- запуск через обычный Python `venv`;
+- добавлены systemd units для API и worker;
+- добавлен `/api/bybit/status`;
+- web-панель показывает статус авторизации Bybit;
+- перед Start профиля проверяются Bybit API key, `Read/Write` и разрешение `SpotTrade`.
 
-## Пример профиля
+## Как Bybit авторизует сервис
+
+Сервису не нужен логин/пароль от сайта Bybit.
+
+Нужны две строки:
 
 ```text
-Название:       BTC 62–67k
-Пара:           BTCUSDT
-Нижняя цена:    62000
-Верхняя цена:   67000
-Шаг:            1000 USDT
-На один BUY:    25 USDT
+API Key
+API Secret
 ```
 
-Ценовые линии:
+Они хранятся только на сервере в `.env`:
+
+```env
+BYBIT_API_KEY=...
+BYBIT_API_SECRET=...
+BYBIT_BASE_URL=https://api-demo.bybit.com
+```
+
+Для каждого приватного REST-запроса `app/exchanges/bybit.py` автоматически делает HMAC-SHA256 подпись и отправляет заголовки Bybit V5:
 
 ```text
-62000  63000  64000  65000  66000  67000
+X-BAPI-API-KEY
+X-BAPI-TIMESTAMP
+X-BAPI-RECV-WINDOW
+X-BAPI-SIGN
+```
+
+Secret по сети не отправляется — он используется локально только для вычисления подписи.
+
+### Как создать ключ именно для Demo
+
+1. Войти в обычный аккаунт Bybit (`bybit.com`).
+2. Переключить аккаунт в **Demo Trading**.
+3. В Demo Trading открыть профиль → **API**.
+4. Создать системный API key.
+5. Для этого grid-бота дать только торговое разрешение **Spot / SpotTrade**, режим **Read-Write**.
+6. Не давать `Withdraw` и другие ненужные разрешения.
+7. Желательно привязать API key к публичному IP сервера.
+8. Скопировать API Key и API Secret в `.env`.
+
+Для Demo используется:
+
+```env
+BYBIT_BASE_URL=https://api-demo.bybit.com
+```
+
+Не путать с Testnet `api-testnet.bybit.com`: ключи привязаны к своему окружению.
+
+## Установка без Docker (Ubuntu/Debian)
+
+### 1. PostgreSQL и Python
+
+```bash
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib python3 python3-venv python3-pip
+```
+
+Проверить PostgreSQL:
+
+```bash
+sudo systemctl enable --now postgresql
+sudo systemctl status postgresql
+```
+
+### 2. Создать БД
+
+Открыть psql:
+
+```bash
+sudo -u postgres psql
+```
+
+Выполнить:
+
+```sql
+CREATE USER grid WITH PASSWORD 'CHANGE_ME_STRONG_PASSWORD';
+CREATE DATABASE grid OWNER grid;
+\q
+```
+
+### 3. Установить приложение
+
+Например:
+
+```bash
+sudo useradd --system --create-home --shell /usr/sbin/nologin gridbot || true
+sudo mkdir -p /opt/mini-grid-bot
+sudo chown -R gridbot:gridbot /opt/mini-grid-bot
+```
+
+Скопировать файлы репозитория в `/opt/mini-grid-bot`, затем:
+
+```bash
+cd /opt/mini-grid-bot
+sudo -u gridbot python3 -m venv .venv
+sudo -u gridbot .venv/bin/pip install --upgrade pip
+sudo -u gridbot .venv/bin/pip install -r requirements.txt
+```
+
+### 4. Настроить `.env`
+
+```bash
+cp .env.example .env
+nano .env
+chmod 600 .env
+```
+
+Пример:
+
+```env
+DATABASE_URL=postgresql+asyncpg://grid:CHANGE_ME_STRONG_PASSWORD@127.0.0.1:5432/grid
+
+BYBIT_API_KEY=ВАШ_DEMO_API_KEY
+BYBIT_API_SECRET=ВАШ_DEMO_API_SECRET
+BYBIT_BASE_URL=https://api-demo.bybit.com
+
+GRID_POLL_SECONDS=3
+GRID_FEE_BUFFER_PCT=0.002
+```
+
+Владельцем `.env` должен быть пользователь сервиса:
+
+```bash
+sudo chown gridbot:gridbot .env
+sudo chmod 600 .env
+```
+
+## Проверить авторизацию Bybit до запуска торговли
+
+Из каталога проекта:
+
+```bash
+sudo -u gridbot .venv/bin/python scripts/check_bybit.py
+```
+
+Нормальный ответ:
+
+```json
+{
+  "ok": true,
+  "api_key": "abcd…wxyz",
+  "read_only": false,
+  "spot_permissions": ["SpotTrade"],
+  "ips": ["203.0.113.10"],
+  "uta": 1
+}
+```
+
+Если `read_only=true` или в `spot_permissions` нет `SpotTrade`, бот не разрешит Start профиля.
+
+## Ручной запуск без systemd
+
+Терминал 1:
+
+```bash
+cd /opt/mini-grid-bot
+./scripts/run-api.sh
+```
+
+Терминал 2:
+
+```bash
+cd /opt/mini-grid-bot
+./scripts/run-worker.sh
+```
+
+Открыть на самом сервере:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Если сервис стоит на удалённом сервере, пока web-панель без собственной авторизации лучше открыть через SSH tunnel:
+
+```bash
+ssh -L 8000:127.0.0.1:8000 user@server
+```
+
+После этого на своём компьютере:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Swagger:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Проверка ключа через HTTP:
+
+```bash
+curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool
+```
+
+## Запуск как сервис через systemd
+
+В репозитории уже есть:
+
+```text
+deploy/systemd/mini-grid-api.service
+deploy/systemd/mini-grid-worker.service
+```
+
+Установить:
+
+```bash
+sudo cp deploy/systemd/mini-grid-api.service /etc/systemd/system/
+sudo cp deploy/systemd/mini-grid-worker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mini-grid-api mini-grid-worker
+```
+
+Проверить:
+
+```bash
+systemctl status mini-grid-api
+systemctl status mini-grid-worker
+```
+
+Логи:
+
+```bash
+journalctl -u mini-grid-api -f
+journalctl -u mini-grid-worker -f
+```
+
+Перезапуск после обновления кода:
+
+```bash
+sudo systemctl restart mini-grid-api mini-grid-worker
+```
+
+## Web-интерфейс
+
+На `/` можно:
+
+- создавать несколько grid-профилей;
+- задавать пару;
+- нижнюю/верхнюю цену;
+- абсолютный шаг в USDT;
+- сумму USDT на одну покупку;
+- запускать/останавливать профиль;
+- видеть активные и исполненные BUY/SELL;
+- видеть статус Bybit API key.
+
+Пример профиля:
+
+```text
+BTC 62–67k
+BTCUSDT
+62000 — 67000
+шаг 1000
+25 USDT на BUY
 ```
 
 Торговые ячейки:
@@ -41,17 +282,13 @@ BUY 65000 -> SELL 66000 -> BUY 65000 -> ...
 BUY 66000 -> SELL 67000 -> BUY 66000 -> ...
 ```
 
-Верхняя граница `67000` не является BUY-уровнем: она нужна как последний SELL-уровень.
-
-При старте Spot-профиль выставляет только пассивные BUY ниже текущей рыночной цены. Он не шортит и не предполагает наличие BTC для первоначальных SELL.
-
 ## Архитектура
 
 ```text
 Browser
    |
    v
-FastAPI :8000  <------> PostgreSQL
+FastAPI :8000  <------> PostgreSQL :5432
    ^                         ^
    |                         |
    +---------------- Grid worker
@@ -60,95 +297,50 @@ FastAPI :8000  <------> PostgreSQL
                        Bybit Demo API
 ```
 
-## Запуск
+API и worker — два отдельных Linux-процесса. Рестарт FastAPI не должен останавливать торговый worker.
 
-```bash
-cp .env.example .env
-```
+## Безопасность ключа
 
-В `.env`:
-
-```env
-BYBIT_API_KEY=...
-BYBIT_API_SECRET=...
-BYBIT_BASE_URL=https://api-demo.bybit.com
-```
-
-Затем:
-
-```bash
-docker compose up -d --build
-```
-
-Открыть:
-
-```text
-http://127.0.0.1:8000/
-```
-
-Swagger:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-Логи worker:
-
-```bash
-docker compose logs -f worker
-```
-
-## Важно при обновлении с v0.1
-
-Схема БД изменилась. В этом мини-репо Alembic ещё не добавлен, поэтому для старой тестовой БД проще пересоздать volume:
-
-```bash
-docker compose down -v
-docker compose up -d --build
-```
-
-Это удалит локальные тестовые данные PostgreSQL.
+- никогда не класть `.env` в git;
+- `chmod 600 .env`;
+- разрешить только Spot trading;
+- не включать Withdrawal;
+- привязать ключ к IP сервера;
+- сначала работать только на Demo;
+- web-панель не публиковать напрямую наружу без authentication/reverse proxy.
 
 ## API
 
 ```text
+GET  /api/bybit/status
+GET  /api/balance
+GET  /api/price/BTCUSDT
+POST /api/demo/funds
+
 GET  /api/profiles
 POST /api/profiles
 PUT  /api/profiles/{id}
 POST /api/profiles/{id}/start
 POST /api/profiles/{id}/stop
 GET  /api/profiles/{id}/orders
-
-GET  /api/price/BTCUSDT
-GET  /api/balance
-POST /api/demo/funds
 ```
-
-## Что происходит при Stop
-
-`Stop` выставляет `enabled=false`. Worker на следующем цикле отменяет отслеживаемые активные заявки этого профиля. История остаётся в PostgreSQL.
-
-Редактирование профиля разрешено только после остановки и отмены его открытых заявок.
-
-## Ограничения MVP
-
-Перед реальными деньгами нужны как минимум:
-
-- reconciliation всех открытых ордеров Bybit после рестарта;
-- private WebSocket для order/execution stream вместо polling;
-- идемпотентное восстановление после ситуации «Bybit принял ордер, PostgreSQL ещё не записал»;
-- хранение фактических комиссий и расчёт net PnL;
-- лимиты общего капитала и дневного убытка;
-- authentication web/API;
-- шифрование API credentials;
-- Alembic migrations;
-- алерты и kill switch.
 
 ## Тесты
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-pytest
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest
 ```
+
+## Что ещё обязательно до реальных денег
+
+- reconciliation всех открытых ордеров Bybit после рестарта;
+- private WebSocket для order/execution stream вместо polling;
+- идемпотентное восстановление после ситуации «Bybit принял ордер, PostgreSQL ещё не записал»;
+- учёт фактических комиссий и net PnL;
+- лимиты общего капитала и дневного убытка;
+- authentication web/API;
+- шифрование API credentials, если появятся несколько аккаунтов;
+- Alembic migrations;
+- алерты и kill switch.

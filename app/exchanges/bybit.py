@@ -107,6 +107,10 @@ class BybitClient:
             min_order_amt=Decimal(lot["minOrderAmt"]),
         )
 
+
+    async def api_key_info(self) -> dict:
+        return await self.private_get("/v5/user/query-api", {})
+
     async def wallet_balance(self, coins: str = "USDT,BTC") -> dict:
         return await self.private_get(
             "/v5/account/wallet-balance",

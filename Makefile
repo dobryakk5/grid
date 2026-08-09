@@ -1,19 +1,21 @@
-up:
-	docker compose up -d --build
+.PHONY: install test api worker bybit-status health
 
-down:
-	docker compose down
+install:
+	python3 -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements-dev.txt
 
-logs:
-	docker compose logs -f api worker
+test:
+	.venv/bin/pytest
 
-status:
-	curl -s http://127.0.0.1:8000/api/bot/status | python -m json.tool
+api:
+	./scripts/run-api.sh
 
-start-bot:
-	curl -s -X POST http://127.0.0.1:8000/api/bot/start \
-	  -H 'Content-Type: application/json' \
-	  -d '{"symbol":"BTCUSDT","levels":3,"step_pct":"0.005","quote_per_level":"25"}' | python -m json.tool
+worker:
+	./scripts/run-worker.sh
 
-stop-bot:
-	curl -s -X POST http://127.0.0.1:8000/api/bot/stop | python -m json.tool
+bybit-status:
+	curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool
+
+health:
+	curl -s http://127.0.0.1:8000/health | python3 -m json.tool

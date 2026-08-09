@@ -1,0 +1,24 @@
+[Unit]
+Description=Mini Grid Bot FastAPI
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gridbot
+Group=gridbot
+WorkingDirectory=/opt/mini-grid-bot
+EnvironmentFile=/opt/mini-grid-bot/.env
+ExecStart=/opt/mini-grid-bot/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+
+# Basic hardening. The app only needs network and its working directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/mini-grid-bot
+
+[Install]
+WantedBy=multi-user.target

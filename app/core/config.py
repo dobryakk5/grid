@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "postgresql+asyncpg://grid:grid@db:5432/grid"
+    database_url: str = "postgresql+asyncpg://grid:grid@127.0.0.1:5432/grid"
 
     bybit_api_key: str = ""
     bybit_api_secret: str = ""

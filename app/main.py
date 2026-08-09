@@ -13,7 +13,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Mini Grid Bot", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Mini Grid Bot", version="0.3.0", lifespan=lifespan)
 app.include_router(web_router)
 app.include_router(api_router)
 

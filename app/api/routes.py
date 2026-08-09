@@ -89,6 +89,30 @@ async def price(symbol: str) -> dict:
         await exchange.close()
 
 
+@router.get("/bybit/status")
+async def bybit_status() -> dict:
+    exchange = BybitClient()
+    try:
+        data = await exchange.api_key_info()
+        result = data["result"]
+        spot_permissions = result.get("permissions", {}).get("Spot", [])
+        api_key = result.get("apiKey", "")
+        return {
+            "connected": True,
+            "api_key": f"{api_key[:4]}…{api_key[-4:]}" if len(api_key) >= 8 else "configured",
+            "read_only": result.get("readOnly") == 1,
+            "spot_trade": "SpotTrade" in spot_permissions,
+            "ips": result.get("ips", []),
+            "uta": result.get("uta"),
+            "note": result.get("note", ""),
+        }
+    except Exception as exc:
+        # Deliberately return a normal JSON status so the dashboard can show the error.
+        return {"connected": False, "error": str(exc)}
+    finally:
+        await exchange.close()
+
+
 @router.get("/balance")
 async def balance() -> dict:
     exchange = BybitClient()
@@ -185,6 +209,20 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
 
 @router.post("/profiles/{profile_id}/start")
 async def start_profile(profile_id: int) -> dict:
+    # Fail before enabling the profile if the configured key cannot trade Spot.
+    exchange = BybitClient()
+    try:
+        info = await exchange.api_key_info()
+        result = info["result"]
+        if result.get("readOnly") == 1:
+            raise HTTPException(status_code=409, detail="Bybit API key is read-only")
+        if "SpotTrade" not in result.get("permissions", {}).get("Spot", []):
+            raise HTTPException(status_code=409, detail="Bybit API key has no SpotTrade permission")
+    except BybitError as exc:
+        raise HTTPException(status_code=400, detail=f"Bybit authentication failed: {exc}") from exc
+    finally:
+        await exchange.close()
+
     async with SessionLocal() as session:
         profile = await session.get(GridProfile, profile_id)
         if profile is None:

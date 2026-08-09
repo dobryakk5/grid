@@ -22,7 +22,7 @@
 <body>
 <div class="wrap">
   <div class="top">
-    <div><h1>Grid Bot</h1><div class="sub">Bybit Demo · Spot · FastAPI + PostgreSQL</div></div>
+    <div><h1>Grid Bot</h1><div class="sub">Bybit Demo · Spot · FastAPI + PostgreSQL · без Docker</div><div id="bybitStatus" class="sub" style="margin-top:6px">Bybit: проверка…</div></div>
     <div class="price"><small>BTCUSDT сейчас</small><span id="btcPrice">—</span></div>
   </div>
 
@@ -69,6 +69,22 @@ async function api(url, options={}) {
 async function loadPrice(){
   try { const p = await api('/api/price/BTCUSDT'); $('btcPrice').textContent = money(p.last_price) + ' USDT'; }
   catch { $('btcPrice').textContent = 'нет связи'; }
+}
+
+async function loadBybitStatus(){
+  const el = $('bybitStatus');
+  try {
+    const s = await api('/api/bybit/status');
+    if (!s.connected) { el.className='bad'; el.textContent='Bybit: ошибка авторизации · ' + (s.error || 'unknown'); return; }
+    if (s.read_only || !s.spot_trade) {
+      el.className='bad';
+      el.textContent=`Bybit: ключ ${s.api_key} подключён, но ${s.read_only?'read-only':'нет SpotTrade'}`;
+      return;
+    }
+    el.className='good';
+    const ip = s.ips && s.ips.length ? ` · IP: ${s.ips.join(', ')}` : ' · без IP whitelist';
+    el.textContent=`Bybit: подключён · ключ ${s.api_key}${ip}`;
+  } catch(e) { el.className='bad'; el.textContent='Bybit: ' + e.message; }
 }
 
 function renderProfiles(){
@@ -138,7 +154,8 @@ $('refreshBtn').onclick=loadProfiles;
 function fmtDate(s){ if(!s)return '—'; return new Date(s).toLocaleString('ru-RU'); }
 function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 
-loadPrice(); loadProfiles();
+loadBybitStatus(); loadPrice(); loadProfiles();
+setInterval(loadBybitStatus, 30000);
 setInterval(loadPrice, 10000);
 setInterval(loadProfiles, 5000);
 </script>
