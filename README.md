@@ -1,18 +1,19 @@
-# Mini Grid Bot v0.3 — без Docker
+# Mini Grid Bot v0.4 — PnL по grid-ячейкам, без Docker
 
 Простой **Spot Grid Bot**: FastAPI + локальный PostgreSQL + отдельный worker + Bybit Demo + web-интерфейс.
 
 > Пока использовать только Bybit Demo. Это MVP, а не production trading infrastructure.
 
-## Что изменилось в v0.3
+## Что изменилось в v0.4
 
-- Docker полностью удалён;
-- PostgreSQL ожидается на `127.0.0.1:5432`;
-- запуск через обычный Python `venv`;
-- добавлены systemd units для API и worker;
-- добавлен `/api/bybit/status`;
-- web-панель показывает статус авторизации Bybit;
-- перед Start профиля проверяются Bybit API key, `Read/Write` и разрешение `SpotTrade`.
+- добавлена таблица `grid_executions` с фактическими исполнениями Bybit;
+- worker синхронизирует `execPrice`, `execQty`, `execValue`, `execFee`, `feeCurrency`;
+- добавлен `/api/profiles/{id}/pnl`;
+- в web-панели есть PnL по каждой grid-ячейке и итог по профилю;
+- считаются завершённые циклы, оборот, gross profit, комиссии и net profit;
+- комиссия в базовой монете (например BTC) переводится в quote-валюту по цене конкретного fill;
+- старые заполненные ордера автоматически backfill-ятся из Bybit execution history;
+- Docker по-прежнему не используется: PostgreSQL + `venv` + systemd.
 
 ## Как Bybit авторизует сервис
 
@@ -260,7 +261,9 @@ sudo systemctl restart mini-grid-api mini-grid-worker
 - сумму USDT на одну покупку;
 - запускать/останавливать профиль;
 - видеть активные и исполненные BUY/SELL;
-- видеть статус Bybit API key.
+- видеть статус Bybit API key;
+- видеть прибыль по каждой grid-ячейке: циклы, оборот, gross, комиссии и net;
+- видеть суммарный realised PnL по профилю.
 
 Пример профиля:
 
@@ -281,6 +284,28 @@ BUY 64000 -> SELL 65000 -> BUY 64000 -> ...
 BUY 65000 -> SELL 66000 -> BUY 65000 -> ...
 BUY 66000 -> SELL 67000 -> BUY 66000 -> ...
 ```
+
+
+## Как считается PnL
+
+PnL считается только после завершённого цикла `BUY -> SELL`, по фактическим executions, а не по цене лимитной заявки.
+
+Для каждой ячейки показываются:
+
+```text
+64000 -> 65000
+циклов: 7
+оборот: 3420 USDT
+gross profit: +52.61 USDT
+комиссии: 6.84 USDT
+net profit: +45.77 USDT
+```
+
+Если SELL-количество немного меньше BUY-количества из-за fee buffer, стоимость покупки распределяется только на реально проданное количество. Остаток показывается как inventory/dust и не считается реализованным.
+
+Если комиссия списана в quote-валюте (например USDT), она учитывается напрямую. Если комиссия списана в base-валюте (например BTC), она переводится в USDT по фактической цене конкретного исполнения. Если комиссия придёт в третьей валюте, web-панель отдельно покажет её как не переведённую и предупредит, что такой fee пока не включён в net.
+
+При обновлении с v0.3 новая таблица создаётся автоматически через `Base.metadata.create_all()` при старте API/worker. Изменять существующие таблицы для v0.4 не требуется.
 
 ## Архитектура
 
@@ -323,6 +348,7 @@ PUT  /api/profiles/{id}
 POST /api/profiles/{id}/start
 POST /api/profiles/{id}/stop
 GET  /api/profiles/{id}/orders
+GET  /api/profiles/{id}/pnl
 ```
 
 ## Тесты
@@ -338,7 +364,6 @@ python3 -m venv .venv
 - reconciliation всех открытых ордеров Bybit после рестарта;
 - private WebSocket для order/execution stream вместо polling;
 - идемпотентное восстановление после ситуации «Bybit принял ордер, PostgreSQL ещё не записал»;
-- учёт фактических комиссий и net PnL;
 - лимиты общего капитала и дневного убытка;
 - authentication web/API;
 - шифрование API credentials, если появятся несколько аккаунтов;

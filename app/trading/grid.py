@@ -2,11 +2,11 @@ import logging
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import GridOrder, GridProfile
+from app.db.models import GridExecution, GridOrder, GridProfile
 from app.exchanges.bybit import BybitClient, InstrumentInfo
 from app.trading.math import floor_to_step, grid_buy_levels
 
@@ -25,6 +25,10 @@ class GridEngine:
 
         for profile in profiles:
             try:
+                # Backfill actual fills for databases upgraded from an older
+                # version and for any fill that was not persisted on a prior tick.
+                await self.backfill_filled_executions(session, profile)
+
                 if not profile.enabled:
                     await self.cancel_open_orders(session, profile.id)
                     continue
@@ -61,10 +65,102 @@ class GridEngine:
             if remote.get("avgPrice"):
                 order.avg_price = Decimal(remote["avgPrice"])
 
+            if order.status in {"PartiallyFilled", "Filled"}:
+                await self.sync_order_executions(session, order)
+
             if order.status == "Filled" and not order.replacement_created:
                 await self._create_replacement(session, profile, order, info)
 
         await session.commit()
+
+
+    async def backfill_filled_executions(
+        self, session: AsyncSession, profile: GridProfile
+    ) -> None:
+        result = await session.execute(
+            select(GridOrder)
+            .where(
+                GridOrder.profile_id == profile.id,
+                GridOrder.status == "Filled",
+            )
+            .order_by(GridOrder.id.desc())
+            .limit(500)
+        )
+        changed = False
+        for order in result.scalars():
+            stored_qty = await session.scalar(
+                select(func.coalesce(func.sum(GridExecution.exec_qty), 0)).where(
+                    GridExecution.order_id == order.id
+                )
+            )
+            expected_qty = Decimal(order.filled_qty or order.qty)
+            if Decimal(stored_qty or 0) < expected_qty:
+                if await self.sync_order_executions(session, order):
+                    changed = True
+        if changed:
+            await session.commit()
+
+    async def sync_order_executions(
+        self, session: AsyncSession, order: GridOrder
+    ) -> int:
+        remote = await self.exchange.get_executions(
+            order_id=order.exchange_order_id, symbol=order.symbol
+        )
+        if not remote:
+            return 0
+
+        existing_result = await session.execute(
+            select(GridExecution.exec_id).where(GridExecution.order_id == order.id)
+        )
+        existing_ids = set(existing_result.scalars())
+        inserted = 0
+
+        for item in remote:
+            exec_id = item.get("execId")
+            if not exec_id or exec_id in existing_ids:
+                continue
+            price = Decimal(item.get("execPrice") or "0")
+            qty = Decimal(item.get("execQty") or "0")
+            value = Decimal(item.get("execValue") or "0")
+            if value == 0 and price and qty:
+                value = price * qty
+            raw_maker = item.get("isMaker")
+            is_maker = (
+                raw_maker
+                if isinstance(raw_maker, bool)
+                else str(raw_maker).lower() == "true"
+                if raw_maker is not None
+                else None
+            )
+            session.add(
+                GridExecution(
+                    order_id=order.id,
+                    exec_id=exec_id,
+                    exec_price=price,
+                    exec_qty=qty,
+                    exec_value=value,
+                    exec_fee=Decimal(item.get("execFee") or "0"),
+                    fee_currency=item.get("feeCurrency") or None,
+                    fee_rate=(
+                        Decimal(item["feeRate"]) if item.get("feeRate") else None
+                    ),
+                    is_maker=is_maker,
+                    exec_time_ms=(
+                        int(item["execTime"]) if item.get("execTime") else None
+                    ),
+                )
+            )
+            existing_ids.add(exec_id)
+            inserted += 1
+
+        if inserted:
+            await session.flush()
+            logger.info(
+                "Stored %s execution(s) for order %s",
+                inserted,
+                order.exchange_order_id,
+            )
+        return inserted
 
     async def seed_missing_buy_orders(
         self, session: AsyncSession, profile: GridProfile

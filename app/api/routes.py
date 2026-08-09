@@ -8,7 +8,9 @@ from app.db.models import GridOrder, GridProfile
 from app.db.session import SessionLocal
 from app.exchanges.bybit import BybitClient, BybitError
 from app.trading.grid import OPEN_STATUSES
+from app.trading.pnl import grid_cell_statistics
 from app.trading.math import grid_buy_levels, grid_lines
+from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/api")
 
@@ -270,3 +272,34 @@ async def profile_orders(profile_id: int, limit: int = 100) -> list[dict]:
             }
             for order in result.scalars()
         ]
+
+
+@router.get("/profiles/{profile_id}/pnl")
+async def profile_pnl(profile_id: int) -> dict:
+    async with SessionLocal() as session:
+        profile = await session.get(GridProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+
+        result = await session.execute(
+            select(GridOrder)
+            .options(selectinload(GridOrder.executions))
+            .where(GridOrder.profile_id == profile_id)
+            .order_by(GridOrder.id)
+        )
+        orders = list(result.scalars())
+
+    exchange = BybitClient()
+    try:
+        info = await exchange.instrument_info(profile.symbol)
+    except BybitError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await exchange.close()
+
+    return grid_cell_statistics(
+        profile,
+        orders,
+        base_coin=info.base_coin,
+        quote_coin=info.quote_coin,
+    )

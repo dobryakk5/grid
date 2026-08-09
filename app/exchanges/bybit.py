@@ -151,6 +151,25 @@ class BybitClient:
         items = history["result"]["list"]
         return items[0] if items else None
 
+    async def get_executions(self, *, order_id: str, symbol: str) -> list[dict]:
+        items: list[dict] = []
+        cursor = ""
+        while True:
+            params = {
+                "category": "spot",
+                "symbol": symbol,
+                "orderId": order_id,
+                "limit": "100",
+            }
+            if cursor:
+                params["cursor"] = cursor
+            data = await self.private_get("/v5/execution/list", params)
+            result = data["result"]
+            items.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor") or ""
+            if not cursor:
+                return items
+
     async def cancel_order(self, *, order_id: str, symbol: str) -> None:
         await self.private_post(
             "/v5/order/cancel",

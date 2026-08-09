@@ -15,8 +15,9 @@
     .profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:17px;cursor:pointer}.card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}.card-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.card h3{margin:0;font-size:17px}.badge{font-size:11px;border-radius:999px;padding:4px 8px;border:1px solid var(--line)}.badge.on{color:var(--good);border-color:#2d6c4b;background:#10251b}.badge.off{color:var(--muted)}
     .metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:14px 0}.metric{background:#0e131d;border:1px solid #202838;border-radius:9px;padding:9px}.metric span{display:block;color:var(--muted);font-size:11px}.metric b{display:block;margin-top:2px}.levels{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 14px}.level{font-size:11px;background:#0e131d;border:1px solid var(--line);padding:3px 7px;border-radius:6px}.actions{display:flex;gap:8px;flex-wrap:wrap}
     .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 11px;border-bottom:1px solid #202838;white-space:nowrap}th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:#0e131d}tr:last-child td{border-bottom:0}.side-buy{color:var(--good);font-weight:700}.side-sell{color:var(--bad);font-weight:700}.status{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 7px}.status.Filled{color:var(--good)}.status.New,.status.PartiallyFilled{color:var(--warn)}
+    .pnl-summary{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:9px;margin-bottom:14px}.pnl-box{background:#0e131d;border:1px solid #202838;border-radius:10px;padding:11px}.pnl-box span{display:block;color:var(--muted);font-size:11px}.pnl-box b{display:block;font-size:16px;margin-top:3px}.cell-state{font-size:11px;color:var(--muted)}
     .hidden{display:none}.error{margin-top:10px;color:var(--bad);white-space:pre-wrap}.empty{padding:26px;text-align:center;color:var(--muted)}
-    @media(max-width:980px){.form-grid{grid-template-columns:repeat(2,1fr)}.form-grid .actions-form{grid-column:1/-1}.top{align-items:center}}@media(max-width:560px){.form-grid{grid-template-columns:1fr}.profiles{grid-template-columns:1fr}.top{display:block}.price{text-align:left;margin-top:12px}}
+    @media(max-width:980px){.form-grid{grid-template-columns:repeat(2,1fr)}.form-grid .actions-form{grid-column:1/-1}.top{align-items:center}.pnl-summary{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.form-grid{grid-template-columns:1fr}.profiles{grid-template-columns:1fr}.top{display:block}.price{text-align:left;margin-top:12px}.pnl-summary{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -47,6 +48,14 @@
 
   <div class="panel" style="margin-top:18px">
     <div style="display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:12px">
+      <h2 id="pnlTitle" style="margin:0">Прибыль по grid-ячейкам</h2>
+      <div class="muted" style="font-size:11px">только завершённые BUY → SELL циклы</div>
+    </div>
+    <div id="pnl" class="empty">Выбери профиль выше</div>
+  </div>
+
+  <div class="panel">
+    <div style="display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:12px">
       <h2 id="ordersTitle" style="margin:0">Заявки и сделки</h2>
       <button id="refreshBtn">Обновить</button>
     </div>
@@ -58,6 +67,7 @@ let profiles = [];
 let selectedId = null;
 const $ = id => document.getElementById(id);
 const money = v => Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 8});
+const signedMoney = v => `${Number(v) >= 0 ? '+' : ''}${money(v)}`;
 
 async function api(url, options={}) {
   const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
@@ -116,11 +126,44 @@ async function loadProfiles(){
     if (selectedId && !profiles.find(p=>p.id===selectedId)) selectedId=null;
     if (!selectedId && profiles.length) selectedId=profiles[0].id;
     renderProfiles();
-    if (selectedId) await loadOrders(selectedId);
+    if (selectedId) await Promise.all([loadPnl(selectedId), loadOrders(selectedId)]);
   } catch(e) { $('profiles').innerHTML = `<div class="panel error">${escapeHtml(e.message)}</div>`; }
 }
 
-async function selectProfile(id){ selectedId=id; renderProfiles(); await loadOrders(id); }
+async function selectProfile(id){ selectedId=id; renderProfiles(); await Promise.all([loadPnl(id), loadOrders(id)]); }
+
+async function loadPnl(id){
+  const p = profiles.find(x=>x.id===id); if(!p) return;
+  $('pnlTitle').textContent = `Прибыль по grid-ячейкам · ${p.name}`;
+  try {
+    const data = await api(`/api/profiles/${id}/pnl`);
+    const t = data.total;
+    const unknown = Object.entries(t.unconverted_fees || {});
+    const note = unknown.length ? `<div class="error" style="margin:10px 0 0">Не переведены в ${escapeHtml(data.quote_coin)} комиссии: ${unknown.map(([c,v])=>`${escapeHtml(c)} ${money(v)}`).join(', ')}. Net ниже не учитывает их.</div>` : '';
+    $('pnl').className='';
+    $('pnl').innerHTML = `
+      <div class="pnl-summary">
+        <div class="pnl-box"><span>Завершено циклов</span><b>${t.cycles}</b></div>
+        <div class="pnl-box"><span>Оборот</span><b>${money(t.turnover)} ${escapeHtml(data.quote_coin)}</b></div>
+        <div class="pnl-box"><span>Gross profit</span><b class="${Number(t.gross_profit)>=0?'good':'bad'}">${signedMoney(t.gross_profit)} ${escapeHtml(data.quote_coin)}</b></div>
+        <div class="pnl-box"><span>Комиссии</span><b>${money(t.fees_quote)} ${escapeHtml(data.quote_coin)}</b></div>
+        <div class="pnl-box"><span>Net profit</span><b class="${Number(t.net_profit)>=0?'good':'bad'}">${signedMoney(t.net_profit)} ${escapeHtml(data.quote_coin)}</b></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Ячейка</th><th>Состояние</th><th>Циклов</th><th>Оборот</th><th>Gross</th><th>Комиссии</th><th>Net</th><th>Последний цикл</th></tr></thead><tbody>
+        ${data.cells.map(c=>`<tr>
+          <td><b>${money(c.buy_price)} → ${money(c.sell_price)}</b></td>
+          <td><span class="cell-state">${escapeHtml(c.state)}</span></td>
+          <td>${c.cycles}</td>
+          <td>${money(c.turnover)} ${escapeHtml(data.quote_coin)}</td>
+          <td class="${Number(c.gross_profit)>=0?'good':'bad'}">${signedMoney(c.gross_profit)}</td>
+          <td>${money(c.fees_quote)}</td>
+          <td class="${Number(c.net_profit)>=0?'good':'bad'}"><b>${signedMoney(c.net_profit)}</b></td>
+          <td>${c.last_completed_at_ms ? fmtDate(Number(c.last_completed_at_ms)) : '—'}</td>
+        </tr>`).join('')}
+      </tbody></table></div>${note}`;
+  } catch(e){ $('pnl').className='error'; $('pnl').textContent=e.message; }
+}
+
 async function loadOrders(id){
   const p = profiles.find(x=>x.id===id); if(!p) return;
   $('ordersTitle').textContent = `Заявки и сделки · ${p.name}`;
@@ -151,7 +194,7 @@ $('profileForm').onsubmit=async e=>{
   catch(err){ $('formError').textContent=err.message; }
 };
 $('refreshBtn').onclick=loadProfiles;
-function fmtDate(s){ if(!s)return '—'; return new Date(s).toLocaleString('ru-RU'); }
+function fmtDate(s){ if(!s)return '—'; return new Date(typeof s === 'number' ? s : s).toLocaleString('ru-RU'); }
 function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 
 loadBybitStatus(); loadPrice(); loadProfiles();

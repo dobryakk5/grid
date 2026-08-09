@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -53,3 +53,26 @@ class GridOrder(Base):
     )
 
     profile: Mapped[GridProfile] = relationship(back_populates="orders")
+    executions: Mapped[list["GridExecution"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+
+
+class GridExecution(Base):
+    __tablename__ = "grid_executions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(
+        ForeignKey("grid_orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    exec_id: Mapped[str] = mapped_column(String(96), unique=True, nullable=False, index=True)
+    exec_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    exec_qty: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    exec_value: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    exec_fee: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False, default=Decimal("0"))
+    fee_currency: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    fee_rate: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
+    is_maker: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    exec_time_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+
+    order: Mapped[GridOrder] = relationship(back_populates="executions")
