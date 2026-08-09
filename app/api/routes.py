@@ -60,6 +60,18 @@ async def start_bot(payload: StartBotRequest) -> dict:
         state = await session.get(BotState, 1)
         if state is None:
             raise HTTPException(status_code=500, detail="bot_state is missing")
+        if state.enabled:
+            raise HTTPException(status_code=409, detail="bot is already enabled; stop it before changing grid settings")
+        active = await session.scalar(
+            select(func.count(GridOrder.id)).where(
+                GridOrder.status.in_(["New", "PartiallyFilled", "Untriggered", "Created"])
+            )
+        )
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail="tracked exchange orders are still open; stop/cancel them before reseeding",
+            )
         state.symbol = payload.symbol.upper()
         state.levels = payload.levels
         state.step_pct = payload.step_pct

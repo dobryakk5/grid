@@ -26,7 +26,7 @@ class GridEngine:
             return
 
         if not state.enabled:
-            await self.cancel_open_orders(session, state.symbol)
+            await self.cancel_open_orders(session)
             return
 
         await self.refresh_open_orders(session, state)
@@ -58,8 +58,9 @@ class GridEngine:
                 qty=qty,
                 replacement_for=None,
             )
-
-        await session.commit()
+            # Persist every accepted exchange order immediately. This narrows
+            # (but cannot eliminate) the exchange/DB crash-consistency window.
+            await session.commit()
 
     async def refresh_open_orders(self, session: AsyncSession, state: BotState) -> None:
         result = await session.execute(
@@ -128,6 +129,7 @@ class GridEngine:
             replacement_for=order.exchange_order_id,
         )
         order.replacement_created = True
+        await session.commit()
         logger.info(
             "Filled %s %s @ %s -> new %s %s @ %s",
             order.side,
@@ -138,12 +140,9 @@ class GridEngine:
             price,
         )
 
-    async def cancel_open_orders(self, session: AsyncSession, symbol: str) -> None:
+    async def cancel_open_orders(self, session: AsyncSession) -> None:
         result = await session.execute(
-            select(GridOrder).where(
-                GridOrder.symbol == symbol,
-                GridOrder.status.in_(OPEN_STATUSES),
-            )
+            select(GridOrder).where(GridOrder.status.in_(OPEN_STATUSES))
         )
         orders = list(result.scalars())
         for order in orders:
@@ -152,10 +151,9 @@ class GridEngine:
                     order_id=order.exchange_order_id, symbol=order.symbol
                 )
                 order.status = "Cancelled"
+                await session.commit()
             except Exception:
                 logger.exception("Could not cancel order %s", order.exchange_order_id)
-        if orders:
-            await session.commit()
 
     async def _place_and_store(
         self,
