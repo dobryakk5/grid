@@ -1,6 +1,8 @@
 from decimal import Decimal
 
-from app.trading.math import buy_level, floor_to_step, one_step_down, one_step_up
+import pytest
+
+from app.trading.math import floor_to_step, grid_buy_levels, grid_lines
 
 
 def test_floor_to_step():
@@ -8,14 +10,18 @@ def test_floor_to_step():
     assert floor_to_step(Decimal("0.001234"), Decimal("0.00001")) == Decimal("0.00123")
 
 
-def test_grid_round_trip():
-    price = Decimal("100")
-    step = Decimal("0.01")
-    sell = one_step_up(price, step)
-    buy = one_step_down(sell, step)
-    assert sell == Decimal("101")
-    assert buy == Decimal("100")
+def test_absolute_grid_profile():
+    buys = grid_buy_levels(Decimal("62000"), Decimal("67000"), Decimal("1000"))
+    assert buys == [
+        Decimal("62000"),
+        Decimal("63000"),
+        Decimal("64000"),
+        Decimal("65000"),
+        Decimal("66000"),
+    ]
+    assert grid_lines(Decimal("62000"), Decimal("67000"), Decimal("1000"))[-1] == Decimal("67000")
 
 
-def test_buy_level():
-    assert buy_level(Decimal("100"), Decimal("0.01"), 3) == Decimal("97")
+def test_invalid_grid():
+    with pytest.raises(ValueError):
+        grid_buy_levels(Decimal("62000"), Decimal("62500"), Decimal("1000"))

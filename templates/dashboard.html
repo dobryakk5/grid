@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grid Bot</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0e14; --panel:#121722; --panel2:#171d2a; --line:#273044; --text:#e6eaf2; --muted:#8e9aaf; --good:#58d68d; --bad:#ff6b6b; --accent:#6ea8fe; --warn:#f6c85f; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .wrap{max-width:1240px;margin:0 auto;padding:28px 20px 60px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:24px}
+    h1{font-size:28px;margin:0 0 5px}.sub{color:var(--muted)} .price{font-size:24px;font-weight:700;text-align:right}.price small{display:block;font-size:12px;color:var(--muted);font-weight:500}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px}.panel h2{margin:0 0 15px;font-size:17px}
+    .form-grid{display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}.field input{width:100%;background:#0e131d;border:1px solid var(--line);color:var(--text);padding:10px 11px;border-radius:9px;outline:none}.field input:focus{border-color:var(--accent)}
+    button{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:600}button:hover{border-color:#41506f}.primary{background:#1c4d8f;border-color:#2866ba}.good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}
+    .profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:17px;cursor:pointer}.card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}.card-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.card h3{margin:0;font-size:17px}.badge{font-size:11px;border-radius:999px;padding:4px 8px;border:1px solid var(--line)}.badge.on{color:var(--good);border-color:#2d6c4b;background:#10251b}.badge.off{color:var(--muted)}
+    .metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:14px 0}.metric{background:#0e131d;border:1px solid #202838;border-radius:9px;padding:9px}.metric span{display:block;color:var(--muted);font-size:11px}.metric b{display:block;margin-top:2px}.levels{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 14px}.level{font-size:11px;background:#0e131d;border:1px solid var(--line);padding:3px 7px;border-radius:6px}.actions{display:flex;gap:8px;flex-wrap:wrap}
+    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 11px;border-bottom:1px solid #202838;white-space:nowrap}th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:#0e131d}tr:last-child td{border-bottom:0}.side-buy{color:var(--good);font-weight:700}.side-sell{color:var(--bad);font-weight:700}.status{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 7px}.status.Filled{color:var(--good)}.status.New,.status.PartiallyFilled{color:var(--warn)}
+    .hidden{display:none}.error{margin-top:10px;color:var(--bad);white-space:pre-wrap}.empty{padding:26px;text-align:center;color:var(--muted)}
+    @media(max-width:980px){.form-grid{grid-template-columns:repeat(2,1fr)}.form-grid .actions-form{grid-column:1/-1}.top{align-items:center}}@media(max-width:560px){.form-grid{grid-template-columns:1fr}.profiles{grid-template-columns:1fr}.top{display:block}.price{text-align:left;margin-top:12px}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div><h1>Grid Bot</h1><div class="sub">Bybit Demo · Spot · FastAPI + PostgreSQL</div></div>
+    <div class="price"><small>BTCUSDT сейчас</small><span id="btcPrice">—</span></div>
+  </div>
+
+  <div class="panel">
+    <h2 id="formTitle">Новый профиль</h2>
+    <form id="profileForm">
+      <input type="hidden" id="profileId">
+      <div class="form-grid">
+        <div class="field"><label>Название</label><input id="name" value="BTC 62–67k" required></div>
+        <div class="field"><label>Пара</label><input id="symbol" value="BTCUSDT" required></div>
+        <div class="field"><label>Нижняя цена</label><input id="lower" type="number" step="any" value="62000" required></div>
+        <div class="field"><label>Верхняя цена</label><input id="upper" type="number" step="any" value="67000" required></div>
+        <div class="field"><label>Шаг, USDT</label><input id="step" type="number" step="any" value="1000" required></div>
+        <div class="field"><label>USDT на BUY</label><input id="quote" type="number" step="any" value="25" required></div>
+        <div class="actions actions-form"><button class="primary" type="submit" id="saveBtn">Создать</button><button type="button" id="cancelEdit" class="hidden">Отмена</button></div>
+      </div>
+      <div id="formError" class="error"></div>
+    </form>
+  </div>
+
+  <div id="profiles" class="profiles"></div>
+
+  <div class="panel" style="margin-top:18px">
+    <div style="display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:12px">
+      <h2 id="ordersTitle" style="margin:0">Заявки и сделки</h2>
+      <button id="refreshBtn">Обновить</button>
+    </div>
+    <div id="orders" class="empty">Выбери профиль выше</div>
+  </div>
+</div>
+<script>
+let profiles = [];
+let selectedId = null;
+const $ = id => document.getElementById(id);
+const money = v => Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 8});
+
+async function api(url, options={}) {
+  const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  const data = await res.json().catch(()=>({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+async function loadPrice(){
+  try { const p = await api('/api/price/BTCUSDT'); $('btcPrice').textContent = money(p.last_price) + ' USDT'; }
+  catch { $('btcPrice').textContent = 'нет связи'; }
+}
+
+function renderProfiles(){
+  const root = $('profiles');
+  if (!profiles.length) { root.innerHTML = '<div class="panel empty">Профилей пока нет</div>'; return; }
+  root.innerHTML = profiles.map(p => `
+    <div class="card ${selectedId===p.id?'selected':''}" onclick="selectProfile(${p.id})">
+      <div class="card-head"><div><h3>${escapeHtml(p.name)}</h3><div class="muted">${escapeHtml(p.symbol)}</div></div><span class="badge ${p.enabled?'on':'off'}">${p.enabled?'RUNNING':'STOPPED'}</span></div>
+      <div class="metrics">
+        <div class="metric"><span>Диапазон</span><b>${money(p.lower_price)} — ${money(p.upper_price)}</b></div>
+        <div class="metric"><span>Шаг</span><b>${money(p.step_price)} USDT</b></div>
+        <div class="metric"><span>На уровень</span><b>${money(p.quote_per_level)} USDT</b></div>
+        <div class="metric"><span>Активных заявок</span><b>${p.active_orders}</b></div>
+        <div class="metric"><span>Исполнено BUY</span><b class="good">${p.filled_buys}</b></div>
+        <div class="metric"><span>Исполнено SELL</span><b class="bad">${p.filled_sells}</b></div>
+      </div>
+      <div class="muted" style="font-size:11px">Ценовые линии</div>
+      <div class="levels">${p.lines.map(x=>`<span class="level">${money(x)}</span>`).join('')}</div>
+      <div class="actions" onclick="event.stopPropagation()">
+        ${p.enabled ? `<button onclick="stopProfile(${p.id})">Stop</button>` : `<button class="primary" onclick="startProfile(${p.id})">Start</button>`}
+        <button onclick="editProfile(${p.id})" ${p.enabled?'disabled':''}>Редактировать</button>
+      </div>
+    </div>`).join('');
+}
+
+async function loadProfiles(){
+  try {
+    profiles = await api('/api/profiles');
+    if (selectedId && !profiles.find(p=>p.id===selectedId)) selectedId=null;
+    if (!selectedId && profiles.length) selectedId=profiles[0].id;
+    renderProfiles();
+    if (selectedId) await loadOrders(selectedId);
+  } catch(e) { $('profiles').innerHTML = `<div class="panel error">${escapeHtml(e.message)}</div>`; }
+}
+
+async function selectProfile(id){ selectedId=id; renderProfiles(); await loadOrders(id); }
+async function loadOrders(id){
+  const p = profiles.find(x=>x.id===id); if(!p) return;
+  $('ordersTitle').textContent = `Заявки и сделки · ${p.name}`;
+  try {
+    const rows = await api(`/api/profiles/${id}/orders?limit=150`);
+    if(!rows.length){ $('orders').className='empty'; $('orders').innerHTML='По профилю пока нет заявок'; return; }
+    $('orders').className='table-wrap';
+    $('orders').innerHTML = `<table><thead><tr><th>Время</th><th>Тип</th><th>Цена заявки</th><th>Grid BUY</th><th>Количество</th><th>Статус</th><th>Средняя цена</th></tr></thead><tbody>${rows.map(o=>`<tr>
+      <td>${fmtDate(o.updated_at || o.created_at)}</td><td class="${o.side==='Buy'?'side-buy':'side-sell'}">${o.side.toUpperCase()}</td><td>${money(o.price)}</td><td>${money(o.grid_buy_price)}</td><td>${money(o.filled_qty || o.qty)}</td><td><span class="status ${o.status}">${o.status}</span></td><td>${o.avg_price?money(o.avg_price):'—'}</td>
+    </tr>`).join('')}</tbody></table>`;
+  } catch(e){ $('orders').className='error'; $('orders').textContent=e.message; }
+}
+
+async function startProfile(id){ try{ await api(`/api/profiles/${id}/start`,{method:'POST'}); await loadProfiles(); }catch(e){alert(e.message)} }
+async function stopProfile(id){ try{ await api(`/api/profiles/${id}/stop`,{method:'POST'}); await loadProfiles(); }catch(e){alert(e.message)} }
+
+function editProfile(id){
+  const p=profiles.find(x=>x.id===id); if(!p) return;
+  $('profileId').value=p.id; $('name').value=p.name; $('symbol').value=p.symbol; $('lower').value=p.lower_price; $('upper').value=p.upper_price; $('step').value=p.step_price; $('quote').value=p.quote_per_level;
+  $('formTitle').textContent='Редактировать профиль'; $('saveBtn').textContent='Сохранить'; $('cancelEdit').classList.remove('hidden'); window.scrollTo({top:0,behavior:'smooth'});
+}
+function resetForm(){ $('profileId').value=''; $('name').value='BTC 62–67k'; $('symbol').value='BTCUSDT'; $('lower').value='62000'; $('upper').value='67000'; $('step').value='1000'; $('quote').value='25'; $('formTitle').textContent='Новый профиль'; $('saveBtn').textContent='Создать'; $('cancelEdit').classList.add('hidden'); $('formError').textContent=''; }
+$('cancelEdit').onclick=resetForm;
+$('profileForm').onsubmit=async e=>{
+  e.preventDefault(); $('formError').textContent='';
+  const id=$('profileId').value; const body={name:$('name').value,symbol:$('symbol').value,lower_price:$('lower').value,upper_price:$('upper').value,step_price:$('step').value,quote_per_level:$('quote').value};
+  try{ await api(id?`/api/profiles/${id}`:'/api/profiles',{method:id?'PUT':'POST',body:JSON.stringify(body)}); resetForm(); await loadProfiles(); }
+  catch(err){ $('formError').textContent=err.message; }
+};
+$('refreshBtn').onclick=loadProfiles;
+function fmtDate(s){ if(!s)return '—'; return new Date(s).toLocaleString('ru-RU'); }
+function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+
+loadPrice(); loadProfiles();
+setInterval(loadPrice, 10000);
+setInterval(loadProfiles, 5000);
+</script>
+</body>
+</html>

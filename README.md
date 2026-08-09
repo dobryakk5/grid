@@ -1,63 +1,72 @@
-# Mini Grid Bot
+# Mini Grid Bot v0.2
 
-Minimal spot grid bot built with **FastAPI + PostgreSQL + a separate Python worker + Bybit Demo Trading**.
+Простой **Spot Grid Bot**: FastAPI + PostgreSQL + отдельный worker + Bybit Demo + web-интерфейс.
 
-This is an educational MVP, not production trading infrastructure. Start only on Bybit Demo. The API has no authentication and is bound to `127.0.0.1` by Docker Compose.
+> Пока использовать только Bybit Demo. Это MVP, а не production trading infrastructure.
 
-## How the grid works
+## Что изменилось в v0.2
 
-The bot does not short and does not need BTC to seed the grid.
+- несколько независимых **grid-профилей**;
+- диапазон задаётся абсолютными ценами;
+- шаг задаётся в USDT, а не в процентах;
+- web-интерфейс на `/`;
+- создание и редактирование профилей;
+- Start / Stop каждого профиля отдельно;
+- просмотр активных заявок и истории BUY / SELL по каждому профилю.
 
-Example: BTC = 100,000 USDT, step = 0.5%, levels = 3.
-
-It seeds BUY orders roughly at:
-
-- 99,500
-- 99,000
-- 98,500
-
-When a BUY fills, the bot creates a SELL one grid step above that BUY. When that SELL fills, it creates a BUY one grid step below. This repeats while the bot is enabled.
-
-A small configurable quantity buffer (`GRID_FEE_BUFFER_PCT`, default 0.2%) is applied when turning a filled BUY into a SELL so the bot does not try to sell more base asset than is available after fees.
-
-## Architecture
+## Пример профиля
 
 ```text
-                 PostgreSQL
-                    ^   ^
-                    |   |
-FastAPI <-----------+   +---------- Grid worker
-  :8000                               |
-                                      |
-                                      v
-                                 Bybit V5 API
+Название:       BTC 62–67k
+Пара:           BTCUSDT
+Нижняя цена:    62000
+Верхняя цена:   67000
+Шаг:            1000 USDT
+На один BUY:    25 USDT
 ```
 
-FastAPI only changes configuration and exposes status. The worker is the only process that manages the grid.
-
-## 1. Create Bybit Demo API keys
-
-Use **Demo Trading**, not Testnet Demo:
-
-1. Sign in to the normal Bybit account.
-2. Switch to **Demo Trading**.
-3. In the Demo account, create an API key with Spot trading permission.
-4. Copy the key and secret into `.env`.
-
-Bybit Demo REST endpoint used by this repo:
+Ценовые линии:
 
 ```text
-https://api-demo.bybit.com
+62000  63000  64000  65000  66000  67000
 ```
 
-## 2. Configure
+Торговые ячейки:
+
+```text
+BUY 62000 -> SELL 63000 -> BUY 62000 -> ...
+BUY 63000 -> SELL 64000 -> BUY 63000 -> ...
+BUY 64000 -> SELL 65000 -> BUY 64000 -> ...
+BUY 65000 -> SELL 66000 -> BUY 65000 -> ...
+BUY 66000 -> SELL 67000 -> BUY 66000 -> ...
+```
+
+Верхняя граница `67000` не является BUY-уровнем: она нужна как последний SELL-уровень.
+
+При старте Spot-профиль выставляет только пассивные BUY ниже текущей рыночной цены. Он не шортит и не предполагает наличие BTC для первоначальных SELL.
+
+## Архитектура
+
+```text
+Browser
+   |
+   v
+FastAPI :8000  <------> PostgreSQL
+   ^                         ^
+   |                         |
+   +---------------- Grid worker
+                            |
+                            v
+                       Bybit Demo API
+```
+
+## Запуск
 
 ```bash
 cp .env.example .env
-nano .env
 ```
 
-Required:
+В `.env`:
 
 ```env
 BYBIT_API_KEY=...
@@ -65,16 +74,16 @@ BYBIT_API_SECRET=...
 BYBIT_BASE_URL=https://api-demo.bybit.com
 ```
 
-## 3. Start
+Затем:
 
 ```bash
 docker compose up -d --build
 ```
 
-Check:
+Открыть:
 
-```bash
-curl http://127.0.0.1:8000/health
+```text
+http://127.0.0.1:8000/
 ```
 
 Swagger:
@@ -83,104 +92,59 @@ Swagger:
 http://127.0.0.1:8000/docs
 ```
 
-## 4. Add demo USDT
-
-The Bybit Demo API supports requesting demo funds. This repo wraps that endpoint:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/demo/funds \
-  -H 'Content-Type: application/json' \
-  -d '{"usdt":"10000"}'
-```
-
-Check balance:
-
-```bash
-curl http://127.0.0.1:8000/api/balance
-```
-
-## 5. Start the grid
-
-For a first test, use small amounts:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/bot/start \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "symbol":"BTCUSDT",
-    "levels":3,
-    "step_pct":"0.005",
-    "quote_per_level":"25"
-  }'
-```
-
-Meaning:
-
-- `levels=3` — three BUY levels below the current market;
-- `step_pct=0.005` — 0.5% spacing;
-- `quote_per_level=25` — approximately 25 USDT per initial BUY.
-
-## 6. Watch it
+Логи worker:
 
 ```bash
 docker compose logs -f worker
 ```
 
-Status:
+## Важно при обновлении с v0.1
+
+Схема БД изменилась. В этом мини-репо Alembic ещё не добавлен, поэтому для старой тестовой БД проще пересоздать volume:
 
 ```bash
-curl http://127.0.0.1:8000/api/bot/status
+docker compose down -v
+docker compose up -d --build
 ```
 
-Price:
+Это удалит локальные тестовые данные PostgreSQL.
 
-```bash
-curl http://127.0.0.1:8000/api/price/BTCUSDT
-```
-
-## 7. Stop
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/bot/stop
-```
-
-On the next worker tick the bot cancels its tracked open orders.
-
-## Tables
-
-`bot_state` stores the singleton bot configuration.
-
-`grid_orders` stores every exchange order and the replacement chain:
+## API
 
 ```text
-BUY 99,500 -> FILLED
-       |
-       +-> SELL 99,997.5 -> FILLED
-                  |
-                  +-> BUY ~99,500 -> ...
+GET  /api/profiles
+POST /api/profiles
+PUT  /api/profiles/{id}
+POST /api/profiles/{id}/start
+POST /api/profiles/{id}/stop
+GET  /api/profiles/{id}/orders
+
+GET  /api/price/BTCUSDT
+GET  /api/balance
+POST /api/demo/funds
 ```
 
-## Important MVP limitations
+## Что происходит при Stop
 
-Before using real money, add at least:
+`Stop` выставляет `enabled=false`. Worker на следующем цикле отменяет отслеживаемые активные заявки этого профиля. История остаётся в PostgreSQL.
 
-- authentication for FastAPI;
-- API key encryption / secret manager;
-- private WebSocket order stream instead of polling;
-- reconciliation against all exchange open orders after restarts;
-- deterministic retry/idempotency handling for order placement;
-- daily loss and total-exposure limits;
-- a hard kill switch;
-- fee accounting from execution history;
-- alerting;
-- migrations (Alembic);
-- integration tests against Demo.
+Редактирование профиля разрешено только после остановки и отмены его открытых заявок.
 
-The largest technical gap is crash consistency: if Bybit accepts an order and the process dies before PostgreSQL records it, this MVP can temporarily have an exchange order unknown to the database. Do not move to production before implementing reconciliation/idempotency.
+## Ограничения MVP
 
-## Local tests
+Перед реальными деньгами нужны как минимум:
 
-Without Docker:
+- reconciliation всех открытых ордеров Bybit после рестарта;
+- private WebSocket для order/execution stream вместо polling;
+- идемпотентное восстановление после ситуации «Bybit принял ордер, PostgreSQL ещё не записал»;
+- хранение фактических комиссий и расчёт net PnL;
+- лимиты общего капитала и дневного убытка;
+- authentication web/API;
+- шифрование API credentials;
+- Alembic migrations;
+- алерты и kill switch.
+
+## Тесты
 
 ```bash
 python -m venv .venv

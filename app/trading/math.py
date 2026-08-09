@@ -8,15 +8,25 @@ def floor_to_step(value: Decimal, step: Decimal) -> Decimal:
     return units * step
 
 
-def buy_level(anchor: Decimal, step_pct: Decimal, level: int) -> Decimal:
-    if level < 1:
-        raise ValueError("level must be >= 1")
-    return anchor * (Decimal("1") - step_pct * level)
+def grid_buy_levels(lower: Decimal, upper: Decimal, step: Decimal) -> list[Decimal]:
+    """Return BUY levels. The upper boundary is reserved as the final SELL level."""
+    if lower <= 0 or upper <= 0:
+        raise ValueError("grid prices must be positive")
+    if upper <= lower:
+        raise ValueError("upper_price must be greater than lower_price")
+    if step <= 0:
+        raise ValueError("step_price must be positive")
+
+    levels: list[Decimal] = []
+    price = lower
+    while price + step <= upper:
+        levels.append(price)
+        price += step
+    if not levels:
+        raise ValueError("range must contain at least one complete grid step")
+    return levels
 
 
-def one_step_up(price: Decimal, step_pct: Decimal) -> Decimal:
-    return price * (Decimal("1") + step_pct)
-
-
-def one_step_down(price: Decimal, step_pct: Decimal) -> Decimal:
-    return price / (Decimal("1") + step_pct)
+def grid_lines(lower: Decimal, upper: Decimal, step: Decimal) -> list[Decimal]:
+    buys = grid_buy_levels(lower, upper, step)
+    return buys + [buys[-1] + step]

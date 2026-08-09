@@ -2,8 +2,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import router
+from app.api.routes import router as api_router
 from app.db.init import init_db
+from app.web.routes import router as web_router
 
 
 @asynccontextmanager
@@ -12,8 +13,9 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Mini Grid Bot", version="0.1.0", lifespan=lifespan)
-app.include_router(router)
+app = FastAPI(title="Mini Grid Bot", version="0.2.0", lifespan=lifespan)
+app.include_router(web_router)
+app.include_router(api_router)
 
 
 @app.get("/health")

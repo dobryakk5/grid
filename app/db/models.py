@@ -1,38 +1,45 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class BotState(Base):
-    __tablename__ = "bot_state"
+class GridProfile(Base):
+    __tablename__ = "grid_profiles"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
-    levels: Mapped[int] = mapped_column(Integer, nullable=False)
-    step_pct: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, default="BTCUSDT", index=True)
+    lower_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    upper_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    step_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     quote_per_level: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
-    anchor_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    orders: Mapped[list["GridOrder"]] = relationship(back_populates="profile")
 
 
 class GridOrder(Base):
     __tablename__ = "grid_orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("grid_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     exchange_order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     order_link_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
+    grid_buy_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False, index=True)
     price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     qty: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -44,3 +51,5 @@ class GridOrder(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    profile: Mapped[GridProfile] = relationship(back_populates="orders")

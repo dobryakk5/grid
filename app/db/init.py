@@ -1,7 +1,8 @@
+from decimal import Decimal
+
 from sqlalchemy import select
 
-from app.core.config import settings
-from app.db.models import Base, BotState
+from app.db.models import Base, GridProfile
 from app.db.session import SessionLocal, engine
 
 
@@ -9,17 +10,19 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # Handy first profile for a fresh demo database.
     async with SessionLocal() as session:
-        state = await session.get(BotState, 1)
-        if state is None:
+        existing = await session.scalar(select(GridProfile.id).limit(1))
+        if existing is None:
             session.add(
-                BotState(
-                    id=1,
+                GridProfile(
+                    name="BTC 62–67k",
                     enabled=False,
-                    symbol=settings.grid_symbol.upper(),
-                    levels=settings.grid_levels,
-                    step_pct=settings.grid_step_pct,
-                    quote_per_level=settings.grid_quote_per_level,
+                    symbol="BTCUSDT",
+                    lower_price=Decimal("62000"),
+                    upper_price=Decimal("67000"),
+                    step_price=Decimal("1000"),
+                    quote_per_level=Decimal("25"),
                 )
             )
             await session.commit()
