@@ -41,12 +41,38 @@ class GridEngine:
                 if await self.apply_price_guards(session, profile):
                     continue
                 await self.refresh_open_orders(session, profile)
+                await self.enforce_single_open_buy(session, profile)
                 if profile.strategy == "dca":
                     await self.seed_dca_orders(session, profile)
                 else:
                     await self.seed_missing_buy_orders(session, profile)
             except Exception:
                 logger.exception("Profile %s (%s) tick failed", profile.id, profile.name)
+
+    async def enforce_single_open_buy(
+        self, session: AsyncSession, profile: GridProfile
+    ) -> None:
+        result = await session.execute(
+            select(GridOrder).where(
+                GridOrder.profile_id == profile.id,
+                GridOrder.side == "Buy",
+                GridOrder.status.in_(OPEN_STATUSES),
+            )
+        )
+        buys = list(result.scalars())
+        if len(buys) <= 1:
+            return
+        # Keep only the closest/highest pending BUY. Older versions seeded every
+        # lower level at once; this collapses such profiles to sequential mode.
+        keep = max(buys, key=lambda item: Decimal(item.price))
+        for order in buys:
+            if order.id == keep.id:
+                continue
+            await self.exchange.cancel_order(
+                order_id=order.exchange_order_id, symbol=order.symbol
+            )
+            order.status = "CancelledSuperseded"
+        await session.commit()
 
     async def apply_price_guards(self, session: AsyncSession, profile: GridProfile) -> bool:
         if profile.stop_loss is None and profile.take_profit is None:
@@ -150,6 +176,7 @@ class GridEngine:
             )
             orders.append(initial)
             await session.commit()
+            return
 
         for buy_order in orders:
             if (
@@ -183,13 +210,29 @@ class GridEngine:
         }
         for buy_price, quote_amount in zip(buy_prices, allocations):
             previous = existing.get(buy_price)
-            if previous is not None and previous.status not in {
-                "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
-            }:
+            if previous is None:
+                await self._seed_buy_quote(
+                    session, profile, buy_price, quote_amount, info,
+                    order_role="dca_grid",
+                )
+                return
+            if previous.status in OPEN_STATUSES:
+                return
+            if previous.status == "CancelledByUser":
+                if buy_price < market_price:
+                    return
                 continue
-            await self._seed_buy_quote(
-                session, profile, buy_price, quote_amount, info, order_role="dca_grid"
-            )
+            if previous.status in {
+                "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled",
+                "CancelledSuperseded",
+            }:
+                if buy_price < market_price:
+                    await self._seed_buy_quote(
+                        session, profile, buy_price, quote_amount, info,
+                        order_role="dca_grid",
+                    )
+                    return
+                continue
 
     async def _create_dca_sell_ladder(
         self, session: AsyncSession, profile: GridProfile, order: GridOrder,
@@ -406,17 +449,32 @@ class GridEngine:
         for order in result.scalars():
             latest_by_cell[Decimal(order.grid_buy_price)] = order
 
-        for buy_price, sell_price in cells:
+        retry_statuses = {
+            "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled",
+            "CancelledSuperseded",
+        }
+        for buy_price, sell_price in reversed(cells):
             latest = latest_by_cell.get(buy_price)
 
             if latest is None:
                 if profile.strategy == "classic" and sell_price > market_price:
                     await self._seed_market_buy(session, profile, buy_price, market_price, info)
-                elif buy_price < market_price:
+                    return
+                if buy_price < market_price:
                     await self._seed_buy(session, profile, buy_price, info)
+                    return
                 continue
 
             if latest.status in OPEN_STATUSES:
+                if latest.side == "Buy":
+                    return
+                continue
+
+            if latest.status == "CancelledByUser":
+                # Do not bypass a manually cancelled rung while price is still
+                # above it. Once price has crossed below, the next rung may arm.
+                if buy_price < market_price:
+                    return
                 continue
 
             # A filled order should normally already have its replacement. If a
@@ -424,12 +482,13 @@ class GridEngine:
             # second independent cycle.
             if latest.status == "Filled" and not latest.replacement_created:
                 await self._create_replacement(session, profile, latest, info)
-                continue
+                return
 
-            if latest.status in {"Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"}:
+            if latest.status in retry_statuses:
                 if latest.side == "Buy":
                     if buy_price < market_price:
                         await self._seed_buy(session, profile, buy_price, info)
+                        return
                 else:
                     # A cancelled SELL means this cell may still own BTC from the
                     # preceding BUY. Re-create the SELL instead of buying more.
@@ -445,6 +504,7 @@ class GridEngine:
                         replacement_for=latest.exchange_order_id,
                     )
                     await session.commit()
+                    return
                 continue
 
     @staticmethod

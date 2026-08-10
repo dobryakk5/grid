@@ -357,6 +357,31 @@ async def profile_orders(profile_id: int, limit: int = 100) -> list[dict]:
         ]
 
 
+@router.post("/profiles/{profile_id}/orders/{order_id}/cancel")
+async def cancel_profile_order(profile_id: int, order_id: int) -> dict:
+    async with SessionLocal() as session:
+        order = await session.get(GridOrder, order_id)
+        if order is None or order.profile_id != profile_id:
+            raise HTTPException(status_code=404, detail="order not found")
+        if order.status not in {"New", "Untriggered", "Created"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Можно отменить только активную неисполненную заявку",
+            )
+        exchange = BybitClient()
+        try:
+            await exchange.cancel_order(
+                order_id=order.exchange_order_id, symbol=order.symbol
+            )
+        except BybitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            await exchange.close()
+        order.status = "CancelledByUser"
+        await session.commit()
+        return {"ok": True, "status": order.status}
+
+
 @router.get("/profiles/{profile_id}/pnl")
 async def profile_pnl(profile_id: int) -> dict:
     async with SessionLocal() as session:
