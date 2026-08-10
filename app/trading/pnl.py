@@ -65,7 +65,8 @@ def summarize_executions(
 
 
 def calculate_cycle_pnl(
-    buy: OrderExecutionSummary, sell: OrderExecutionSummary
+    buy: OrderExecutionSummary, sell: OrderExecutionSummary, *,
+    prorate_buy_fees: bool = False,
 ) -> CyclePnl | None:
     if buy.qty <= 0 or sell.qty <= 0:
         return None
@@ -78,10 +79,14 @@ def calculate_cycle_pnl(
 
     turnover = realised_buy_value + sell.value
     gross_profit = sell.value - realised_buy_value
-    fees_quote = buy.fees_quote + sell.fees_quote
+    fee_ratio = realised_ratio if prorate_buy_fees else Decimal("1")
+    fees_quote = buy.fees_quote * fee_ratio + sell.fees_quote
     net_profit = gross_profit - fees_quote
 
-    unknown = dict(buy.unconverted_fees)
+    unknown = {
+        currency: amount * fee_ratio
+        for currency, amount in buy.unconverted_fees.items()
+    }
     for currency, amount in sell.unconverted_fees.items():
         unknown[currency] = unknown.get(currency, Decimal("0")) + amount
 
@@ -141,6 +146,33 @@ def grid_cell_statistics(
         for level in levels
     }
 
+    # DCA lots may start at the live market price and can exit across several
+    # sell levels. Represent each lot by its buy anchor and the profile ceiling.
+    for order in orders:
+        if order.side != "Buy" or getattr(order, "order_role", "grid") not in {
+            "dca_initial_buy", "dca_grid"
+        }:
+            continue
+        level = Decimal(order.grid_buy_price)
+        if level not in cells:
+            levels.append(level)
+            cells[level] = {
+                "buy_price": level,
+                "sell_price": Decimal(profile.upper_price),
+                "cycles": 0,
+                "turnover": Decimal("0"),
+                "gross_profit": Decimal("0"),
+                "fees_quote": Decimal("0"),
+                "net_profit": Decimal("0"),
+                "residual_qty": Decimal("0"),
+                "unconverted_fees": {},
+                "last_completed_at_ms": None,
+                "state": "WAITING",
+            }
+        else:
+            cells[level]["sell_price"] = Decimal(profile.upper_price)
+    levels.sort()
+
     latest_by_cell = {}
     for order in orders:
         latest_by_cell[Decimal(order.grid_buy_price)] = order
@@ -156,7 +188,11 @@ def grid_cell_statistics(
             cells[level]["state"] = latest.status.upper()
 
     for sell in orders:
-        if sell.side != "Sell" or sell.status != "Filled" or not sell.executions:
+        if (
+            sell.side != "Sell"
+            or sell.status != "Filled"
+            or not sell.executions
+        ):
             continue
 
         parent_id = sell.replacement_for
@@ -185,7 +221,11 @@ def grid_cell_statistics(
         sell_summary = summarize_executions(
             sell.executions, base_coin=base_coin, quote_coin=quote_coin
         )
-        cycle = calculate_cycle_pnl(buy_summary, sell_summary)
+        cycle = calculate_cycle_pnl(
+            buy_summary,
+            sell_summary,
+            prorate_buy_fees=getattr(sell, "order_role", "grid") == "dca_sell",
+        )
         if cycle is None:
             continue
 

@@ -141,7 +141,8 @@ class BybitClient:
         )
 
     async def place_market_order(
-        self, *, symbol: str, side: str, qty: Decimal, order_link_id: str
+        self, *, symbol: str, side: str, qty: Decimal, order_link_id: str,
+        market_unit: str = "baseCoin",
     ) -> dict:
         return await self.private_post(
             "/v5/order/create",
@@ -151,7 +152,7 @@ class BybitClient:
                 "side": side,
                 "orderType": "Market",
                 "qty": decimal_str(qty),
-                "marketUnit": "baseCoin",
+                "marketUnit": market_unit,
                 "orderLinkId": order_link_id,
             },
         )

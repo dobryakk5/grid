@@ -3,8 +3,8 @@ from decimal import Decimal
 import pytest
 
 from app.trading.math import (
-    floor_to_step, grid_buy_levels, grid_lines, strategy_grid_cells,
-    strategy_grid_lines,
+    dca_initial_percent, floor_to_step, grid_buy_levels, grid_lines,
+    ladder_allocations, strategy_grid_cells, strategy_grid_lines,
 )
 
 
@@ -40,3 +40,18 @@ def test_geometric_grid_uses_equal_percentage_until_upper_bound():
         Decimal("100"), Decimal("121"), Decimal("1"),
         mode="geometric", step_percent=Decimal("10"),
     ) == [(Decimal("100"), Decimal("110")), (Decimal("110"), Decimal("121"))]
+
+
+def test_dca_position_and_ladder_allocations():
+    assert dca_initial_percent(
+        Decimal("66"), Decimal("62"), Decimal("67"), Decimal("20")
+    ) == Decimal("20")
+    assert dca_initial_percent(
+        Decimal("63"), Decimal("62"), Decimal("67"), Decimal("20")
+    ) == Decimal("80")
+    linear = ladder_allocations(Decimal("60"), 3, mode="linear")
+    assert linear == [Decimal("10"), Decimal("20"), Decimal("30")]
+    geometric = ladder_allocations(
+        Decimal("70"), 3, mode="geometric", multiplier=Decimal("2")
+    )
+    assert geometric == [Decimal("10"), Decimal("20"), Decimal("40")]

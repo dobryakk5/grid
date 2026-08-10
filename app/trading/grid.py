@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import GridExecution, GridOrder, GridProfile
 from app.exchanges.bybit import BybitClient, InstrumentInfo
-from app.trading.math import floor_to_step, strategy_grid_cells
+from app.trading.math import (
+    dca_initial_percent,
+    floor_to_step,
+    ladder_allocations,
+    strategy_grid_cells,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,10 @@ class GridEngine:
                 if await self.apply_price_guards(session, profile):
                     continue
                 await self.refresh_open_orders(session, profile)
-                await self.seed_missing_buy_orders(session, profile)
+                if profile.strategy == "dca":
+                    await self.seed_dca_orders(session, profile)
+                else:
+                    await self.seed_missing_buy_orders(session, profile)
             except Exception:
                 logger.exception("Profile %s (%s) tick failed", profile.id, profile.name)
 
@@ -90,8 +98,206 @@ class GridEngine:
                 await self.sync_order_executions(session, order)
 
             if order.status == "Filled" and not order.replacement_created:
-                await self._create_replacement(session, profile, order, info)
+                if profile.strategy == "dca" and order.order_role in {"dca_initial_buy", "dca_grid"}:
+                    await self._create_dca_sell_ladder(session, profile, order, info)
+                elif order.order_role == "dca_sell":
+                    await self._create_dca_rebuy_if_ladder_complete(
+                        session, profile, order, info
+                    )
+                else:
+                    await self._create_replacement(session, profile, order, info)
 
+        await session.commit()
+
+    async def seed_dca_orders(self, session: AsyncSession, profile: GridProfile) -> None:
+        info = await self.exchange.instrument_info(profile.symbol)
+        market_price = await self.exchange.last_price(profile.symbol)
+        lower = Decimal(profile.lower_price)
+        upper = Decimal(profile.upper_price)
+        budget = Decimal(profile.max_investment or 0)
+        if budget <= 0:
+            raise ValueError("DCA Grid requires max_investment")
+
+        result = await session.execute(
+            select(GridOrder).where(GridOrder.profile_id == profile.id).order_by(GridOrder.id)
+        )
+        orders = list(result.scalars())
+        initial = next(
+            (o for o in reversed(orders) if o.order_role == "dca_initial_buy"), None
+        )
+        if initial is not None and initial.status in {
+            "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
+        }:
+            initial = None
+        if initial is None and not lower < market_price < upper:
+            raise ValueError("DCA Grid can start only while price is inside its range")
+        anchor_price = Decimal(initial.price) if initial is not None else market_price
+        initial_pct = dca_initial_percent(
+            anchor_price, lower, upper, Decimal(profile.initial_buy_percent)
+        )
+        initial_quote = budget * initial_pct / Decimal("100")
+
+        if initial is None:
+            qty = self.qty_from_quote(initial_quote, market_price, info)
+            initial = await self._place_market_and_store(
+                session=session,
+                profile=profile,
+                qty=qty,
+                quote_amount=initial_quote,
+                market_price=market_price,
+                grid_buy_price=market_price,
+                order_role="dca_initial_buy",
+            )
+            orders.append(initial)
+            await session.commit()
+
+        for buy_order in orders:
+            if (
+                buy_order.order_role in {"dca_initial_buy", "dca_grid"}
+                and buy_order.status == "Filled"
+            ):
+                await self._create_dca_sell_ladder(session, profile, buy_order, info)
+
+        buy_prices = [
+            buy for buy, _ in reversed(self.profile_cells(profile, info))
+            if buy < anchor_price
+        ]
+        while buy_prices:
+            allocations = ladder_allocations(
+                budget - initial_quote,
+                len(buy_prices),
+                mode=profile.buy_ladder_mode,
+                multiplier=Decimal(profile.ladder_multiplier),
+            )
+            try:
+                for buy_price, quote_amount in zip(buy_prices, allocations):
+                    self.qty_from_quote(quote_amount, buy_price, info)
+                break
+            except ValueError:
+                buy_prices.pop()
+        else:
+            allocations = []
+        existing = {
+            Decimal(order.grid_buy_price): order for order in orders
+            if order.order_role == "dca_grid"
+        }
+        for buy_price, quote_amount in zip(buy_prices, allocations):
+            previous = existing.get(buy_price)
+            if previous is not None and previous.status not in {
+                "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
+            }:
+                continue
+            await self._seed_buy_quote(
+                session, profile, buy_price, quote_amount, info, order_role="dca_grid"
+            )
+
+    async def _create_dca_sell_ladder(
+        self, session: AsyncSession, profile: GridProfile, order: GridOrder,
+        info: InstrumentInfo,
+    ) -> None:
+        filled_qty = Decimal(order.filled_qty or order.qty)
+        anchor = Decimal(order.avg_price or order.price)
+        sell_prices = [
+            sell for _, sell in self.profile_cells(profile, info) if sell > anchor
+        ]
+        if not sell_prices:
+            raise ValueError("DCA Grid has no SELL levels above initial purchase")
+        available_qty = floor_to_step(
+            filled_qty * (Decimal("1") - settings.grid_fee_buffer_pct),
+            info.base_precision,
+        )
+        while sell_prices:
+            allocations = ladder_allocations(
+                available_qty,
+                len(sell_prices),
+                mode=profile.sell_ladder_mode,
+                multiplier=Decimal(profile.ladder_multiplier),
+            )
+            planned = []
+            placed_qty = Decimal("0")
+            try:
+                for index, (sell_price, raw_qty) in enumerate(zip(sell_prices, allocations)):
+                    qty = floor_to_step(raw_qty, info.base_precision)
+                    if index == len(sell_prices) - 1:
+                        qty = floor_to_step(available_qty - placed_qty, info.base_precision)
+                    self.validate_order(sell_price, qty, info)
+                    planned.append((sell_price, qty))
+                    placed_qty += qty
+                break
+            except ValueError:
+                sell_prices.pop()
+        else:
+            raise ValueError("DCA sell inventory is below the exchange minimum order amount")
+
+        result = await session.execute(
+            select(GridOrder).where(
+                GridOrder.replacement_for == order.exchange_order_id,
+                GridOrder.order_role == "dca_sell",
+            ).order_by(GridOrder.id)
+        )
+        latest_by_price = {Decimal(child.price): child for child in result.scalars()}
+        for sell_price, qty in planned:
+            existing = latest_by_price.get(sell_price)
+            if existing is not None and existing.status not in {
+                "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
+            }:
+                continue
+            await self._place_and_store(
+                session=session,
+                profile=profile,
+                side="Sell",
+                price=sell_price,
+                grid_buy_price=Decimal(order.grid_buy_price),
+                qty=qty,
+                replacement_for=order.exchange_order_id,
+                order_role="dca_sell",
+            )
+            await session.commit()
+        order.replacement_created = True
+        await session.commit()
+
+    async def _create_dca_rebuy_if_ladder_complete(
+        self, session: AsyncSession, profile: GridProfile, order: GridOrder,
+        info: InstrumentInfo,
+    ) -> None:
+        if not order.replacement_for:
+            order.replacement_created = True
+            return
+        result = await session.execute(
+            select(GridOrder).where(
+                GridOrder.replacement_for == order.replacement_for,
+                GridOrder.order_role == "dca_sell",
+            ).order_by(GridOrder.id)
+        )
+        siblings = list(result.scalars())
+        if not siblings or any(sibling.status != "Filled" for sibling in siblings):
+            return
+        sibling_ids = [sibling.exchange_order_id for sibling in siblings]
+        existing_rebuy = await session.scalar(
+            select(func.count(GridOrder.id)).where(
+                GridOrder.replacement_for.in_(sibling_ids),
+                GridOrder.side == "Buy",
+            )
+        )
+        if not existing_rebuy:
+            qty = floor_to_step(
+                sum((Decimal(s.filled_qty or s.qty) for s in siblings), Decimal("0")),
+                info.base_precision,
+            )
+            buy_price = floor_to_step(Decimal(order.grid_buy_price), info.tick_size)
+            self.validate_order(buy_price, qty, info)
+            await self._place_and_store(
+                session=session,
+                profile=profile,
+                side="Buy",
+                price=buy_price,
+                grid_buy_price=buy_price,
+                qty=qty,
+                replacement_for=order.exchange_order_id,
+                order_role="dca_grid",
+            )
+        for sibling in siblings:
+            sibling.replacement_created = True
         await session.commit()
 
 
@@ -307,6 +513,52 @@ class GridEngine:
             buy_price,
         )
 
+    async def _seed_buy_quote(
+        self, session: AsyncSession, profile: GridProfile, buy_price: Decimal,
+        quote_amount: Decimal, info: InstrumentInfo, *, order_role: str,
+    ) -> None:
+        qty = self.qty_from_quote(quote_amount, buy_price, info)
+        await self._place_and_store(
+            session=session,
+            profile=profile,
+            side="Buy",
+            price=buy_price,
+            grid_buy_price=buy_price,
+            qty=qty,
+            replacement_for=None,
+            order_role=order_role,
+        )
+        await session.commit()
+
+    async def _place_market_and_store(
+        self, *, session: AsyncSession, profile: GridProfile, qty: Decimal,
+        quote_amount: Decimal, market_price: Decimal, grid_buy_price: Decimal,
+        order_role: str,
+    ) -> GridOrder:
+        link_id = f"g{profile.id}-{uuid.uuid4().hex[:24]}"
+        response = await self.exchange.place_market_order(
+            symbol=profile.symbol,
+            side="Buy",
+            qty=quote_amount,
+            order_link_id=link_id,
+            market_unit="quoteCoin",
+        )
+        row = GridOrder(
+            profile_id=profile.id,
+            exchange_order_id=response["result"]["orderId"],
+            order_link_id=link_id,
+            symbol=profile.symbol,
+            side="Buy",
+            grid_buy_price=grid_buy_price,
+            price=market_price,
+            qty=qty,
+            status="New",
+            order_role=order_role,
+        )
+        session.add(row)
+        await session.flush()
+        return row
+
     async def _create_replacement(
         self,
         session: AsyncSession,
@@ -382,6 +634,7 @@ class GridEngine:
         grid_buy_price: Decimal,
         qty: Decimal,
         replacement_for: str | None,
+        order_role: str = "grid",
     ) -> GridOrder:
         link_id = f"g{profile.id}-{uuid.uuid4().hex[:24]}"
         response = await self.exchange.place_limit_order(
@@ -403,6 +656,7 @@ class GridEngine:
             qty=qty,
             status="New",
             replacement_for=replacement_for,
+            order_role=order_role,
         )
         session.add(row)
         await session.flush()

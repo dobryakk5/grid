@@ -10,3 +10,8 @@ templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[2] / 
 @router.get("/")
 async def dashboard(request: Request):
     return templates.TemplateResponse(request=request, name="dashboard.html", context={})
+
+
+@router.get("/profiles/new")
+async def profile_editor(request: Request):
+    return templates.TemplateResponse(request=request, name="profile_form.html", context={})

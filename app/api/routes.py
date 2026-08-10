@@ -23,12 +23,16 @@ class ProfilePayload(BaseModel):
     upper_price: Decimal = Field(gt=0)
     step_price: Decimal = Field(gt=0)
     quote_per_level: Decimal = Field(gt=0)
-    strategy: Literal["accumulation", "classic"] = "accumulation"
+    strategy: Literal["accumulation", "classic", "dca"] = "accumulation"
     grid_mode: Literal["arithmetic", "geometric"] = "arithmetic"
     step_percent: Decimal | None = Field(default=None, gt=0, le=100)
     max_investment: Decimal | None = Field(default=None, gt=0)
     stop_loss: Decimal | None = Field(default=None, gt=0)
     take_profit: Decimal | None = Field(default=None, gt=0)
+    initial_buy_percent: Decimal = Field(default=Decimal("20"), gt=0, lt=50)
+    buy_ladder_mode: Literal["linear", "geometric"] = "linear"
+    sell_ladder_mode: Literal["linear", "geometric"] = "linear"
+    ladder_multiplier: Decimal = Field(default=Decimal("1.5"), gt=1, le=10)
 
     @model_validator(mode="after")
     def validate_range(self):
@@ -37,7 +41,9 @@ class ProfilePayload(BaseModel):
             mode=self.grid_mode, step_percent=self.step_percent,
         )
         required = self.quote_per_level * len(cells)
-        if self.max_investment is not None and self.max_investment < required:
+        if self.strategy == "dca" and self.max_investment is None:
+            raise ValueError("max_investment is required for DCA Grid")
+        if self.strategy != "dca" and self.max_investment is not None and self.max_investment < required:
             raise ValueError(f"max_investment must be at least {required} USDT")
         if self.stop_loss is not None and self.stop_loss >= self.lower_price:
             raise ValueError("stop_loss must be below lower_price")
@@ -66,6 +72,10 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
         "max_investment": str(profile.max_investment) if profile.max_investment is not None else None,
         "stop_loss": str(profile.stop_loss) if profile.stop_loss is not None else None,
         "take_profit": str(profile.take_profit) if profile.take_profit is not None else None,
+        "initial_buy_percent": str(profile.initial_buy_percent),
+        "buy_ladder_mode": profile.buy_ladder_mode,
+        "sell_ladder_mode": profile.sell_ladder_mode,
+        "ladder_multiplier": str(profile.ladder_multiplier),
         "lines": [str(x) for x in strategy_grid_lines(
             Decimal(profile.lower_price), Decimal(profile.upper_price), Decimal(profile.step_price),
             mode=profile.grid_mode,
@@ -186,6 +196,10 @@ async def create_profile(payload: ProfilePayload) -> dict:
             max_investment=payload.max_investment,
             stop_loss=payload.stop_loss,
             take_profit=payload.take_profit,
+            initial_buy_percent=payload.initial_buy_percent,
+            buy_ladder_mode=payload.buy_ladder_mode,
+            sell_ladder_mode=payload.sell_ladder_mode,
+            ladder_multiplier=payload.ladder_multiplier,
         )
         session.add(profile)
         await session.commit()
@@ -218,7 +232,14 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         )
         latest_by_cell = {}
         for order in history.scalars():
-            latest_by_cell[Decimal(order.grid_buy_price)] = order
+            latest_by_cell[
+                (
+                    Decimal(order.grid_buy_price),
+                    order.side,
+                    Decimal(order.price),
+                    order.order_role,
+                )
+            ] = order
         inventory_cells = [
             order for order in latest_by_cell.values()
             if (order.side == "Sell" and order.status != "Filled")
@@ -242,6 +263,10 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         profile.max_investment = payload.max_investment
         profile.stop_loss = payload.stop_loss
         profile.take_profit = payload.take_profit
+        profile.initial_buy_percent = payload.initial_buy_percent
+        profile.buy_ladder_mode = payload.buy_ladder_mode
+        profile.sell_ladder_mode = payload.sell_ladder_mode
+        profile.ladder_multiplier = payload.ladder_multiplier
         await session.commit()
         return await profile_stats(session, profile)
 
@@ -266,6 +291,26 @@ async def start_profile(profile_id: int) -> dict:
         profile = await session.get(GridProfile, profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="profile not found")
+        if profile.strategy == "dca":
+            has_initial = await session.scalar(
+                select(func.count(GridOrder.id)).where(
+                    GridOrder.profile_id == profile.id,
+                    GridOrder.order_role == "dca_initial_buy",
+                )
+            )
+            if not has_initial:
+                price_client = BybitClient()
+                try:
+                    current = await price_client.last_price(profile.symbol)
+                except BybitError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                finally:
+                    await price_client.close()
+                if not Decimal(profile.lower_price) < current < Decimal(profile.upper_price):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="DCA Grid можно запустить только когда цена находится внутри диапазона",
+                    )
         profile.enabled = True
         await session.commit()
         return {"ok": True, "enabled": True}
@@ -303,6 +348,7 @@ async def profile_orders(profile_id: int, limit: int = 100) -> list[dict]:
                 "qty": str(order.qty),
                 "status": order.status,
                 "avg_price": str(order.avg_price) if order.avg_price else None,
+                "order_role": order.order_role,
                 "filled_qty": str(order.filled_qty) if order.filled_qty else None,
                 "created_at": order.created_at.isoformat() if order.created_at else None,
                 "updated_at": order.updated_at.isoformat() if order.updated_at else None,

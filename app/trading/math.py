@@ -74,3 +74,36 @@ def strategy_grid_cells(
         lower, upper, step, mode=mode, step_percent=step_percent
     )
     return list(zip(lines, lines[1:]))
+
+
+def ladder_allocations(
+    total: Decimal, count: int, *, mode: str, multiplier: Decimal = Decimal("1.5")
+) -> list[Decimal]:
+    """Split a total into increasingly large ladder portions."""
+    if count <= 0:
+        return []
+    if total <= 0:
+        raise ValueError("ladder total must be positive")
+    if mode == "linear":
+        weights = [Decimal(i) for i in range(1, count + 1)]
+    elif mode == "geometric":
+        if multiplier <= 1:
+            raise ValueError("geometric ladder multiplier must be greater than 1")
+        weights = [multiplier ** i for i in range(count)]
+    else:
+        raise ValueError("ladder mode must be linear or geometric")
+    weight_sum = sum(weights, Decimal("0"))
+    result = [total * weight / weight_sum for weight in weights]
+    # Preserve the exact total despite Decimal division tails.
+    result[-1] += total - sum(result, Decimal("0"))
+    return result
+
+
+def dca_initial_percent(
+    market_price: Decimal, lower: Decimal, upper: Decimal, above_mid_percent: Decimal
+) -> Decimal:
+    """Use a cautious share above the midpoint and its complement below it."""
+    if not Decimal("0") < above_mid_percent < Decimal("50"):
+        raise ValueError("initial_buy_percent must be between 0 and 50")
+    midpoint = (lower + upper) / Decimal("2")
+    return above_mid_percent if market_price > midpoint else Decimal("100") - above_mid_percent

@@ -43,3 +43,18 @@ def test_price_guards_must_be_outside_grid():
         payload(stop_loss=Decimal("63000"))
     with pytest.raises(ValidationError, match="take_profit"):
         payload(take_profit=Decimal("66000"))
+
+
+def test_dca_requires_budget_and_accepts_ladder_settings():
+    with pytest.raises(ValidationError, match="max_investment"):
+        payload(strategy="dca")
+    profile = payload(
+        strategy="dca",
+        max_investment=Decimal("125"),
+        initial_buy_percent=Decimal("20"),
+        buy_ladder_mode="geometric",
+        sell_ladder_mode="linear",
+        ladder_multiplier=Decimal("1.5"),
+    )
+    assert profile.strategy == "dca"
+    assert profile.buy_ladder_mode == "geometric"

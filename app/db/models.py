@@ -26,6 +26,14 @@ class GridProfile(Base):
     max_investment: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     take_profit: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
+    initial_buy_percent: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, default=Decimal("20")
+    )
+    buy_ladder_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="linear")
+    sell_ladder_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="linear")
+    ladder_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("1.5")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -53,6 +61,7 @@ class GridOrder(Base):
     replacement_for: Mapped[str | None] = mapped_column(String(64), nullable=True)
     filled_qty: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     avg_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
+    order_role: Mapped[str] = mapped_column(String(32), nullable=False, default="grid")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
