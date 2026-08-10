@@ -20,6 +20,12 @@ class GridProfile(Base):
     upper_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     step_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     quote_per_level: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(24), nullable=False, default="accumulation")
+    grid_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="arithmetic")
+    step_percent: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    max_investment: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
+    take_profit: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

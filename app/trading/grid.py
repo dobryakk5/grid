@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import GridExecution, GridOrder, GridProfile
 from app.exchanges.bybit import BybitClient, InstrumentInfo
-from app.trading.math import floor_to_step, grid_buy_levels
+from app.trading.math import floor_to_step, strategy_grid_cells
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +33,31 @@ class GridEngine:
                     await self.cancel_open_orders(session, profile.id)
                     continue
 
+                if await self.apply_price_guards(session, profile):
+                    continue
                 await self.refresh_open_orders(session, profile)
                 await self.seed_missing_buy_orders(session, profile)
             except Exception:
                 logger.exception("Profile %s (%s) tick failed", profile.id, profile.name)
+
+    async def apply_price_guards(self, session: AsyncSession, profile: GridProfile) -> bool:
+        if profile.stop_loss is None and profile.take_profit is None:
+            return False
+        market_price = await self.exchange.last_price(profile.symbol)
+        triggered = (
+            profile.stop_loss is not None
+            and market_price <= Decimal(profile.stop_loss)
+        ) or (
+            profile.take_profit is not None
+            and market_price >= Decimal(profile.take_profit)
+        )
+        if not triggered:
+            return False
+        profile.enabled = False
+        await session.commit()
+        await self.cancel_open_orders(session, profile.id)
+        logger.warning("Profile %s stopped by price guard at %s", profile.id, market_price)
+        return True
 
     async def refresh_open_orders(self, session: AsyncSession, profile: GridProfile) -> None:
         result = await session.execute(
@@ -168,14 +189,7 @@ class GridEngine:
         info = await self.exchange.instrument_info(profile.symbol)
         market_price = await self.exchange.last_price(profile.symbol)
 
-        buy_levels = [
-            floor_to_step(level, info.tick_size)
-            for level in grid_buy_levels(
-                Decimal(profile.lower_price),
-                Decimal(profile.upper_price),
-                Decimal(profile.step_price),
-            )
-        ]
+        cells = self.profile_cells(profile, info)
 
         result = await session.execute(
             select(GridOrder)
@@ -186,11 +200,13 @@ class GridEngine:
         for order in result.scalars():
             latest_by_cell[Decimal(order.grid_buy_price)] = order
 
-        for buy_price in buy_levels:
+        for buy_price, sell_price in cells:
             latest = latest_by_cell.get(buy_price)
 
             if latest is None:
-                if buy_price < market_price:
+                if profile.strategy == "classic" and sell_price > market_price:
+                    await self._seed_market_buy(session, profile, buy_price, market_price, info)
+                elif buy_price < market_price:
                     await self._seed_buy(session, profile, buy_price, info)
                 continue
 
@@ -211,9 +227,6 @@ class GridEngine:
                 else:
                     # A cancelled SELL means this cell may still own BTC from the
                     # preceding BUY. Re-create the SELL instead of buying more.
-                    sell_price = floor_to_step(
-                        buy_price + Decimal(profile.step_price), info.tick_size
-                    )
                     qty = floor_to_step(Decimal(latest.qty), info.base_precision)
                     self.validate_order(sell_price, qty, info)
                     await self._place_and_store(
@@ -227,6 +240,46 @@ class GridEngine:
                     )
                     await session.commit()
                 continue
+
+    @staticmethod
+    def profile_cells(profile: GridProfile, info: InstrumentInfo) -> list[tuple[Decimal, Decimal]]:
+        raw = strategy_grid_cells(
+            Decimal(profile.lower_price),
+            Decimal(profile.upper_price),
+            Decimal(profile.step_price),
+            mode=profile.grid_mode,
+            step_percent=Decimal(profile.step_percent) if profile.step_percent is not None else None,
+        )
+        cells = []
+        for buy, sell in raw:
+            rounded = (floor_to_step(buy, info.tick_size), floor_to_step(sell, info.tick_size))
+            if rounded[0] >= rounded[1]:
+                raise ValueError("grid interval is smaller than exchange tick size")
+            if not cells or cells[-1] != rounded:
+                cells.append(rounded)
+        return cells
+
+    async def _seed_market_buy(
+        self, session: AsyncSession, profile: GridProfile, grid_buy_price: Decimal,
+        market_price: Decimal, info: InstrumentInfo,
+    ) -> None:
+        qty = self.qty_from_quote(Decimal(profile.quote_per_level), market_price, info)
+        link_id = f"g{profile.id}-{uuid.uuid4().hex[:24]}"
+        response = await self.exchange.place_market_order(
+            symbol=profile.symbol, side="Buy", qty=qty, order_link_id=link_id
+        )
+        session.add(GridOrder(
+            profile_id=profile.id,
+            exchange_order_id=response["result"]["orderId"],
+            order_link_id=link_id,
+            symbol=profile.symbol,
+            side="Buy",
+            grid_buy_price=grid_buy_price,
+            price=market_price,
+            qty=qty,
+            status="New",
+        ))
+        await session.commit()
 
     async def _seed_buy(
         self,
@@ -266,9 +319,8 @@ class GridEngine:
 
         if order.side == "Buy":
             side = "Sell"
-            raw_price = grid_buy_price + Decimal(profile.step_price)
-            if raw_price > Decimal(profile.upper_price):
-                raise ValueError("replacement SELL would be above profile upper_price")
+            cells = dict(self.profile_cells(profile, info))
+            raw_price = cells[grid_buy_price]
             qty = floor_to_step(
                 filled_qty * (Decimal("1") - settings.grid_fee_buffer_pct),
                 info.base_precision,

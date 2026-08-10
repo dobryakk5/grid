@@ -10,7 +10,7 @@
     .wrap{max-width:1240px;margin:0 auto;padding:28px 20px 60px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:24px}
     h1{font-size:28px;margin:0 0 5px}.sub{color:var(--muted)} .price{font-size:24px;font-weight:700;text-align:right}.price small{display:block;font-size:12px;color:var(--muted);font-weight:500}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px}.panel h2{margin:0 0 15px;font-size:17px}
-    .form-grid{display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}.field input{width:100%;background:#0e131d;border:1px solid var(--line);color:var(--text);padding:10px 11px;border-radius:9px;outline:none}.field input:focus{border-color:var(--accent)}
+    .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:end}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}.field input,.field select{width:100%;background:#0e131d;border:1px solid var(--line);color:var(--text);padding:10px 11px;border-radius:9px;outline:none}.field input:focus,.field select:focus{border-color:var(--accent)}
     button{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:600}button:hover{border-color:#41506f}.primary{background:#1c4d8f;border-color:#2866ba}.good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}
     .profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:17px;cursor:pointer}.card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}.card-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.card h3{margin:0;font-size:17px}.badge{font-size:11px;border-radius:999px;padding:4px 8px;border:1px solid var(--line)}.badge.on{color:var(--good);border-color:#2d6c4b;background:#10251b}.badge.off{color:var(--muted)}
     .metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:14px 0}.metric{background:#0e131d;border:1px solid #202838;border-radius:9px;padding:9px}.metric span{display:block;color:var(--muted);font-size:11px}.metric b{display:block;margin-top:2px}.levels{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 14px}.level{font-size:11px;background:#0e131d;border:1px solid var(--line);padding:3px 7px;border-radius:6px}.actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -38,8 +38,15 @@
         <div class="field"><label>Верхняя цена</label><input id="upper" type="number" step="any" value="67000" required></div>
         <div class="field"><label>Шаг, USDT</label><input id="step" type="number" step="any" value="1000" required></div>
         <div class="field"><label>USDT на BUY</label><input id="quote" type="number" step="any" value="25" required></div>
+        <div class="field"><label>Стратегия</label><select id="strategy"><option value="accumulation">Накопительная</option><option value="classic">Классическая Spot</option></select></div>
+        <div class="field"><label>Тип сетки</label><select id="gridMode"><option value="arithmetic">Фиксированный шаг</option><option value="geometric">Процентный шаг</option></select></div>
+        <div class="field"><label>Шаг, %</label><input id="stepPercent" type="number" min="0.01" max="100" step="any" placeholder="например 1.5"></div>
+        <div class="field"><label>Макс. бюджет, USDT</label><input id="maxInvestment" type="number" min="0" step="any" placeholder="необязательно"></div>
+        <div class="field"><label>Stop Loss</label><input id="stopLoss" type="number" min="0" step="any" placeholder="ниже диапазона"></div>
+        <div class="field"><label>Take Profit</label><input id="takeProfit" type="number" min="0" step="any" placeholder="выше диапазона"></div>
         <div class="actions actions-form"><button class="primary" type="submit" id="saveBtn">Создать</button><button type="button" id="cancelEdit" class="hidden">Отмена</button></div>
       </div>
+      <div class="muted" style="font-size:11px;margin-top:10px">Stop Loss и Take Profit останавливают профиль и отменяют заявки, но не продают уже купленную монету.</div>
       <div id="formError" class="error"></div>
     </form>
   </div>
@@ -107,6 +114,10 @@ function renderProfiles(){
         <div class="metric"><span>Диапазон</span><b>${money(p.lower_price)} — ${money(p.upper_price)}</b></div>
         <div class="metric"><span>Шаг</span><b>${money(p.step_price)} USDT</b></div>
         <div class="metric"><span>На уровень</span><b>${money(p.quote_per_level)} USDT</b></div>
+        <div class="metric"><span>Стратегия</span><b>${p.strategy==='classic'?'Классическая Spot':'Накопительная'}</b></div>
+        <div class="metric"><span>Сетка</span><b>${p.grid_mode==='geometric'?money(p.step_percent)+'%':money(p.step_price)+' USDT'}</b></div>
+        <div class="metric"><span>Лимит бюджета</span><b>${p.max_investment?money(p.max_investment)+' USDT':'—'}</b></div>
+        <div class="metric"><span>SL / TP</span><b>${p.stop_loss?money(p.stop_loss):'—'} / ${p.take_profit?money(p.take_profit):'—'}</b></div>
         <div class="metric"><span>Активных заявок</span><b>${p.active_orders}</b></div>
         <div class="metric"><span>Исполнено BUY</span><b class="good">${p.filled_buys}</b></div>
         <div class="metric"><span>Исполнено SELL</span><b class="bad">${p.filled_sells}</b></div>
@@ -182,14 +193,15 @@ async function stopProfile(id){ try{ await api(`/api/profiles/${id}/stop`,{metho
 
 function editProfile(id){
   const p=profiles.find(x=>x.id===id); if(!p) return;
-  $('profileId').value=p.id; $('name').value=p.name; $('symbol').value=p.symbol; $('lower').value=p.lower_price; $('upper').value=p.upper_price; $('step').value=p.step_price; $('quote').value=p.quote_per_level;
+  $('profileId').value=p.id; $('name').value=p.name; $('symbol').value=p.symbol; $('lower').value=p.lower_price; $('upper').value=p.upper_price; $('step').value=p.step_price; $('quote').value=p.quote_per_level; $('strategy').value=p.strategy; $('gridMode').value=p.grid_mode; $('stepPercent').value=p.step_percent||''; $('maxInvestment').value=p.max_investment||''; $('stopLoss').value=p.stop_loss||''; $('takeProfit').value=p.take_profit||'';
   $('formTitle').textContent='Редактировать профиль'; $('saveBtn').textContent='Сохранить'; $('cancelEdit').classList.remove('hidden'); window.scrollTo({top:0,behavior:'smooth'});
 }
-function resetForm(){ $('profileId').value=''; $('name').value='BTC 62–67k'; $('symbol').value='BTCUSDT'; $('lower').value='62000'; $('upper').value='67000'; $('step').value='1000'; $('quote').value='25'; $('formTitle').textContent='Новый профиль'; $('saveBtn').textContent='Создать'; $('cancelEdit').classList.add('hidden'); $('formError').textContent=''; }
+function resetForm(){ $('profileId').value=''; $('name').value='BTC 62–67k'; $('symbol').value='BTCUSDT'; $('lower').value='62000'; $('upper').value='67000'; $('step').value='1000'; $('quote').value='25'; $('strategy').value='accumulation'; $('gridMode').value='arithmetic'; $('stepPercent').value=''; $('maxInvestment').value=''; $('stopLoss').value=''; $('takeProfit').value=''; $('formTitle').textContent='Новый профиль'; $('saveBtn').textContent='Создать'; $('cancelEdit').classList.add('hidden'); $('formError').textContent=''; }
 $('cancelEdit').onclick=resetForm;
 $('profileForm').onsubmit=async e=>{
   e.preventDefault(); $('formError').textContent='';
-  const id=$('profileId').value; const body={name:$('name').value,symbol:$('symbol').value,lower_price:$('lower').value,upper_price:$('upper').value,step_price:$('step').value,quote_per_level:$('quote').value};
+  const optional=id=>$(id).value||null;
+  const id=$('profileId').value; const body={name:$('name').value,symbol:$('symbol').value,lower_price:$('lower').value,upper_price:$('upper').value,step_price:$('step').value,quote_per_level:$('quote').value,strategy:$('strategy').value,grid_mode:$('gridMode').value,step_percent:optional('stepPercent'),max_investment:optional('maxInvestment'),stop_loss:optional('stopLoss'),take_profit:optional('takeProfit')};
   try{ await api(id?`/api/profiles/${id}`:'/api/profiles',{method:id?'PUT':'POST',body:JSON.stringify(body)}); resetForm(); await loadProfiles(); }
   catch(err){ $('formError').textContent=err.message; }
 };

@@ -140,6 +140,22 @@ class BybitClient:
             },
         )
 
+    async def place_market_order(
+        self, *, symbol: str, side: str, qty: Decimal, order_link_id: str
+    ) -> dict:
+        return await self.private_post(
+            "/v5/order/create",
+            {
+                "category": "spot",
+                "symbol": symbol,
+                "side": side,
+                "orderType": "Market",
+                "qty": decimal_str(qty),
+                "marketUnit": "baseCoin",
+                "orderLinkId": order_link_id,
+            },
+        )
+
     async def get_order(self, *, order_id: str, symbol: str) -> dict | None:
         params = {"category": "spot", "symbol": symbol, "orderId": order_id}
         realtime = await self.private_get("/v5/order/realtime", params)

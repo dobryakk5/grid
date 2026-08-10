@@ -1,6 +1,6 @@
 [project]
 name = "mini-grid-bot"
-version = "0.3.0"
+version = "0.5.0"
 description = "Minimal FastAPI + PostgreSQL spot grid bot for Bybit Demo, without Docker"
 requires-python = ">=3.12"
 dependencies = [

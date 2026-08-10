@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -9,7 +10,7 @@ from app.db.session import SessionLocal
 from app.exchanges.bybit import BybitClient, BybitError
 from app.trading.grid import OPEN_STATUSES
 from app.trading.pnl import grid_cell_statistics
-from app.trading.math import grid_buy_levels, grid_lines
+from app.trading.math import strategy_grid_cells, strategy_grid_lines
 from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/api")
@@ -22,10 +23,26 @@ class ProfilePayload(BaseModel):
     upper_price: Decimal = Field(gt=0)
     step_price: Decimal = Field(gt=0)
     quote_per_level: Decimal = Field(gt=0)
+    strategy: Literal["accumulation", "classic"] = "accumulation"
+    grid_mode: Literal["arithmetic", "geometric"] = "arithmetic"
+    step_percent: Decimal | None = Field(default=None, gt=0, le=100)
+    max_investment: Decimal | None = Field(default=None, gt=0)
+    stop_loss: Decimal | None = Field(default=None, gt=0)
+    take_profit: Decimal | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_range(self):
-        grid_buy_levels(self.lower_price, self.upper_price, self.step_price)
+        cells = strategy_grid_cells(
+            self.lower_price, self.upper_price, self.step_price,
+            mode=self.grid_mode, step_percent=self.step_percent,
+        )
+        required = self.quote_per_level * len(cells)
+        if self.max_investment is not None and self.max_investment < required:
+            raise ValueError(f"max_investment must be at least {required} USDT")
+        if self.stop_loss is not None and self.stop_loss >= self.lower_price:
+            raise ValueError("stop_loss must be below lower_price")
+        if self.take_profit is not None and self.take_profit <= self.upper_price:
+            raise ValueError("take_profit must be above upper_price")
         return self
 
 
@@ -43,8 +60,16 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
         "upper_price": str(profile.upper_price),
         "step_price": str(profile.step_price),
         "quote_per_level": str(profile.quote_per_level),
-        "lines": [str(x) for x in grid_lines(
-            Decimal(profile.lower_price), Decimal(profile.upper_price), Decimal(profile.step_price)
+        "strategy": profile.strategy,
+        "grid_mode": profile.grid_mode,
+        "step_percent": str(profile.step_percent) if profile.step_percent is not None else None,
+        "max_investment": str(profile.max_investment) if profile.max_investment is not None else None,
+        "stop_loss": str(profile.stop_loss) if profile.stop_loss is not None else None,
+        "take_profit": str(profile.take_profit) if profile.take_profit is not None else None,
+        "lines": [str(x) for x in strategy_grid_lines(
+            Decimal(profile.lower_price), Decimal(profile.upper_price), Decimal(profile.step_price),
+            mode=profile.grid_mode,
+            step_percent=Decimal(profile.step_percent) if profile.step_percent is not None else None,
         )],
         "active_orders": active_orders,
         "filled_buys": filled_buys,
@@ -155,6 +180,12 @@ async def create_profile(payload: ProfilePayload) -> dict:
             upper_price=payload.upper_price,
             step_price=payload.step_price,
             quote_per_level=payload.quote_per_level,
+            strategy=payload.strategy,
+            grid_mode=payload.grid_mode,
+            step_percent=payload.step_percent,
+            max_investment=payload.max_investment,
+            stop_loss=payload.stop_loss,
+            take_profit=payload.take_profit,
         )
         session.add(profile)
         await session.commit()
@@ -205,6 +236,12 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         profile.upper_price = payload.upper_price
         profile.step_price = payload.step_price
         profile.quote_per_level = payload.quote_per_level
+        profile.strategy = payload.strategy
+        profile.grid_mode = payload.grid_mode
+        profile.step_percent = payload.step_percent
+        profile.max_investment = payload.max_investment
+        profile.stop_loss = payload.stop_loss
+        profile.take_profit = payload.take_profit
         await session.commit()
         return await profile_stats(session, profile)
 
@@ -302,4 +339,5 @@ async def profile_pnl(profile_id: int) -> dict:
         orders,
         base_coin=info.base_coin,
         quote_coin=info.quote_coin,
+        tick_size=info.tick_size,
     )

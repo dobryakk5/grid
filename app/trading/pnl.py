@@ -97,21 +97,37 @@ def calculate_cycle_pnl(
     )
 
 
-def grid_cell_statistics(profile, orders, *, base_coin: str, quote_coin: str) -> dict:
+def grid_cell_statistics(
+    profile, orders, *, base_coin: str, quote_coin: str,
+    tick_size: Decimal | None = None,
+) -> dict:
     """Aggregate realised PnL by grid cell from persisted exchange executions."""
-    from app.trading.math import grid_buy_levels
+    from app.trading.math import strategy_grid_cells
 
     by_exchange_id = {order.exchange_order_id: order for order in orders}
-    levels = grid_buy_levels(
+    grid_pairs = strategy_grid_cells(
         Decimal(profile.lower_price),
         Decimal(profile.upper_price),
         Decimal(profile.step_price),
+        mode=getattr(profile, "grid_mode", "arithmetic"),
+        step_percent=(
+            Decimal(profile.step_percent)
+            if getattr(profile, "step_percent", None) is not None else None
+        ),
     )
+    if tick_size is not None:
+        from app.trading.math import floor_to_step
+        grid_pairs = [
+            (floor_to_step(buy, tick_size), floor_to_step(sell, tick_size))
+            for buy, sell in grid_pairs
+        ]
+    levels = [buy for buy, _ in grid_pairs]
+    sells = dict(grid_pairs)
 
     cells: dict[Decimal, dict] = {
         Decimal(level): {
             "buy_price": Decimal(level),
-            "sell_price": Decimal(level) + Decimal(profile.step_price),
+            "sell_price": sells[Decimal(level)],
             "cycles": 0,
             "turnover": Decimal("0"),
             "gross_profit": Decimal("0"),
