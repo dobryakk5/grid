@@ -76,6 +76,28 @@ def strategy_grid_cells(
     return list(zip(lines, lines[1:]))
 
 
+def configured_grid_cells(profile) -> list[tuple[Decimal, Decimal]]:
+    """Return the main grid plus optional arithmetic accumulation cells below LOW."""
+    lower = Decimal(profile.lower_price)
+    upper = Decimal(profile.upper_price)
+    step = Decimal(profile.step_price)
+    main = strategy_grid_cells(
+        lower, upper, step,
+        mode=getattr(profile, "grid_mode", "arithmetic"),
+        step_percent=(
+            Decimal(profile.step_percent)
+            if getattr(profile, "step_percent", None) is not None else None
+        ),
+    )
+    extension = getattr(profile, "below_grid_lower_price", None)
+    if not getattr(profile, "buy_below_grid", True) or extension is None:
+        return main
+    extension = Decimal(extension)
+    if extension >= lower:
+        raise ValueError("below_grid_lower_price must be below lower_price")
+    return strategy_grid_cells(extension, lower, step, mode="arithmetic") + main
+
+
 def ladder_allocations(
     total: Decimal, count: int, *, mode: str, multiplier: Decimal = Decimal("1.5")
 ) -> list[Decimal]:

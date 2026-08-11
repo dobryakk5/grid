@@ -12,6 +12,12 @@ async def init_db() -> None:
         # create_all does not add columns to an existing PostgreSQL table.
         # Keep this small, additive migration here until the project adopts Alembic.
         for statement in (
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS regime_state VARCHAR(24) NOT NULL DEFAULT 'RANGE'",
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS break_down_action VARCHAR(16) NOT NULL DEFAULT 'continue'",
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS break_up_action VARCHAR(16) NOT NULL DEFAULT 'stop'",
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS below_grid_lower_price NUMERIC(28, 12)",
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS buy_below_grid BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS sell_below_grid BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS strategy VARCHAR(24) NOT NULL DEFAULT 'accumulation'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS grid_mode VARCHAR(24) NOT NULL DEFAULT 'arithmetic'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS step_percent NUMERIC(12, 6)",
@@ -39,6 +45,9 @@ async def init_db() -> None:
                     upper_price=Decimal("67000"),
                     step_price=Decimal("1000"),
                     quote_per_level=Decimal("25"),
+                    below_grid_lower_price=Decimal("55000"),
+                    buy_below_grid=True,
+                    sell_below_grid=False,
                 )
             )
             await session.commit()

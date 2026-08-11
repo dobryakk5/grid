@@ -9,8 +9,9 @@ from app.db.models import GridOrder, GridProfile
 from app.db.session import SessionLocal
 from app.exchanges.bybit import BybitClient, BybitError
 from app.trading.grid import OPEN_STATUSES
+from app.trading.backtest import run_grid_backtest
 from app.trading.pnl import grid_cell_statistics
-from app.trading.math import strategy_grid_cells, strategy_grid_lines
+from app.trading.math import configured_grid_cells, strategy_grid_cells
 from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/api")
@@ -23,6 +24,11 @@ class ProfilePayload(BaseModel):
     upper_price: Decimal = Field(gt=0)
     step_price: Decimal = Field(gt=0)
     quote_per_level: Decimal = Field(gt=0)
+    break_down_action: Literal["continue", "stop"] = "continue"
+    break_up_action: Literal["continue", "stop"] = "stop"
+    below_grid_lower_price: Decimal | None = Field(default=None, gt=0)
+    buy_below_grid: bool = True
+    sell_below_grid: bool = False
     strategy: Literal["accumulation", "classic", "dca"] = "accumulation"
     grid_mode: Literal["arithmetic", "geometric"] = "arithmetic"
     step_percent: Decimal | None = Field(default=None, gt=0, le=100)
@@ -40,6 +46,18 @@ class ProfilePayload(BaseModel):
             self.lower_price, self.upper_price, self.step_price,
             mode=self.grid_mode, step_percent=self.step_percent,
         )
+        if (
+            self.below_grid_lower_price is not None
+            and self.below_grid_lower_price >= self.lower_price
+        ):
+            raise ValueError("below_grid_lower_price must be below lower_price")
+        if self.buy_below_grid and self.below_grid_lower_price is not None:
+            cells = strategy_grid_cells(
+                self.below_grid_lower_price,
+                self.lower_price,
+                self.step_price,
+                mode="arithmetic",
+            ) + cells
         required = self.quote_per_level * len(cells)
         if self.strategy == "dca" and self.max_investment is None:
             raise ValueError("max_investment is required for DCA Grid")
@@ -56,6 +74,41 @@ class DemoFundsRequest(BaseModel):
     usdt: Decimal = Field(default=Decimal("10000"), gt=0, le=Decimal("100000"))
 
 
+class BacktestPayload(BaseModel):
+    symbol: str = Field(default="BTCUSDT", min_length=3, max_length=32)
+    lower_price: Decimal = Field(gt=0)
+    upper_price: Decimal = Field(gt=0)
+    steps: list[Decimal] = Field(default_factory=lambda: [
+        Decimal("250"), Decimal("500"), Decimal("1000"), Decimal("1500")
+    ], min_length=1, max_length=12)
+    quote_per_level: Decimal = Field(default=Decimal("100"), gt=0)
+    fee_rate: Decimal = Field(default=Decimal("0.001"), ge=0, le=Decimal("0.02"))
+    days: int = Field(default=30, ge=2, le=365)
+    below_grid_lower_price: Decimal | None = Field(default=None, gt=0)
+    buy_below_grid: bool = True
+    sell_below_grid: bool = False
+    break_down_action: Literal["continue", "stop"] = "continue"
+    break_up_action: Literal["continue", "stop"] = "stop"
+
+    @model_validator(mode="after")
+    def validate_backtest(self):
+        if self.upper_price <= self.lower_price:
+            raise ValueError("upper_price must be greater than lower_price")
+        if (
+            self.below_grid_lower_price is not None
+            and self.below_grid_lower_price >= self.lower_price
+        ):
+            raise ValueError("below_grid_lower_price must be below lower_price")
+        for step in self.steps:
+            strategy_grid_cells(self.lower_price, self.upper_price, step)
+            if self.buy_below_grid and self.below_grid_lower_price is not None:
+                strategy_grid_cells(
+                    self.below_grid_lower_price, self.lower_price, step,
+                    mode="arithmetic",
+                )
+        return self
+
+
 def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: int = 0, filled_sells: int = 0) -> dict:
     return {
         "id": profile.id,
@@ -66,6 +119,15 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
         "upper_price": str(profile.upper_price),
         "step_price": str(profile.step_price),
         "quote_per_level": str(profile.quote_per_level),
+        "regime_state": getattr(profile, "regime_state", "RANGE"),
+        "break_down_action": getattr(profile, "break_down_action", "continue"),
+        "break_up_action": getattr(profile, "break_up_action", "stop"),
+        "below_grid_lower_price": (
+            str(profile.below_grid_lower_price)
+            if getattr(profile, "below_grid_lower_price", None) is not None else None
+        ),
+        "buy_below_grid": getattr(profile, "buy_below_grid", True),
+        "sell_below_grid": getattr(profile, "sell_below_grid", False),
         "strategy": profile.strategy,
         "grid_mode": profile.grid_mode,
         "step_percent": str(profile.step_percent) if profile.step_percent is not None else None,
@@ -76,10 +138,9 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
         "buy_ladder_mode": profile.buy_ladder_mode,
         "sell_ladder_mode": profile.sell_ladder_mode,
         "ladder_multiplier": str(profile.ladder_multiplier),
-        "lines": [str(x) for x in strategy_grid_lines(
-            Decimal(profile.lower_price), Decimal(profile.upper_price), Decimal(profile.step_price),
-            mode=profile.grid_mode,
-            step_percent=Decimal(profile.step_percent) if profile.step_percent is not None else None,
+        "lines": [str(x) for x in (
+            [buy for buy, _ in configured_grid_cells(profile)]
+            + [configured_grid_cells(profile)[-1][1]]
         )],
         "active_orders": active_orders,
         "filled_buys": filled_buys,
@@ -190,6 +251,12 @@ async def create_profile(payload: ProfilePayload) -> dict:
             upper_price=payload.upper_price,
             step_price=payload.step_price,
             quote_per_level=payload.quote_per_level,
+            regime_state="RANGE",
+            break_down_action=payload.break_down_action,
+            break_up_action=payload.break_up_action,
+            below_grid_lower_price=payload.below_grid_lower_price,
+            buy_below_grid=payload.buy_below_grid,
+            sell_below_grid=payload.sell_below_grid,
             strategy=payload.strategy,
             grid_mode=payload.grid_mode,
             step_percent=payload.step_percent,
@@ -243,7 +310,13 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         inventory_cells = [
             order for order in latest_by_cell.values()
             if (order.side == "Sell" and order.status != "Filled")
-            or (order.side == "Buy" and order.status == "Filled" and not order.replacement_created)
+            or (
+                order.side == "Buy" and order.status == "Filled"
+                and (
+                    not order.replacement_created
+                    or order.order_role == "below_accumulation"
+                )
+            )
         ]
         if inventory_cells:
             raise HTTPException(
@@ -257,6 +330,12 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         profile.upper_price = payload.upper_price
         profile.step_price = payload.step_price
         profile.quote_per_level = payload.quote_per_level
+        profile.regime_state = "RANGE"
+        profile.break_down_action = payload.break_down_action
+        profile.break_up_action = payload.break_up_action
+        profile.below_grid_lower_price = payload.below_grid_lower_price
+        profile.buy_below_grid = payload.buy_below_grid
+        profile.sell_below_grid = payload.sell_below_grid
         profile.strategy = payload.strategy
         profile.grid_mode = payload.grid_mode
         profile.step_percent = payload.step_percent
@@ -273,7 +352,8 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
 
 @router.post("/profiles/{profile_id}/start")
 async def start_profile(profile_id: int) -> dict:
-    # Fail before enabling the profile if the configured key cannot trade Spot.
+    # Bybit Demo is the project's paper-trading environment. No live endpoint
+    # is supported by this MVP.
     exchange = BybitClient()
     try:
         info = await exchange.api_key_info()
@@ -312,8 +392,53 @@ async def start_profile(profile_id: int) -> dict:
                         detail="DCA Grid можно запустить только когда цена находится внутри диапазона",
                     )
         profile.enabled = True
+        profile.regime_state = "RANGE"
         await session.commit()
-        return {"ok": True, "enabled": True}
+        return {"ok": True, "enabled": True, "regime_state": profile.regime_state}
+
+
+@router.post("/backtest")
+async def backtest(payload: BacktestPayload) -> dict:
+    exchange = BybitClient()
+    try:
+        # The last item is the currently forming candle and must not be used.
+        candles = await exchange.klines(
+            payload.symbol.upper(), interval="60", limit=payload.days * 24 + 1
+        )
+    except BybitError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await exchange.close()
+    closed = candles[:-1]
+    if len(closed) < 2:
+        raise HTTPException(status_code=400, detail="not enough historical candles")
+    closes = [item["close"] for item in closed]
+    timestamps = [item["timestamp_ms"] for item in closed]
+    results = [
+        run_grid_backtest(
+            closes,
+            lower=payload.lower_price,
+            upper=payload.upper_price,
+            step=step,
+            quote_per_level=payload.quote_per_level,
+            fee_rate=payload.fee_rate,
+            below_grid_lower_price=payload.below_grid_lower_price,
+            buy_below_grid=payload.buy_below_grid,
+            sell_below_grid=payload.sell_below_grid,
+            timestamps_ms=timestamps,
+            candle_minutes=60,
+            break_down_action=payload.break_down_action,
+            break_up_action=payload.break_up_action,
+        )
+        for step in payload.steps
+    ]
+    return {
+        "symbol": payload.symbol.upper(),
+        "interval": "1h closes",
+        "candles": len(closed),
+        "assumption": "fills are counted only when consecutive hourly closes cross a level",
+        "results": results,
+    }
 
 
 @router.post("/profiles/{profile_id}/stop")
@@ -400,15 +525,45 @@ async def profile_pnl(profile_id: int) -> dict:
     exchange = BybitClient()
     try:
         info = await exchange.instrument_info(profile.symbol)
+        market_price = await exchange.last_price(profile.symbol)
     except BybitError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await exchange.close()
 
-    return grid_cell_statistics(
+    stats = grid_cell_statistics(
         profile,
         orders,
         base_coin=info.base_coin,
         quote_coin=info.quote_coin,
         tick_size=info.tick_size,
     )
+    inventory = Decimal("0")
+    cash_flow = Decimal("0")
+    for order in orders:
+        for execution in order.executions:
+            qty = Decimal(execution.exec_qty)
+            value = Decimal(execution.exec_value)
+            fee = Decimal(execution.exec_fee or 0)
+            currency = (execution.fee_currency or "").upper()
+            if order.side == "Buy":
+                inventory += qty
+                cash_flow -= value
+            else:
+                inventory -= qty
+                cash_flow += value
+            if currency == info.base_coin.upper():
+                inventory -= fee
+            elif currency == info.quote_coin.upper():
+                cash_flow -= fee
+    total_pnl = cash_flow + inventory * market_price
+    realized = Decimal(stats["total"]["net_profit"])
+    stats["total"].update({
+        "realized_pnl": str(realized),
+        "unrealized_pnl": str(total_pnl - realized),
+        "total_pnl": str(total_pnl),
+        "base_inventory": str(inventory),
+        "inventory_value": str(inventory * market_price),
+        "market_price": str(market_price),
+    })
+    return stats

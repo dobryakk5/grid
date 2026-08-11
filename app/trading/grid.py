@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 from decimal import Decimal
 
@@ -9,6 +10,7 @@ from app.core.config import settings
 from app.db.models import GridExecution, GridOrder, GridProfile
 from app.exchanges.bybit import BybitClient, InstrumentInfo
 from app.trading.math import (
+    configured_grid_cells,
     dca_initial_percent,
     floor_to_step,
     ladder_allocations,
@@ -20,9 +22,26 @@ logger = logging.getLogger(__name__)
 OPEN_STATUSES = {"New", "PartiallyFilled", "Untriggered", "Created"}
 
 
+def classify_regime(
+    closes: list[Decimal], lower: Decimal, upper: Decimal,
+) -> str | None:
+    """Classify only confirmed breakouts; None means no state change."""
+    if len(closes) < 2:
+        return None
+    recent = closes[-2:]
+    if all(close < lower for close in recent):
+        return "BREAK_DOWN"
+    if all(close > upper for close in recent):
+        return "BREAK_UP"
+    if all(lower <= close <= upper for close in recent):
+        return "RANGE"
+    return None
+
+
 class GridEngine:
     def __init__(self, exchange: BybitClient) -> None:
         self.exchange = exchange
+        self._regime_cache: dict[str, tuple[float, list[Decimal]]] = {}
 
     async def tick(self, session: AsyncSession) -> None:
         result = await session.execute(select(GridProfile).order_by(GridProfile.id))
@@ -38,6 +57,10 @@ class GridEngine:
                     await self.cancel_open_orders(session, profile.id)
                     continue
 
+                await self.update_regime(session, profile)
+                if not profile.enabled:
+                    await self.cancel_open_orders(session, profile.id)
+                    continue
                 if await self.apply_price_guards(session, profile):
                     continue
                 await self.refresh_open_orders(session, profile)
@@ -73,6 +96,34 @@ class GridEngine:
             )
             order.status = "CancelledSuperseded"
         await session.commit()
+
+    async def update_regime(self, session: AsyncSession, profile: GridProfile) -> str:
+        """Pause a profile after two confirmed hourly closes outside its range."""
+        now = time.monotonic()
+        cached = self._regime_cache.get(profile.symbol)
+        if cached is None or now - cached[0] >= 300:
+            candles = await self.exchange.klines(profile.symbol, interval="60", limit=3)
+            closes = [item["close"] for item in candles[:-1]][-2:]
+            self._regime_cache[profile.symbol] = (now, closes)
+        else:
+            closes = cached[1]
+        lower = Decimal(profile.lower_price)
+        upper = Decimal(profile.upper_price)
+        state = classify_regime(closes, lower, upper) or profile.regime_state
+        if state != profile.regime_state:
+            logger.warning("Profile %s regime: %s -> %s", profile.id, profile.regime_state, state)
+            profile.regime_state = state
+            action = (
+                getattr(profile, "break_down_action", "continue")
+                if state == "BREAK_DOWN"
+                else getattr(profile, "break_up_action", "stop")
+                if state == "BREAK_UP"
+                else "continue"
+            )
+            if action == "stop":
+                profile.enabled = False
+            await session.commit()
+        return state
 
     async def apply_price_guards(self, session: AsyncSession, profile: GridProfile) -> bool:
         if profile.stop_loss is None and profile.take_profit is None:
@@ -130,6 +181,13 @@ class GridEngine:
                     await self._create_dca_rebuy_if_ladder_complete(
                         session, profile, order, info
                     )
+                elif (
+                    order.side == "Buy"
+                    and Decimal(order.grid_buy_price) < Decimal(profile.lower_price)
+                    and not getattr(profile, "sell_below_grid", False)
+                ):
+                    order.order_role = "below_accumulation"
+                    order.replacement_created = True
                 else:
                     await self._create_replacement(session, profile, order, info)
 
@@ -481,7 +539,16 @@ class GridEngine:
             # replacement did not get committed, retry it instead of creating a
             # second independent cycle.
             if latest.status == "Filled" and not latest.replacement_created:
-                await self._create_replacement(session, profile, latest, info)
+                if (
+                    latest.side == "Buy"
+                    and buy_price < Decimal(profile.lower_price)
+                    and not getattr(profile, "sell_below_grid", False)
+                ):
+                    latest.order_role = "below_accumulation"
+                    latest.replacement_created = True
+                    await session.commit()
+                else:
+                    await self._create_replacement(session, profile, latest, info)
                 return
 
             if latest.status in retry_statuses:
@@ -502,6 +569,7 @@ class GridEngine:
                         grid_buy_price=buy_price,
                         qty=qty,
                         replacement_for=latest.exchange_order_id,
+                        order_role=latest.order_role,
                     )
                     await session.commit()
                     return
@@ -509,13 +577,7 @@ class GridEngine:
 
     @staticmethod
     def profile_cells(profile: GridProfile, info: InstrumentInfo) -> list[tuple[Decimal, Decimal]]:
-        raw = strategy_grid_cells(
-            Decimal(profile.lower_price),
-            Decimal(profile.upper_price),
-            Decimal(profile.step_price),
-            mode=profile.grid_mode,
-            step_percent=Decimal(profile.step_percent) if profile.step_percent is not None else None,
-        )
+        raw = configured_grid_cells(profile)
         cells = []
         for buy, sell in raw:
             rounded = (floor_to_step(buy, info.tick_size), floor_to_step(sell, info.tick_size))
@@ -563,6 +625,10 @@ class GridEngine:
             grid_buy_price=buy_price,
             qty=qty,
             replacement_for=None,
+            order_role=(
+                "below_grid"
+                if buy_price < Decimal(profile.lower_price) else "grid"
+            ),
         )
         await session.commit()
         logger.info(
@@ -629,6 +695,16 @@ class GridEngine:
         filled_qty = Decimal(order.filled_qty or order.qty)
         grid_buy_price = Decimal(order.grid_buy_price)
 
+        if (
+            order.side == "Buy"
+            and grid_buy_price < Decimal(profile.lower_price)
+            and not getattr(profile, "sell_below_grid", False)
+        ):
+            order.order_role = "below_accumulation"
+            order.replacement_created = True
+            await session.commit()
+            return
+
         if order.side == "Buy":
             side = "Sell"
             cells = dict(self.profile_cells(profile, info))
@@ -653,6 +729,7 @@ class GridEngine:
             grid_buy_price=grid_buy_price,
             qty=qty,
             replacement_for=order.exchange_order_id,
+            order_role=order.order_role,
         )
         order.replacement_created = True
         await session.commit()

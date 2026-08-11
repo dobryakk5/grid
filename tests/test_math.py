@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 
 from app.trading.math import (
-    dca_initial_percent, floor_to_step, grid_buy_levels, grid_lines,
+    configured_grid_cells, dca_initial_percent, floor_to_step, grid_buy_levels, grid_lines,
     ladder_allocations, strategy_grid_cells, strategy_grid_lines,
 )
 
@@ -55,3 +55,19 @@ def test_dca_position_and_ladder_allocations():
         Decimal("70"), 3, mode="geometric", multiplier=Decimal("2")
     )
     assert geometric == [Decimal("10"), Decimal("20"), Decimal("40")]
+
+
+def test_configured_grid_can_extend_buys_below_main_range():
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        lower_price=Decimal("62"), upper_price=Decimal("67"),
+        step_price=Decimal("1"), grid_mode="arithmetic", step_percent=None,
+        below_grid_lower_price=Decimal("59"), buy_below_grid=True,
+    )
+    cells = configured_grid_cells(profile)
+    assert cells[:3] == [
+        (Decimal("59"), Decimal("60")),
+        (Decimal("60"), Decimal("61")),
+        (Decimal("61"), Decimal("62")),
+    ]

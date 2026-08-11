@@ -107,19 +107,10 @@ def grid_cell_statistics(
     tick_size: Decimal | None = None,
 ) -> dict:
     """Aggregate realised PnL by grid cell from persisted exchange executions."""
-    from app.trading.math import strategy_grid_cells
+    from app.trading.math import configured_grid_cells
 
     by_exchange_id = {order.exchange_order_id: order for order in orders}
-    grid_pairs = strategy_grid_cells(
-        Decimal(profile.lower_price),
-        Decimal(profile.upper_price),
-        Decimal(profile.step_price),
-        mode=getattr(profile, "grid_mode", "arithmetic"),
-        step_percent=(
-            Decimal(profile.step_percent)
-            if getattr(profile, "step_percent", None) is not None else None
-        ),
-    )
+    grid_pairs = configured_grid_cells(profile)
     if tick_size is not None:
         from app.trading.math import floor_to_step
         grid_pairs = [

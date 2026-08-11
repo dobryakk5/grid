@@ -107,6 +107,39 @@ class BybitClient:
             min_order_amt=Decimal(lot["minOrderAmt"]),
         )
 
+    async def klines(
+        self, symbol: str, *, interval: str = "60", limit: int = 720,
+    ) -> list[dict]:
+        """Return oldest-first public candles, paging past Bybit's 1000 row limit."""
+        rows: dict[int, dict] = {}
+        end: int | None = None
+        while len(rows) < limit:
+            page_size = min(1000, limit - len(rows))
+            params = {
+                "category": "spot", "symbol": symbol,
+                "interval": interval, "limit": str(page_size),
+            }
+            if end is not None:
+                params["end"] = str(end)
+            data = await self.public_get("/v5/market/kline", params)
+            page = data["result"].get("list", [])
+            if not page:
+                break
+            for item in page:
+                timestamp = int(item[0])
+                rows[timestamp] = {
+                    "timestamp_ms": timestamp,
+                    "open": Decimal(item[1]),
+                    "high": Decimal(item[2]),
+                    "low": Decimal(item[3]),
+                    "close": Decimal(item[4]),
+                }
+            oldest = min(int(item[0]) for item in page)
+            if len(page) < page_size:
+                break
+            end = oldest - 1
+        return [rows[key] for key in sorted(rows)][-limit:]
+
 
     async def api_key_info(self) -> dict:
         return await self.private_get("/v5/user/query-api", {})

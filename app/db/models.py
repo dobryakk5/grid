@@ -20,6 +20,18 @@ class GridProfile(Base):
     upper_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     step_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     quote_per_level: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    regime_state: Mapped[str] = mapped_column(String(24), nullable=False, default="RANGE")
+    break_down_action: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="continue"
+    )
+    break_up_action: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="stop"
+    )
+    below_grid_lower_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 12), nullable=True
+    )
+    buy_below_grid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sell_below_grid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     strategy: Mapped[str] = mapped_column(String(24), nullable=False, default="accumulation")
     grid_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="arithmetic")
     step_percent: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)

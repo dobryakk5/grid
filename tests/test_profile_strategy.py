@@ -23,6 +23,15 @@ def test_existing_payload_defaults_to_accumulation_arithmetic():
     profile = payload()
     assert profile.strategy == "accumulation"
     assert profile.grid_mode == "arithmetic"
+    assert profile.break_down_action == "continue"
+    assert profile.break_up_action == "stop"
+    assert profile.buy_below_grid is True
+    assert profile.sell_below_grid is False
+
+
+def test_below_grid_lower_price_must_be_below_main_grid():
+    with pytest.raises(ValidationError, match="below_grid_lower_price"):
+        payload(below_grid_lower_price=Decimal("62000"))
 
 
 def test_geometric_profile_and_budget_validation():

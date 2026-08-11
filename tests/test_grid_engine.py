@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.exchanges.bybit import InstrumentInfo
-from app.trading.grid import GridEngine
+from app.trading.grid import GridEngine, classify_regime
 
 
 INFO = InstrumentInfo(
@@ -91,3 +91,30 @@ async def test_next_buy_arms_after_previous_cell_has_sell():
         FakeSession([existing_sell]), profile()
     )
     assert [item["price"] for item in exchange.placed] == [Decimal("64000")]
+
+
+def test_breakout_requires_two_hourly_closes():
+    lower, upper = Decimal("62000"), Decimal("67000")
+    assert classify_regime([Decimal("61900")], lower, upper) is None
+    assert classify_regime([Decimal("62100"), Decimal("61900")], lower, upper) is None
+    assert classify_regime([Decimal("61900"), Decimal("61000")], lower, upper) == "BREAK_DOWN"
+    assert classify_regime([Decimal("67100"), Decimal("68000")], lower, upper) == "BREAK_UP"
+    assert classify_regime([Decimal("63000"), Decimal("64000")], lower, upper) == "RANGE"
+
+
+@pytest.mark.asyncio
+async def test_below_grid_buy_can_be_kept_without_sell_order():
+    p = profile()
+    p.below_grid_lower_price = Decimal("55000")
+    p.buy_below_grid = True
+    p.sell_below_grid = False
+    order = SimpleNamespace(
+        side="Buy", filled_qty=Decimal("0.001"), qty=Decimal("0.001"),
+        grid_buy_price=Decimal("61000"), order_role="below_grid",
+        replacement_created=False,
+    )
+    exchange = FakeExchange()
+    await GridEngine(exchange)._create_replacement(FakeSession([]), p, order, INFO)
+    assert order.replacement_created is True
+    assert order.order_role == "below_accumulation"
+    assert exchange.placed == []
