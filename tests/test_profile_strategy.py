@@ -24,6 +24,9 @@ def test_existing_payload_defaults_to_accumulation_arithmetic():
     assert profile.strategy == "accumulation"
     assert profile.grid_mode == "arithmetic"
     assert profile.break_down_action == "continue"
+    assert profile.breakout_confirm_bars == 2
+    assert profile.breakout_ema_period == 50
+    assert profile.trailing_buy_target_quote == Decimal("250")
     assert profile.break_up_action == "stop"
     assert profile.buy_below_grid is True
     assert profile.sell_below_grid is False
@@ -67,3 +70,19 @@ def test_dca_requires_budget_and_accepts_ladder_settings():
     )
     assert profile.strategy == "dca"
     assert profile.buy_ladder_mode == "geometric"
+
+
+def test_trailing_buy_settings_are_validated():
+    profile = payload(
+        break_down_action="trailing_buy",
+        trailing_buy_deviation_pct=Decimal("2"),
+        trailing_buy_target_quote=Decimal("125"),
+    )
+    assert profile.break_down_action == "trailing_buy"
+    with pytest.raises(ValidationError, match="recovery_trailing_activation"):
+        payload(
+            recovery_break_even_trigger_pct=Decimal("3"),
+            recovery_trailing_activation_pct=Decimal("2"),
+        )
+    with pytest.raises(ValidationError, match="trailing_buy_deviation_mode"):
+        payload(trailing_buy_deviation_mode="atr")

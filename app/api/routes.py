@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
@@ -5,10 +6,25 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 
-from app.db.models import GridOrder, GridProfile
+from app.db.models import (
+    GridOrder,
+    GridProfile,
+    GridRange,
+    PositionLot,
+    BreakdownEpisode,
+    RecoveryTrade,
+    StrategyRecommendation,
+)
 from app.db.session import SessionLocal
 from app.exchanges.bybit import BybitClient, BybitError
-from app.trading.grid import OPEN_STATUSES
+from app.trading.grid import GridEngine, OPEN_STATUSES
+from app.trading.events import record_strategy_event
+from app.trading.recommendations import (
+    accept_recommendation,
+    claim_recommendation,
+    list_recommendations,
+    reject_recommendation,
+)
 from app.trading.backtest import run_grid_backtest
 from app.trading.pnl import grid_cell_statistics
 from app.trading.math import configured_grid_cells, strategy_grid_cells
@@ -24,7 +40,19 @@ class ProfilePayload(BaseModel):
     upper_price: Decimal = Field(gt=0)
     step_price: Decimal = Field(gt=0)
     quote_per_level: Decimal = Field(gt=0)
-    break_down_action: Literal["continue", "stop"] = "continue"
+    break_down_action: Literal["continue", "stop", "trailing_buy", "recommend"] = "continue"
+    breakout_confirm_bars: int = Field(default=2, ge=2, le=12)
+    breakout_ema_period: int = Field(default=50, ge=5, le=300)
+    trailing_buy_deviation_mode: Literal["fixed"] = "fixed"
+    trailing_buy_deviation_pct: Decimal = Field(default=Decimal("2"), gt=0, le=20)
+    trailing_buy_target_quote: Decimal = Field(default=Decimal("250"), gt=0)
+    trailing_buy_max_attempts: int = Field(default=2, ge=1, le=10)
+    trailing_buy_timeout_hours: int = Field(default=168, ge=1, le=24 * 30)
+    recovery_initial_stop_pct: Decimal = Field(default=Decimal("2.5"), gt=0, le=30)
+    recovery_trailing_activation_pct: Decimal = Field(default=Decimal("3"), gt=0, le=100)
+    recovery_trailing_pct: Decimal = Field(default=Decimal("1.5"), gt=0, le=30)
+    recovery_break_even_trigger_pct: Decimal = Field(default=Decimal("1"), ge=0, le=100)
+    recovery_cooldown_bars: int = Field(default=4, ge=1, le=168)
     break_up_action: Literal["continue", "stop"] = "stop"
     below_grid_lower_price: Decimal | None = Field(default=None, gt=0)
     buy_below_grid: bool = True
@@ -67,6 +95,8 @@ class ProfilePayload(BaseModel):
             raise ValueError("stop_loss must be below lower_price")
         if self.take_profit is not None and self.take_profit <= self.upper_price:
             raise ValueError("take_profit must be above upper_price")
+        if self.recovery_trailing_activation_pct < self.recovery_break_even_trigger_pct:
+            raise ValueError("recovery_trailing_activation_pct must not be below break-even trigger")
         return self
 
 
@@ -87,7 +117,7 @@ class BacktestPayload(BaseModel):
     below_grid_lower_price: Decimal | None = Field(default=None, gt=0)
     buy_below_grid: bool = True
     sell_below_grid: bool = False
-    break_down_action: Literal["continue", "stop"] = "continue"
+    break_down_action: Literal["continue", "stop", "trailing_buy", "recommend"] = "continue"
     break_up_action: Literal["continue", "stop"] = "stop"
 
     @model_validator(mode="after")
@@ -109,7 +139,45 @@ class BacktestPayload(BaseModel):
         return self
 
 
-def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: int = 0, filled_sells: int = 0) -> dict:
+async def create_current_range(session, profile: GridProfile, *, reason: str) -> GridRange:
+    grid_range = GridRange(
+        profile_id=profile.id,
+        lower_price=profile.lower_price,
+        upper_price=profile.upper_price,
+        step_price=profile.step_price,
+        grid_mode=profile.grid_mode,
+        step_percent=profile.step_percent,
+        status="ACTIVE",
+    )
+    session.add(grid_range)
+    await session.flush()
+    profile.current_range_id = grid_range.id
+    record_strategy_event(
+        session, profile_id=profile.id, event_type="GRID_RANGE_CREATED",
+        to_state="ACTIVE", reason=reason, metadata={"range_id": grid_range.id},
+    )
+    record_strategy_event(
+        session, profile_id=profile.id, event_type="GRID_RANGE_ACTIVATED",
+        to_state="ACTIVE", reason=reason, metadata={"range_id": grid_range.id},
+    )
+    return grid_range
+
+
+def range_dict(grid_range: GridRange | None) -> dict | None:
+    if grid_range is None:
+        return None
+    return {
+        "id": grid_range.id,
+        "lower_price": str(grid_range.lower_price),
+        "upper_price": str(grid_range.upper_price),
+        "step_price": str(grid_range.step_price),
+        "grid_mode": grid_range.grid_mode,
+        "step_percent": str(grid_range.step_percent) if grid_range.step_percent is not None else None,
+        "status": grid_range.status,
+    }
+
+
+def profile_dict(profile: GridProfile, *, current_range: GridRange | None = None, active_orders: int = 0, filled_buys: int = 0, filled_sells: int = 0) -> dict:
     return {
         "id": profile.id,
         "name": profile.name,
@@ -121,6 +189,18 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
         "quote_per_level": str(profile.quote_per_level),
         "regime_state": getattr(profile, "regime_state", "RANGE"),
         "break_down_action": getattr(profile, "break_down_action", "continue"),
+        "breakout_confirm_bars": profile.breakout_confirm_bars,
+        "breakout_ema_period": profile.breakout_ema_period,
+        "trailing_buy_deviation_mode": profile.trailing_buy_deviation_mode,
+        "trailing_buy_deviation_pct": str(profile.trailing_buy_deviation_pct),
+        "trailing_buy_target_quote": str(profile.trailing_buy_target_quote),
+        "trailing_buy_max_attempts": profile.trailing_buy_max_attempts,
+        "trailing_buy_timeout_hours": profile.trailing_buy_timeout_hours,
+        "recovery_initial_stop_pct": str(profile.recovery_initial_stop_pct),
+        "recovery_trailing_activation_pct": str(profile.recovery_trailing_activation_pct),
+        "recovery_trailing_pct": str(profile.recovery_trailing_pct),
+        "recovery_break_even_trigger_pct": str(profile.recovery_break_even_trigger_pct),
+        "recovery_cooldown_bars": profile.recovery_cooldown_bars,
         "break_up_action": getattr(profile, "break_up_action", "stop"),
         "below_grid_lower_price": (
             str(profile.below_grid_lower_price)
@@ -138,6 +218,8 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
         "buy_ladder_mode": profile.buy_ladder_mode,
         "sell_ladder_mode": profile.sell_ladder_mode,
         "ladder_multiplier": str(profile.ladder_multiplier),
+        "current_range_id": profile.current_range_id,
+        "current_range": range_dict(current_range),
         "lines": [str(x) for x in (
             [buy for buy, _ in configured_grid_cells(profile)]
             + [configured_grid_cells(profile)[-1][1]]
@@ -149,6 +231,10 @@ def profile_dict(profile: GridProfile, *, active_orders: int = 0, filled_buys: i
 
 
 async def profile_stats(session, profile: GridProfile) -> dict:
+    current_range = (
+        await session.get(GridRange, profile.current_range_id)
+        if profile.current_range_id is not None else None
+    )
     active = await session.scalar(
         select(func.count(GridOrder.id)).where(
             GridOrder.profile_id == profile.id,
@@ -171,6 +257,7 @@ async def profile_stats(session, profile: GridProfile) -> dict:
     )
     return profile_dict(
         profile,
+        current_range=current_range,
         active_orders=active or 0,
         filled_buys=buys or 0,
         filled_sells=sells or 0,
@@ -253,6 +340,18 @@ async def create_profile(payload: ProfilePayload) -> dict:
             quote_per_level=payload.quote_per_level,
             regime_state="RANGE",
             break_down_action=payload.break_down_action,
+            breakout_confirm_bars=payload.breakout_confirm_bars,
+            breakout_ema_period=payload.breakout_ema_period,
+            trailing_buy_deviation_mode=payload.trailing_buy_deviation_mode,
+            trailing_buy_deviation_pct=payload.trailing_buy_deviation_pct,
+            trailing_buy_target_quote=payload.trailing_buy_target_quote,
+            trailing_buy_max_attempts=payload.trailing_buy_max_attempts,
+            trailing_buy_timeout_hours=payload.trailing_buy_timeout_hours,
+            recovery_initial_stop_pct=payload.recovery_initial_stop_pct,
+            recovery_trailing_activation_pct=payload.recovery_trailing_activation_pct,
+            recovery_trailing_pct=payload.recovery_trailing_pct,
+            recovery_break_even_trigger_pct=payload.recovery_break_even_trigger_pct,
+            recovery_cooldown_bars=payload.recovery_cooldown_bars,
             break_up_action=payload.break_up_action,
             below_grid_lower_price=payload.below_grid_lower_price,
             buy_below_grid=payload.buy_below_grid,
@@ -269,6 +368,8 @@ async def create_profile(payload: ProfilePayload) -> dict:
             ladder_multiplier=payload.ladder_multiplier,
         )
         session.add(profile)
+        await session.flush()
+        await create_current_range(session, profile, reason="PROFILE_CREATED")
         await session.commit()
         await session.refresh(profile)
         return await profile_stats(session, profile)
@@ -324,6 +425,27 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
                 detail="profile may still hold base asset from completed BUYs; restart the old profile and let its SELL orders resolve before editing",
             )
 
+        open_lots = await session.scalar(
+            select(func.count(PositionLot.id)).where(
+                PositionLot.profile_id == profile.id,
+                PositionLot.remaining_qty > 0,
+            )
+        )
+        if open_lots:
+            raise HTTPException(
+                status_code=409,
+                detail="profile has open PositionLots; resolve inventory before changing settings",
+            )
+
+        range_changed = (
+            Decimal(profile.lower_price) != payload.lower_price
+            or Decimal(profile.upper_price) != payload.upper_price
+            or Decimal(profile.step_price) != payload.step_price
+            or profile.grid_mode != payload.grid_mode
+            or (Decimal(profile.step_percent) if profile.step_percent is not None else None)
+            != payload.step_percent
+        )
+
         profile.name = payload.name.strip()
         profile.symbol = payload.symbol.upper()
         profile.lower_price = payload.lower_price
@@ -332,6 +454,18 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         profile.quote_per_level = payload.quote_per_level
         profile.regime_state = "RANGE"
         profile.break_down_action = payload.break_down_action
+        profile.breakout_confirm_bars = payload.breakout_confirm_bars
+        profile.breakout_ema_period = payload.breakout_ema_period
+        profile.trailing_buy_deviation_mode = payload.trailing_buy_deviation_mode
+        profile.trailing_buy_deviation_pct = payload.trailing_buy_deviation_pct
+        profile.trailing_buy_target_quote = payload.trailing_buy_target_quote
+        profile.trailing_buy_max_attempts = payload.trailing_buy_max_attempts
+        profile.trailing_buy_timeout_hours = payload.trailing_buy_timeout_hours
+        profile.recovery_initial_stop_pct = payload.recovery_initial_stop_pct
+        profile.recovery_trailing_activation_pct = payload.recovery_trailing_activation_pct
+        profile.recovery_trailing_pct = payload.recovery_trailing_pct
+        profile.recovery_break_even_trigger_pct = payload.recovery_break_even_trigger_pct
+        profile.recovery_cooldown_bars = payload.recovery_cooldown_bars
         profile.break_up_action = payload.break_up_action
         profile.below_grid_lower_price = payload.below_grid_lower_price
         profile.buy_below_grid = payload.buy_below_grid
@@ -346,6 +480,16 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         profile.buy_ladder_mode = payload.buy_ladder_mode
         profile.sell_ladder_mode = payload.sell_ladder_mode
         profile.ladder_multiplier = payload.ladder_multiplier
+        if range_changed:
+            previous = (
+                await session.get(GridRange, profile.current_range_id)
+                if profile.current_range_id is not None else None
+            )
+            if previous is not None:
+                previous.status = "CLOSED"
+                previous.close_reason = "MANUAL_REGRID"
+                previous.ended_at = datetime.now(timezone.utc)
+            await create_current_range(session, profile, reason="MANUAL_REGRID")
         await session.commit()
         return await profile_stats(session, profile)
 
@@ -371,10 +515,13 @@ async def start_profile(profile_id: int) -> dict:
         profile = await session.get(GridProfile, profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="profile not found")
+        if profile.current_range_id is None:
+            await create_current_range(session, profile, reason="START_BOOTSTRAP")
         if profile.strategy == "dca":
             has_initial = await session.scalar(
                 select(func.count(GridOrder.id)).where(
                     GridOrder.profile_id == profile.id,
+                    GridOrder.range_id == profile.current_range_id,
                     GridOrder.order_role == "dca_initial_buy",
                 )
             )
@@ -392,7 +539,13 @@ async def start_profile(profile_id: int) -> dict:
                         detail="DCA Grid можно запустить только когда цена находится внутри диапазона",
                     )
         profile.enabled = True
-        profile.regime_state = "RANGE"
+        known_states = {
+            "RANGE", "BREAK_UP", "BREAK_DOWN", "TRAILING_BUY", "RECOVERY_ENTERING",
+            "RECOVERY_LONG", "RECOVERY_EXITING", "RECOVERY_COOLDOWN", "WAIT_MANUAL",
+            "WAIT_RANGE", "RECOMMENDATION_PENDING", "STOPPED",
+        }
+        if profile.regime_state == "STOPPED" or profile.regime_state not in known_states:
+            profile.regime_state = "RANGE"
         await session.commit()
         return {"ok": True, "enabled": True, "regime_state": profile.regime_state}
 
@@ -447,9 +600,58 @@ async def stop_profile(profile_id: int) -> dict:
         profile = await session.get(GridProfile, profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="profile not found")
+        active_recovery = await session.scalar(
+            select(RecoveryTrade.id)
+            .join(BreakdownEpisode)
+            .where(
+                BreakdownEpisode.profile_id == profile_id,
+                RecoveryTrade.status.in_({"ENTERING", "OPEN", "EXITING"}),
+            )
+            .limit(1)
+        )
+        if active_recovery is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Close Recovery first via POST /api/profiles/{id}/recovery/close",
+            )
         profile.enabled = False
         await session.commit()
         return {"ok": True, "enabled": False, "note": "worker cancels open orders on next tick"}
+
+
+@router.post("/profiles/{profile_id}/recovery/close")
+async def close_recovery(profile_id: int) -> dict:
+    exchange = BybitClient()
+    try:
+        async with SessionLocal() as session:
+            profile = await session.get(GridProfile, profile_id)
+            if profile is None:
+                raise HTTPException(status_code=404, detail="profile not found")
+            trade = await session.scalar(
+                select(RecoveryTrade)
+                .join(BreakdownEpisode)
+                .where(
+                    BreakdownEpisode.profile_id == profile_id,
+                    RecoveryTrade.status.in_({"ENTERING", "OPEN", "EXITING"}),
+                )
+                .order_by(RecoveryTrade.id.desc()).limit(1)
+            )
+            if trade is None:
+                raise HTTPException(status_code=409, detail="no active recovery trade")
+            if trade.status == "ENTERING":
+                raise HTTPException(status_code=409, detail="recovery entry is still pending")
+            if trade.status == "EXITING":
+                return {"ok": True, "status": "RECOVERY_EXITING"}
+            episode = await session.get(BreakdownEpisode, trade.breakdown_episode_id)
+            market_price = await exchange.last_price(profile.symbol)
+            await GridEngine(exchange)._begin_recovery_exit(
+                session, profile, episode, trade, "MANUAL_CLOSE", market_price
+            )
+            return {"ok": True, "status": "RECOVERY_EXITING"}
+    except BybitError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await exchange.close()
 
 
 @router.get("/profiles/{profile_id}/orders")
@@ -467,6 +669,7 @@ async def profile_orders(profile_id: int, limit: int = 100) -> list[dict]:
         return [
             {
                 "id": order.id,
+                "range_id": order.range_id,
                 "side": order.side,
                 "grid_buy_price": str(order.grid_buy_price),
                 "price": str(order.price),
@@ -502,7 +705,7 @@ async def cancel_profile_order(profile_id: int, order_id: int) -> dict:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             await exchange.close()
-        order.status = "CancelledByUser"
+        order.status = "CancelRequestedByUser"
         await session.commit()
         return {"ok": True, "status": order.status}
 
@@ -566,4 +769,243 @@ async def profile_pnl(profile_id: int) -> dict:
         "inventory_value": str(inventory * market_price),
         "market_price": str(market_price),
     })
+    async with SessionLocal() as session:
+        lot_inventory = await session.scalar(
+            select(func.coalesce(func.sum(PositionLot.remaining_qty), 0)).where(
+                PositionLot.profile_id == profile_id,
+                PositionLot.status == "OPEN",
+            )
+        )
+    lot_inventory = Decimal(lot_inventory or 0)
+    stats["lot_reconciliation"] = {
+        "base_inventory_legacy": str(inventory),
+        "base_inventory_lots": str(lot_inventory),
+        "difference": str(inventory - lot_inventory),
+    }
     return stats
+
+
+def recommendation_dict(item: StrategyRecommendation) -> dict:
+    return {
+        "id": item.id,
+        "profile_id": item.profile_id,
+        "type": item.type,
+        "status": item.status,
+        "payload": item.payload,
+        "market_price": str(item.market_price) if item.market_price is not None else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+        "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
+    }
+
+
+@router.get("/profiles/{profile_id}/diagnostics")
+async def profile_diagnostics(profile_id: int) -> dict:
+    async with SessionLocal() as session:
+        profile = await session.get(GridProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        open_orders = await session.scalar(select(func.count(GridOrder.id)).where(
+            GridOrder.profile_id == profile_id, GridOrder.status.in_(OPEN_STATUSES),
+        ))
+        open_lots = await session.scalar(select(func.count(PositionLot.id)).where(
+            PositionLot.profile_id == profile_id, PositionLot.remaining_qty > 0,
+        ))
+        lot_inventory = await session.scalar(select(func.coalesce(func.sum(PositionLot.remaining_qty), 0)).where(
+            PositionLot.profile_id == profile_id, PositionLot.remaining_qty > 0,
+        ))
+        pending = await session.scalar(select(func.count(StrategyRecommendation.id)).where(
+            StrategyRecommendation.profile_id == profile_id,
+            StrategyRecommendation.status == "PENDING",
+        ))
+        recovery = await session.scalar(
+            select(RecoveryTrade)
+            .join(BreakdownEpisode)
+            .where(
+                BreakdownEpisode.profile_id == profile_id,
+                RecoveryTrade.status.in_({"TRACKING", "TRIGGERED", "ENTERING", "OPEN", "EXITING"}),
+            )
+            .order_by(RecoveryTrade.id.desc())
+            .limit(1)
+        )
+        orders = list((await session.execute(
+            select(GridOrder).options(selectinload(GridOrder.executions)).where(
+                GridOrder.profile_id == profile_id,
+            )
+        )).scalars())
+        legacy_inventory = Decimal("0")
+        for order in orders:
+            for execution in order.executions:
+                qty = Decimal(execution.exec_qty)
+                fee = Decimal(execution.exec_fee or 0)
+                if order.side == "Buy":
+                    legacy_inventory += qty
+                else:
+                    legacy_inventory -= qty
+                # The exchange uses the base coin as fee currency for the common
+                # spot pairs supported by this MVP.
+                if (execution.fee_currency or "").upper() == profile.symbol[:-4].upper():
+                    legacy_inventory -= fee
+        lot_inventory = Decimal(lot_inventory or 0)
+        current_range = await session.get(GridRange, profile.current_range_id) if profile.current_range_id else None
+        return {
+            "current_range": range_dict(current_range),
+            "open_orders": open_orders or 0,
+            "open_lots": open_lots or 0,
+            "legacy_inventory": str(legacy_inventory),
+            "lot_inventory": str(lot_inventory),
+            "inventory_difference": str(legacy_inventory - lot_inventory),
+            "pending_recommendations": pending or 0,
+            "recovery": (
+                {
+                    "id": recovery.id,
+                    "status": recovery.status,
+                    "attempt": recovery.attempt_number,
+                    "lowest_price": str(recovery.lowest_price),
+                    "trigger_price": str(recovery.trigger_price),
+                    "effective_stop_price": str(recovery.effective_stop_price) if recovery.effective_stop_price is not None else None,
+                }
+                if recovery is not None else None
+            ),
+        }
+
+
+@router.get("/profiles/{profile_id}/recommendations")
+async def profile_recommendations(profile_id: int) -> list[dict]:
+    async with SessionLocal() as session:
+        profile = await session.get(GridProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        items = await list_recommendations(session, profile_id)
+        if profile.regime_state == "RECOMMENDATION_PENDING" and not any(
+            item.status == "PENDING" and item.type == "START_TRAILING_BUY" for item in items
+        ):
+            profile.regime_state = "WAIT_MANUAL"
+            record_strategy_event(
+                session, profile_id=profile.id, event_type="RECOMMENDATION_EXPIRED",
+                from_state="RECOMMENDATION_PENDING", to_state="WAIT_MANUAL",
+            )
+        await session.commit()
+        return [recommendation_dict(item) for item in items]
+
+
+@router.post("/recommendations/{recommendation_id}/accept")
+async def accept_profile_recommendation(recommendation_id: int) -> dict:
+    exchange = BybitClient()
+    async with SessionLocal() as session:
+        recommendation = await claim_recommendation(session, recommendation_id)
+        if recommendation is None:
+            await exchange.close()
+            raise HTTPException(status_code=409, detail="recommendation is no longer pending or has expired")
+        try:
+            if recommendation.type == "START_TRAILING_BUY":
+                profile = await session.get(GridProfile, recommendation.profile_id)
+                if profile is None:
+                    raise HTTPException(status_code=404, detail="profile not found")
+                source_range_id = recommendation.payload.get("source_range_id")
+                grid_range = (
+                    await session.get(GridRange, profile.current_range_id)
+                    if profile.current_range_id is not None else None
+                )
+                active_recovery = await session.scalar(
+                    select(RecoveryTrade.id)
+                    .join(BreakdownEpisode)
+                    .where(
+                        BreakdownEpisode.profile_id == profile.id,
+                        RecoveryTrade.status.in_({"TRACKING", "TRIGGERED", "ENTERING", "OPEN", "EXITING"}),
+                    )
+                    .limit(1)
+                )
+                if (
+                    str(source_range_id) != str(profile.current_range_id)
+                    or grid_range is None
+                    or grid_range.status != "PAUSED"
+                    or profile.regime_state != "RECOMMENDATION_PENDING"
+                    or active_recovery is not None
+                ):
+                    raise HTTPException(status_code=409, detail="recommendation no longer matches the current paused range")
+                await GridEngine(exchange).start_trailing_buy(session, profile)
+            await accept_recommendation(session, recommendation)
+            await session.commit()
+            return recommendation_dict(recommendation)
+        except Exception as exc:
+            recommendation.status = "FAILED"
+            recommendation.resolved_at = datetime.now(timezone.utc)
+            failed_profile = await session.get(GridProfile, recommendation.profile_id)
+            if (
+                failed_profile is not None
+                and recommendation.type == "START_TRAILING_BUY"
+                and failed_profile.regime_state == "RECOMMENDATION_PENDING"
+            ):
+                failed_profile.regime_state = "WAIT_MANUAL"
+                record_strategy_event(
+                    session, profile_id=failed_profile.id, event_type="RECOMMENDATION_REJECTED",
+                    from_state="RECOMMENDATION_PENDING", to_state="WAIT_MANUAL",
+                    reason="ACCEPT_VALIDATION_FAILED",
+                    metadata={"recommendation_id": recommendation.id},
+                )
+            await session.commit()
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            await exchange.close()
+
+
+@router.post("/recommendations/{recommendation_id}/reject")
+async def reject_profile_recommendation(recommendation_id: int) -> dict:
+    async with SessionLocal() as session:
+        recommendation = await reject_recommendation(session, recommendation_id)
+        if recommendation is None:
+            raise HTTPException(status_code=409, detail="recommendation is no longer pending or has expired")
+        profile = await session.get(GridProfile, recommendation.profile_id)
+        if (
+            profile is not None
+            and recommendation.type == "START_TRAILING_BUY"
+            and profile.regime_state == "RECOMMENDATION_PENDING"
+        ):
+            profile.regime_state = "WAIT_MANUAL"
+            record_strategy_event(
+                session, profile_id=profile.id, event_type="RECOMMENDATION_REJECTED",
+                from_state="RECOMMENDATION_PENDING", to_state="WAIT_MANUAL",
+                metadata={"recommendation_id": recommendation.id},
+            )
+        await session.commit()
+        return recommendation_dict(recommendation)
+
+
+@router.post("/recommendations/{recommendation_id}/continue-grid")
+async def continue_grid_recommendation(recommendation_id: int) -> dict:
+    async with SessionLocal() as session:
+        recommendation = await reject_recommendation(session, recommendation_id)
+        if recommendation is None or recommendation.type != "START_TRAILING_BUY":
+            raise HTTPException(status_code=409, detail="trailing-buy recommendation is no longer pending")
+        profile = await session.get(GridProfile, recommendation.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        grid_range = await session.get(GridRange, profile.current_range_id) if profile.current_range_id else None
+        if grid_range is not None:
+            grid_range.status = "ACTIVE"
+        profile.break_down_action = "continue"
+        profile.regime_state = "RANGE"
+        record_strategy_event(
+            session, profile_id=profile.id, event_type="GRID_RANGE_ACTIVATED",
+            from_state="PAUSED", to_state="ACTIVE", reason="RECOMMENDATION_CONTINUE_GRID",
+            metadata={"recommendation_id": recommendation.id, "range_id": profile.current_range_id},
+        )
+        await session.commit()
+        return {"ok": True, "enabled": profile.enabled, "regime_state": profile.regime_state}
+
+
+@router.post("/recommendations/{recommendation_id}/stop")
+async def stop_recommendation(recommendation_id: int) -> dict:
+    async with SessionLocal() as session:
+        recommendation = await reject_recommendation(session, recommendation_id)
+        if recommendation is None or recommendation.type != "START_TRAILING_BUY":
+            raise HTTPException(status_code=409, detail="trailing-buy recommendation is no longer pending")
+        profile = await session.get(GridProfile, recommendation.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        profile.enabled = False
+        await session.commit()
+        return {"ok": True, "enabled": False, "note": "worker cancels open orders on next tick"}

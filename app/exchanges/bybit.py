@@ -150,6 +150,23 @@ class BybitClient:
             {"accountType": "UNIFIED", "coin": coins},
         )
 
+    async def available_balance(self, coin: str) -> Decimal:
+        """Return the exchange-reported available amount, excluding locked spot funds."""
+        data = await self.wallet_balance(coin.upper())
+        accounts = data.get("result", {}).get("list", [])
+        for account in accounts:
+            for item in account.get("coin", []):
+                if item.get("coin", "").upper() != coin.upper():
+                    continue
+                for key in ("availableToWithdraw", "availableBalance", "free"):
+                    raw = item.get(key)
+                    if raw not in (None, ""):
+                        return Decimal(raw)
+                wallet = Decimal(item.get("walletBalance") or "0")
+                locked = Decimal(item.get("locked") or "0")
+                return max(wallet - locked, Decimal("0"))
+        return Decimal("0")
+
     async def place_limit_order(
         self,
         *,
@@ -197,6 +214,17 @@ class BybitClient:
         if items:
             return items[0]
 
+        history = await self.private_get("/v5/order/history", params)
+        items = history["result"]["list"]
+        return items[0] if items else None
+
+    async def get_order_by_link_id(self, *, order_link_id: str, symbol: str) -> dict | None:
+        """Find a possibly already-created order after a worker restart/network retry."""
+        params = {"category": "spot", "symbol": symbol, "orderLinkId": order_link_id}
+        realtime = await self.private_get("/v5/order/realtime", params)
+        items = realtime["result"]["list"]
+        if items:
+            return items[0]
         history = await self.private_get("/v5/order/history", params)
         items = history["result"]["list"]
         return items[0] if items else None

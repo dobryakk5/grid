@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.exchanges.bybit import InstrumentInfo
-from app.trading.grid import GridEngine, classify_regime
+from app.trading.grid import GridEngine, SYNC_STATUSES, classify_regime
 
 
 INFO = InstrumentInfo(
@@ -26,9 +26,10 @@ class ScalarRows:
 
 
 class FakeSession:
-    def __init__(self, rows):
+    def __init__(self, rows, grid_range=None):
         self.rows = rows
         self.added = []
+        self.grid_range = grid_range
 
     async def execute(self, _statement):
         return ScalarRows(self.rows)
@@ -38,6 +39,9 @@ class FakeSession:
 
     async def flush(self):
         pass
+
+    async def get(self, _model, _id):
+        return self.grid_range
 
     async def commit(self):
         pass
@@ -69,13 +73,24 @@ def profile():
         quote_per_level=Decimal("25"),
         grid_mode="arithmetic",
         step_percent=None,
+        current_range_id=5,
+    )
+
+
+def current_range():
+    return SimpleNamespace(
+        id=5, profile_id=1, lower_price=Decimal("62000"),
+        upper_price=Decimal("67000"), step_price=Decimal("1000"),
+        grid_mode="arithmetic", step_percent=None, status="ACTIVE",
     )
 
 
 @pytest.mark.asyncio
 async def test_only_nearest_buy_is_seeded():
     exchange = FakeExchange()
-    await GridEngine(exchange).seed_missing_buy_orders(FakeSession([]), profile())
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([], current_range()), profile()
+    )
     assert [item["price"] for item in exchange.placed] == [Decimal("65000")]
 
 
@@ -88,9 +103,23 @@ async def test_next_buy_arms_after_previous_cell_has_sell():
     )
     exchange = FakeExchange()
     await GridEngine(exchange).seed_missing_buy_orders(
-        FakeSession([existing_sell]), profile()
+        FakeSession([existing_sell], current_range()), profile()
     )
     assert [item["price"] for item in exchange.placed] == [Decimal("64000")]
+
+
+@pytest.mark.asyncio
+async def test_paused_range_cannot_seed_new_grid_buy():
+    paused = current_range()
+    paused.status = "PAUSED"
+    exchange = FakeExchange()
+    await GridEngine(exchange).seed_missing_buy_orders(FakeSession([], paused), profile())
+    assert exchange.placed == []
+
+
+def test_cancel_requested_orders_remain_in_sync_set():
+    assert "CancelRequestedBreakdown" in SYNC_STATUSES
+    assert "CancelRequestedByUser" in SYNC_STATUSES
 
 
 def test_breakout_requires_two_hourly_closes():
@@ -112,9 +141,12 @@ async def test_below_grid_buy_can_be_kept_without_sell_order():
         side="Buy", filled_qty=Decimal("0.001"), qty=Decimal("0.001"),
         grid_buy_price=Decimal("61000"), order_role="below_grid",
         replacement_created=False,
+        range_id=5,
     )
     exchange = FakeExchange()
-    await GridEngine(exchange)._create_replacement(FakeSession([]), p, order, INFO)
+    await GridEngine(exchange)._create_replacement(
+        FakeSession([], current_range()), p, order, INFO
+    )
     assert order.replacement_created is True
     assert order.order_role == "below_accumulation"
     assert exchange.placed == []
