@@ -1,31 +1,952 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Grid Bot</title>
   <style>
-    :root{color-scheme:dark;--bg:#0b0e14;--panel:#121722;--line:#273044;--text:#e6eaf2;--muted:#8e9aaf;--good:#58d68d;--bad:#ff6b6b;--accent:#6ea8fe}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif}.wrap{max-width:1240px;margin:auto;padding:28px 20px 60px}.top,.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px}.top{margin-bottom:24px}h1,h2{margin:0}.price{font-size:22px;font-weight:700;text-align:right}.price small{display:block;color:var(--muted);font-size:11px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px}.profiles{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}.profile-name,button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text);padding:10px 14px;border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none}.profile-name.selected,.primary{border-color:var(--accent);background:#1c4d8f}.muted{color:var(--muted)}.empty{padding:22px;text-align:center;color:var(--muted)}.error,.bad{color:var(--bad)}.good,.side-buy{color:var(--good)}.side-sell{color:var(--bad)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:14px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 11px;border-bottom:1px solid #202838;white-space:nowrap}th{font-size:11px;color:var(--muted);background:#0e131d}.cancel-order{border:0;background:transparent;color:var(--muted);font-size:22px;line-height:1;padding:3px 8px}.cancel-order:hover{color:var(--bad)}.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px;margin-top:14px}.box{background:#0e131d;border:1px solid #202838;border-radius:9px;padding:11px}.box span{display:block;color:var(--muted);font-size:11px}.box b{font-size:16px}.hidden{display:none}@media(max-width:600px){.top{align-items:flex-start}.price{font-size:16px}.section-head{align-items:flex-start;flex-direction:column}}
+    :root{
+      color-scheme:dark;
+      --bg:#0b0e14;
+      --panel:#121722;
+      --panel2:#0e131d;
+      --line:#273044;
+      --line2:#202838;
+      --text:#e6eaf2;
+      --muted:#8e9aaf;
+      --good:#58d68d;
+      --bad:#ff6b6b;
+      --accent:#6ea8fe;
+      --accent-bg:#172338;
+      --warn:#f2c66d;
+    }
+
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif
+    }
+
+    button,a,select{font:inherit}
+    button,a{transition:.15s ease}
+
+    .wrap{
+      max-width:1180px;
+      margin:auto;
+      padding:24px 20px 60px
+    }
+
+    .top,
+    .section-head,
+    .profile-head,
+    .history-toggle{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:16px
+    }
+
+    .top{margin-bottom:20px}
+    h1,h2,h3{margin:0}
+    h1{font-size:24px}
+    h2{font-size:17px}
+    h3{font-size:15px}
+
+    .price{
+      font-size:20px;
+      font-weight:750;
+      text-align:right
+    }
+
+    .price small{
+      display:block;
+      color:var(--muted);
+      font-size:11px;
+      font-weight:500
+    }
+
+    .panel{
+      background:var(--panel);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:18px;
+      margin-bottom:16px
+    }
+
+    .compact-panel{padding:14px 16px}
+
+    .profiles{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:12px
+    }
+
+    .profile-name,
+    button,
+    .button{
+      border:1px solid var(--line);
+      background:#171d2a;
+      color:var(--text);
+      padding:9px 13px;
+      border-radius:9px;
+      cursor:pointer;
+      font-weight:650;
+      text-decoration:none
+    }
+
+    button:hover,.button:hover,.profile-name:hover{border-color:#3a4660}
+    .profile-name.selected,.primary{
+      border-color:var(--accent);
+      background:#1c4d8f
+    }
+
+    .stop-btn{
+      color:var(--bad);
+      background:transparent;
+      border-color:#5c3038
+    }
+
+    .muted{color:var(--muted)}
+    .good,.side-buy{color:var(--good)}
+    .bad,.side-sell{color:var(--bad)}
+    .warn{color:var(--warn)}
+    .hidden{display:none!important}
+
+    .empty{
+      padding:24px 8px;
+      text-align:center;
+      color:var(--muted)
+    }
+
+    .error{
+      color:var(--bad);
+      padding:12px 0
+    }
+
+    .profile-meta{
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:5px
+    }
+
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      padding:3px 8px;
+      color:var(--muted);
+      font-size:11px;
+      font-weight:700;
+      letter-spacing:.02em
+    }
+
+    .badge.running{
+      color:var(--good);
+      border-color:#2d5a45;
+      background:#102219
+    }
+
+    .badge.next{
+      color:var(--accent);
+      border-color:#31547d;
+      background:#112238
+    }
+
+    .summary{
+      display:grid;
+      grid-template-columns:repeat(4,minmax(0,1fr));
+      gap:9px;
+      margin-top:14px
+    }
+
+    .box{
+      background:var(--panel2);
+      border:1px solid var(--line2);
+      border-radius:10px;
+      padding:12px
+    }
+
+    .box span{
+      display:block;
+      color:var(--muted);
+      font-size:11px
+    }
+
+    .box b{
+      display:block;
+      margin-top:3px;
+      font-size:17px
+    }
+
+    .position-list{
+      display:grid;
+      gap:9px;
+      margin-top:14px
+    }
+
+    .position-card{
+      display:grid;
+      grid-template-columns:minmax(220px,1.5fr) minmax(120px,.8fr) minmax(120px,.8fr) auto;
+      gap:14px;
+      align-items:center;
+      background:var(--panel2);
+      border:1px solid var(--line2);
+      border-radius:11px;
+      padding:13px
+    }
+
+    .position-route{
+      font-size:15px;
+      font-weight:750
+    }
+
+    .position-sub{
+      color:var(--muted);
+      font-size:12px;
+      margin-top:3px
+    }
+
+    .mini-label{
+      display:block;
+      color:var(--muted);
+      font-size:11px;
+      margin-bottom:2px
+    }
+
+    .position-status{
+      text-align:right
+    }
+
+    .next-card{
+      margin-top:14px;
+      border:1px solid #31547d;
+      background:var(--accent-bg);
+      border-radius:12px;
+      padding:15px
+    }
+
+    .next-main{
+      display:grid;
+      grid-template-columns:1fr auto;
+      gap:18px;
+      align-items:center
+    }
+
+    .next-price{
+      font-size:20px;
+      font-weight:800
+    }
+
+    .next-details{
+      display:flex;
+      gap:18px;
+      flex-wrap:wrap;
+      margin-top:9px;
+      color:var(--muted);
+      font-size:12px
+    }
+
+    .history-toggle{
+      width:100%;
+      background:transparent;
+      padding:0;
+      border:0;
+      border-radius:0;
+      text-align:left
+    }
+
+    .history-toggle:hover{border:0}
+    .history-toggle .left{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      min-width:0
+    }
+
+    .history-count{
+      color:var(--muted);
+      font-size:12px
+    }
+
+    .chevron{
+      color:var(--muted);
+      font-size:17px;
+      line-height:1
+    }
+
+    .history-body{margin-top:14px}
+
+    .table-wrap{
+      overflow:auto;
+      border:1px solid var(--line);
+      border-radius:10px
+    }
+
+    table{
+      width:100%;
+      border-collapse:collapse;
+      min-width:720px
+    }
+
+    th,td{
+      text-align:left;
+      padding:10px 11px;
+      border-bottom:1px solid var(--line2);
+      white-space:nowrap
+    }
+
+    tbody tr:last-child td{border-bottom:0}
+
+    th{
+      font-size:11px;
+      color:var(--muted);
+      background:var(--panel2)
+    }
+
+    details{
+      background:var(--panel);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px 16px
+    }
+
+    details summary{
+      cursor:pointer;
+      color:var(--muted);
+      font-weight:650
+    }
+
+    .tech-grid{
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:9px;
+      margin-top:14px
+    }
+
+    .cancel-order{
+      border:0;
+      background:transparent;
+      color:var(--muted);
+      font-size:20px;
+      line-height:1;
+      padding:3px 8px
+    }
+
+    .cancel-order:hover{
+      color:var(--bad);
+      border:0
+    }
+
+    .top-actions{
+      display:flex;
+      align-items:center;
+      gap:12px
+    }
+
+    @media(max-width:850px){
+      .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .position-card{
+        grid-template-columns:1fr 1fr;
+      }
+      .position-status{text-align:left}
+      .tech-grid{grid-template-columns:1fr 1fr}
+    }
+
+    @media(max-width:600px){
+      .wrap{padding:18px 12px 40px}
+      .top{align-items:flex-start}
+      .top-actions{align-items:flex-end;flex-direction:column}
+      .price{font-size:16px}
+      .section-head,.profile-head{align-items:flex-start}
+      .profile-head{flex-direction:column}
+      .position-card{grid-template-columns:1fr}
+      .summary{grid-template-columns:1fr 1fr}
+      .next-main{grid-template-columns:1fr}
+      .tech-grid{grid-template-columns:1fr}
+    }
   </style>
 </head>
-<body><div class="wrap">
-  <header class="top"><h1>Grid Bot</h1><div style="display:flex;align-items:center;gap:14px"><a class="button primary" href="profiles/new">Создать профиль</a><div class="price"><small>BTCUSDT сейчас</small><span id="btcPrice">—</span></div></div></header>
 
-  <section class="panel"><div class="section-head"><h2>Работающие профили</h2><span class="muted" id="profileCount"></span></div><div id="profiles" class="profiles"></div></section>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Grid Bot</h1>
+    <div class="top-actions">
+      <a class="button primary" href="profiles/new">Создать профиль</a>
+      <div class="price">
+        <small>BTCUSDT сейчас</small>
+        <span id="btcPrice">—</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="panel compact-panel">
+    <div class="section-head">
+      <h2>Профили</h2>
+      <span class="muted" id="profileCount"></span>
+    </div>
+    <div id="profiles" class="profiles"></div>
+  </section>
 
   <section id="details" class="hidden">
-    <div class="panel"><div class="section-head"><h2 id="pnlTitle">Результат</h2><button id="stopBtn">Stop</button></div><div id="pnl"></div></div>
-    <div class="panel"><div class="section-head"><h2 id="ordersTitle">Заявки и сделки</h2><button id="refreshBtn">Обновить</button></div><div id="orders"></div></div>
+    <section class="panel">
+      <div class="profile-head">
+        <div>
+          <h2 id="profileTitle">—</h2>
+          <div class="profile-meta">
+            <span id="profileStatus" class="badge running">RUNNING</span>
+            <span id="profileRegime" class="badge">—</span>
+            <span class="muted">DEMO</span>
+          </div>
+        </div>
+        <button id="stopBtn" class="stop-btn">Остановить</button>
+      </div>
+
+      <div id="summary" class="summary"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Открытые позиции</h2>
+        <span id="openCount" class="muted"></span>
+      </div>
+      <div id="openPositions"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Следующий шаг</h2>
+        <button id="refreshBtn">Обновить</button>
+      </div>
+      <div id="nextStep"></div>
+    </section>
+
+    <section class="panel">
+      <button id="historyToggle" class="history-toggle" type="button">
+        <span class="left">
+          <h2>История</h2>
+          <span id="historyCount" class="history-count"></span>
+        </span>
+        <span id="historyChevron" class="chevron">▾</span>
+      </button>
+
+      <div id="historyBody" class="history-body hidden">
+        <div id="history"></div>
+      </div>
+    </section>
+
+    <details>
+      <summary>Диагностика и все биржевые заявки</summary>
+      <div id="technical"></div>
+    </details>
   </section>
-</div><script>
-let profiles=[],selectedId=null;const $=id=>document.getElementById(id);const money=v=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:8});const esc=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-async function api(url,options={}){const r=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);return d}
-async function loadPrice(){try{const p=await api('/api/price/BTCUSDT');$('btcPrice').textContent=money(p.last_price)+' USDT'}catch{$('btcPrice').textContent='нет связи'}}
-function renderProfiles(){const root=$('profiles');$('profileCount').textContent=profiles.length?`${profiles.length}`:'';if(!profiles.length){root.innerHTML='<div class="empty">Нет работающих профилей. Создайте или запустите профиль.</div>';$('details').classList.add('hidden');return}root.innerHTML=profiles.map(p=>`<button class="profile-name ${p.id===selectedId?'selected':''}" onclick="selectProfile(${p.id})">${esc(p.name)} · DEMO · ${esc(p.regime_state)}</button>`).join('')}
-async function loadProfiles(){try{profiles=(await api('/api/profiles')).filter(p=>p.enabled);if(!profiles.some(p=>p.id===selectedId))selectedId=profiles[0]?.id||null;renderProfiles();if(selectedId)await loadDetails()}catch(e){$('profiles').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
-async function selectProfile(id){selectedId=id;renderProfiles();await loadDetails()}
-async function loadDetails(){const p=profiles.find(x=>x.id===selectedId);if(!p)return;$('details').classList.remove('hidden');$('pnlTitle').textContent=p.name;$('ordersTitle').textContent=`Заявки и сделки · ${p.name}`;await Promise.all([loadPnl(),loadOrders()])}
-async function loadPnl(){try{const d=await api(`/api/profiles/${selectedId}/pnl`),t=d.total;$('pnl').innerHTML=`<div class="summary"><div class="box"><span>Циклов</span><b>${t.cycles}</b></div><div class="box"><span>Realized PnL</span><b>${money(t.realized_pnl)}</b></div><div class="box"><span>Unrealized PnL</span><b>${money(t.unrealized_pnl)}</b></div><div class="box"><span>Total PnL</span><b class="${Number(t.total_pnl)>=0?'good':'bad'}">${money(t.total_pnl)}</b></div><div class="box"><span>Комиссии</span><b>${money(t.fees_quote)}</b></div><div class="box"><span>BTC inventory</span><b>${money(t.base_inventory)}</b></div></div><div class="table-wrap"><table><thead><tr><th>Ячейка</th><th>Состояние</th><th>Циклов</th><th>Net</th></tr></thead><tbody>${d.cells.map(c=>`<tr><td>${money(c.buy_price)} → ${money(c.sell_price)}</td><td>${esc(c.state)}</td><td>${c.cycles}</td><td>${money(c.net_profit)}</td></tr>`).join('')}</tbody></table></div>`}catch(e){$('pnl').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
-async function loadOrders(){try{const rows=await api(`/api/profiles/${selectedId}/orders?limit=150`);$('orders').innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>Время</th><th>Тип</th><th>Роль</th><th>Цена</th><th>Количество</th><th>Статус</th><th></th></tr></thead><tbody>${rows.map(o=>`<tr><td>${new Date(o.updated_at||o.created_at).toLocaleString('ru-RU')}</td><td class="${o.side==='Buy'?'side-buy':'side-sell'}">${o.side.toUpperCase()}</td><td>${esc(o.order_role)}</td><td>${money(o.price)}</td><td>${money(o.filled_qty||o.qty)}</td><td>${esc(o.status)}</td><td>${['New','Untriggered','Created'].includes(o.status)?`<button class="cancel-order" title="Отменить заявку" onclick="cancelOrder(${o.id})">×</button>`:''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Заявок пока нет</div>'}catch(e){$('orders').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
-async function cancelOrder(orderId){if(!confirm('Отменить эту заявку?'))return;try{await api(`/api/profiles/${selectedId}/orders/${orderId}/cancel`,{method:'POST'});await loadOrders()}catch(e){alert(e.message)}}
-$('refreshBtn').onclick=loadProfiles;$('stopBtn').onclick=async()=>{await api(`/api/profiles/${selectedId}/stop`,{method:'POST'});await loadProfiles()};loadPrice();loadProfiles();setInterval(loadPrice,10000);setInterval(loadProfiles,5000);
-</script></body></html>
+</div>
+
+<script>
+let profiles = [];
+let selectedId = null;
+let currentPrice = null;
+let currentPnl = null;
+let currentOrders = [];
+
+const $ = id => document.getElementById(id);
+
+const money = v => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return n.toLocaleString('ru-RU', {maximumFractionDigits: 8});
+};
+
+const esc = s => String(s ?? '').replace(/[&<>'"]/g, c => ({
+  '&':'&amp;',
+  '<':'&lt;',
+  '>':'&gt;',
+  "'":'&#39;',
+  '"':'&quot;'
+}[c]));
+
+const activeStatuses = new Set(['New', 'Untriggered', 'Created', 'PartiallyFilled']);
+const filledStatuses = new Set(['Filled', 'PartiallyFilled']);
+
+async function api(url, options = {}) {
+  const r = await fetch(url, {
+    headers: {'Content-Type':'application/json'},
+    ...options
+  });
+
+  const d = await r.json().catch(() => ({}));
+
+  if (!r.ok) {
+    throw new Error(d.detail || `HTTP ${r.status}`);
+  }
+
+  return d;
+}
+
+async function loadPrice() {
+  try {
+    const p = await api('/api/price/BTCUSDT');
+    currentPrice = Number(p.last_price);
+    $('btcPrice').textContent = money(currentPrice) + ' USDT';
+    renderOpenPositions();
+    renderNextStep();
+  } catch {
+    currentPrice = null;
+    $('btcPrice').textContent = 'нет связи';
+  }
+}
+
+function renderProfiles() {
+  const root = $('profiles');
+
+  $('profileCount').textContent = profiles.length ? `${profiles.length}` : '';
+
+  if (!profiles.length) {
+    root.innerHTML = '<div class="empty">Нет работающих профилей. Создайте или запустите профиль.</div>';
+    $('details').classList.add('hidden');
+    return;
+  }
+
+  root.innerHTML = profiles.map(p => `
+    <button
+      class="profile-name ${p.id === selectedId ? 'selected' : ''}"
+      data-profile-id="${p.id}">
+      ${esc(p.name)}
+    </button>
+  `).join('');
+
+  root.querySelectorAll('[data-profile-id]').forEach(btn => {
+    btn.addEventListener('click', () => selectProfile(Number(btn.dataset.profileId)));
+  });
+}
+
+async function loadProfiles() {
+  try {
+    profiles = (await api('/api/profiles')).filter(p => p.enabled);
+
+    if (!profiles.some(p => p.id === selectedId)) {
+      selectedId = profiles[0]?.id || null;
+    }
+
+    renderProfiles();
+
+    if (selectedId) {
+      await loadDetails();
+    }
+  } catch (e) {
+    $('profiles').innerHTML = `<div class="error">${esc(e.message)}</div>`;
+  }
+}
+
+async function selectProfile(id) {
+  selectedId = id;
+  renderProfiles();
+  await loadDetails();
+}
+
+function renderProfileHeader() {
+  const p = profiles.find(x => x.id === selectedId);
+  if (!p) return;
+
+  $('profileTitle').textContent = p.name;
+  $('profileRegime').textContent = p.regime_state || '—';
+  $('profileStatus').textContent = p.enabled ? 'RUNNING' : 'STOPPED';
+  $('profileStatus').classList.toggle('running', !!p.enabled);
+}
+
+function renderSummary() {
+  const t = currentPnl?.total;
+
+  if (!t) {
+    $('summary').innerHTML = '<div class="error">Нет данных PnL</div>';
+    return;
+  }
+
+  const totalClass = Number(t.total_pnl) >= 0 ? 'good' : 'bad';
+  const unrealizedClass = Number(t.unrealized_pnl) >= 0 ? 'good' : 'bad';
+
+  $('summary').innerHTML = `
+    <div class="box">
+      <span>Total PnL</span>
+      <b class="${totalClass}">${money(t.total_pnl)} USDT</b>
+    </div>
+    <div class="box">
+      <span>Realized</span>
+      <b>${money(t.realized_pnl)} USDT</b>
+    </div>
+    <div class="box">
+      <span>Unrealized</span>
+      <b class="${unrealizedClass}">${money(t.unrealized_pnl)} USDT</b>
+    </div>
+    <div class="box">
+      <span>Открыто позиций</span>
+      <b>${getOpenPositions().length}</b>
+    </div>
+  `;
+}
+
+function findCellForSellPrice(sellPrice) {
+  const cells = currentPnl?.cells || [];
+  const target = Number(sellPrice);
+
+  return cells.find(c => Number(c.sell_price) === target) || null;
+}
+
+function getOpenPositions() {
+  return currentOrders
+    .filter(o => o.side === 'Sell' && activeStatuses.has(o.status))
+    .map(o => {
+      const cell = findCellForSellPrice(o.price);
+
+      return {
+        order: o,
+        buyPrice: cell?.buy_price ?? null,
+        sellPrice: o.price,
+        qty: Number(o.filled_qty || o.qty || 0),
+        status: o.status
+      };
+    })
+    .sort((a, b) => Number(a.sellPrice) - Number(b.sellPrice));
+}
+
+function renderOpenPositions() {
+  const root = $('openPositions');
+  const positions = getOpenPositions();
+
+  $('openCount').textContent = positions.length
+    ? `${positions.length}`
+    : '';
+
+  if (!positions.length) {
+    root.innerHTML = '<div class="empty">Сейчас нет открытых позиций.</div>';
+    renderSummary();
+    return;
+  }
+
+  root.innerHTML = `
+    <div class="position-list">
+      ${positions.map(p => {
+        const entry = Number(p.buyPrice);
+        const price = Number(currentPrice);
+        const qty = Number(p.qty);
+
+        const unrealized =
+          Number.isFinite(entry) &&
+          Number.isFinite(price) &&
+          Number.isFinite(qty)
+            ? (price - entry) * qty
+            : null;
+
+        const pnlClass = unrealized == null ? '' : unrealized >= 0 ? 'good' : 'bad';
+
+        return `
+          <div class="position-card">
+            <div>
+              <div class="position-route">
+                ${p.buyPrice != null
+                  ? `BUY ${money(p.buyPrice)} → SELL ${money(p.sellPrice)}`
+                  : `SELL ${money(p.sellPrice)}`}
+              </div>
+              <div class="position-sub">
+                ${money(p.qty)} BTC
+              </div>
+            </div>
+
+            <div>
+              <span class="mini-label">Текущая цена</span>
+              <b>${currentPrice != null ? money(currentPrice) : '—'}</b>
+            </div>
+
+            <div>
+              <span class="mini-label">Текущий PnL позиции</span>
+              <b class="${pnlClass}">
+                ${unrealized == null ? '—' : `${unrealized >= 0 ? '+' : ''}${money(unrealized)} USDT`}
+              </b>
+            </div>
+
+            <div class="position-status">
+              <span class="badge">Ждём SELL</span>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  renderSummary();
+}
+
+function getNextBuy() {
+  const buys = currentOrders
+    .filter(o => o.side === 'Buy' && activeStatuses.has(o.status))
+    .map(o => ({
+      ...o,
+      numericPrice: Number(o.price)
+    }))
+    .filter(o => Number.isFinite(o.numericPrice));
+
+  if (!buys.length) return null;
+
+  if (Number.isFinite(currentPrice)) {
+    const below = buys
+      .filter(o => o.numericPrice <= currentPrice)
+      .sort((a, b) => b.numericPrice - a.numericPrice);
+
+    if (below.length) return below[0];
+
+    return buys.sort((a, b) =>
+      Math.abs(a.numericPrice - currentPrice) -
+      Math.abs(b.numericPrice - currentPrice)
+    )[0];
+  }
+
+  return buys.sort((a, b) => b.numericPrice - a.numericPrice)[0];
+}
+
+function renderNextStep() {
+  const root = $('nextStep');
+  const next = getNextBuy();
+
+  if (!next) {
+    root.innerHTML = `
+      <div class="empty">
+        Нет активной BUY-заявки для следующего входа.
+      </div>
+    `;
+    return;
+  }
+
+  const cell = currentPnl?.cells?.find(c => Number(c.buy_price) === Number(next.price));
+  const targetSell = cell?.sell_price ?? null;
+  const qty = Number(next.qty || next.filled_qty || 0);
+
+  root.innerHTML = `
+    <div class="next-card">
+      <div class="next-main">
+        <div>
+          <span class="badge next">NEXT</span>
+          <div style="margin-top:9px">
+            <div class="muted">Следующая покупка</div>
+            <div class="next-price">BUY ${money(next.price)} USDT</div>
+          </div>
+
+          <div class="next-details">
+            <span>Количество: <b>${money(qty)} BTC</b></span>
+            ${targetSell != null
+              ? `<span>После покупки цель: <b>SELL ${money(targetSell)}</b></span>`
+              : ''}
+            <span>Статус заявки: <b>${esc(next.status)}</b></span>
+          </div>
+        </div>
+
+        <div class="muted">
+          ${currentPrice != null
+            ? `До уровня: ${money(Math.abs(currentPrice - Number(next.price)))} USDT`
+            : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderHistory() {
+  const rows = currentOrders
+    .filter(o => !activeStatuses.has(o.status))
+    .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
+
+  $('historyCount').textContent = rows.length ? `${rows.length} записей` : '';
+
+  if (!rows.length) {
+    $('history').innerHTML = '<div class="empty">Истории пока нет.</div>';
+    return;
+  }
+
+  $('history').innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>Тип</th>
+            <th>Роль</th>
+            <th>Цена</th>
+            <th>Количество</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.slice(0, 100).map(o => `
+            <tr>
+              <td>${new Date(o.updated_at || o.created_at).toLocaleString('ru-RU')}</td>
+              <td class="${o.side === 'Buy' ? 'side-buy' : 'side-sell'}">
+                ${esc(String(o.side).toUpperCase())}
+              </td>
+              <td>${esc(o.order_role)}</td>
+              <td>${money(o.price)}</td>
+              <td>${money(o.filled_qty || o.qty)}</td>
+              <td>${esc(o.status)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderTechnical() {
+  const t = currentPnl?.total;
+  const cells = currentPnl?.cells || [];
+
+  const totals = t ? `
+    <div class="tech-grid">
+      <div class="box"><span>Циклов</span><b>${t.cycles}</b></div>
+      <div class="box"><span>Комиссии</span><b>${money(t.fees_quote)}</b></div>
+      <div class="box"><span>BTC inventory</span><b>${money(t.base_inventory)}</b></div>
+    </div>
+  ` : '';
+
+  const cellsTable = cells.length ? `
+    <h3 style="margin:16px 0 9px">Grid-ячейки</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Ячейка</th>
+            <th>Состояние</th>
+            <th>Циклов</th>
+            <th>Net</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${cells.map(c => `
+            <tr>
+              <td>${money(c.buy_price)} → ${money(c.sell_price)}</td>
+              <td>${esc(c.state)}</td>
+              <td>${c.cycles}</td>
+              <td>${money(c.net_profit)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : '';
+
+  const ordersTable = currentOrders.length ? `
+    <h3 style="margin:16px 0 9px">Все заявки</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>Тип</th>
+            <th>Роль</th>
+            <th>Цена</th>
+            <th>Количество</th>
+            <th>Статус</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${currentOrders.map(o => `
+            <tr>
+              <td>${new Date(o.updated_at || o.created_at).toLocaleString('ru-RU')}</td>
+              <td class="${o.side === 'Buy' ? 'side-buy' : 'side-sell'}">
+                ${esc(String(o.side).toUpperCase())}
+              </td>
+              <td>${esc(o.order_role)}</td>
+              <td>${money(o.price)}</td>
+              <td>${money(o.filled_qty || o.qty)}</td>
+              <td>${esc(o.status)}</td>
+              <td>
+                ${activeStatuses.has(o.status)
+                  ? `<button class="cancel-order" data-cancel-order="${o.id}" title="Отменить заявку">×</button>`
+                  : ''}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : '';
+
+  $('technical').innerHTML = totals + cellsTable + ordersTable;
+
+  $('technical').querySelectorAll('[data-cancel-order]').forEach(btn => {
+    btn.addEventListener('click', () => cancelOrder(Number(btn.dataset.cancelOrder)));
+  });
+}
+
+async function loadDetails() {
+  const p = profiles.find(x => x.id === selectedId);
+  if (!p) return;
+
+  $('details').classList.remove('hidden');
+  renderProfileHeader();
+
+  try {
+    const [pnl, orders] = await Promise.all([
+      api(`/api/profiles/${selectedId}/pnl`),
+      api(`/api/profiles/${selectedId}/orders?limit=150`)
+    ]);
+
+    currentPnl = pnl;
+    currentOrders = orders;
+
+    renderSummary();
+    renderOpenPositions();
+    renderNextStep();
+    renderHistory();
+    renderTechnical();
+  } catch (e) {
+    $('openPositions').innerHTML = `<div class="error">${esc(e.message)}</div>`;
+    $('nextStep').innerHTML = `<div class="error">${esc(e.message)}</div>`;
+  }
+}
+
+async function cancelOrder(orderId) {
+  if (!confirm('Отменить эту заявку?')) return;
+
+  try {
+    await api(`/api/profiles/${selectedId}/orders/${orderId}/cancel`, {
+      method:'POST'
+    });
+    await loadDetails();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+$('refreshBtn').addEventListener('click', async () => {
+  await Promise.all([loadPrice(), loadDetails()]);
+});
+
+$('stopBtn').addEventListener('click', async () => {
+  try {
+    await api(`/api/profiles/${selectedId}/stop`, {method:'POST'});
+    await loadProfiles();
+  } catch (e) {
+    alert(e.message);
+  }
+});
+
+$('historyToggle').addEventListener('click', () => {
+  $('historyBody').classList.toggle('hidden');
+  $('historyChevron').textContent =
+    $('historyBody').classList.contains('hidden') ? '▾' : '▴';
+});
+
+loadPrice();
+loadProfiles();
+
+setInterval(loadPrice, 10000);
+setInterval(loadProfiles, 5000);
+</script>
+</body>
+</html>
