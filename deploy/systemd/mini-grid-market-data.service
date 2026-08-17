@@ -1,0 +1,18 @@
+[Unit]
+Description=Mini Grid Bot daily market data collector
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gridbot
+Group=gridbot
+WorkingDirectory=/opt/mini-grid-bot
+EnvironmentFile=/opt/mini-grid-bot/.env
+ExecStart=/opt/mini-grid-bot/.venv/bin/python -m app.workers.market_data
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/mini-grid-bot

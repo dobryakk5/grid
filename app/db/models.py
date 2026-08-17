@@ -265,6 +265,31 @@ class GridExecution(Base):
     )
 
 
+class MarketCandle(Base):
+    __tablename__ = "market_candles"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol", "interval", "timestamp_ms", name="uq_market_candle_series_time"
+        ),
+        Index("ix_market_candles_lookup", "symbol", "interval", "timestamp_ms"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    interval: Mapped[str] = mapped_column(String(8), nullable=False, default="60")
+    timestamp_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    volume: Mapped[Decimal] = mapped_column(Numeric(38, 12), nullable=False)
+    turnover: Mapped[Decimal] = mapped_column(Numeric(38, 12), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class PositionLot(Base):
     __tablename__ = "position_lots"
 

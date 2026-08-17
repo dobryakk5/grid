@@ -24,7 +24,9 @@
   max drawdown, время вне диапазона и BTC inventory;
 - Hurst, ADX и автоматическое перестроение диапазона в MVP не добавлялись.
 
-Backtest использует закрытия часовых свечей для пересечения grid-уровней.
+Backtest использует закрытия часовых свечей из PostgreSQL для пересечения grid-уровней.
+Свечи BTCUSDT, ADAUSDT, XRPUSDT и SUIUSDT обновляются отдельным ежедневным
+systemd timer, поэтому запуск backtest не обращается к Bybit.
 `BREAK_DOWN`/`BREAK_UP` подтверждаются двумя часовыми закрытиями и выполняют
 настроенное в профиле действие. Внутричасовые касания не учитываются, поэтому
 оценка консервативна; комиссия по умолчанию принимается равной 0,1%.
@@ -272,6 +274,8 @@ curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool
 ```text
 deploy/systemd/mini-grid-api.service
 deploy/systemd/mini-grid-worker.service
+deploy/systemd/mini-grid-market-data.service
+deploy/systemd/mini-grid-market-data.timer
 ```
 
 Установить:
@@ -279,15 +283,30 @@ deploy/systemd/mini-grid-worker.service
 ```bash
 sudo cp deploy/systemd/mini-grid-api.service /etc/systemd/system/
 sudo cp deploy/systemd/mini-grid-worker.service /etc/systemd/system/
+sudo cp deploy/systemd/mini-grid-market-data.service /etc/systemd/system/
+sudo cp deploy/systemd/mini-grid-market-data.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now mini-grid-api mini-grid-worker
+sudo systemctl enable --now mini-grid-market-data.timer
 ```
+
+Первичную загрузку истории за 365 дней выполнить сразу после установки:
+
+```bash
+sudo systemctl start mini-grid-market-data.service
+```
+
+Дальше timer запускает инкрементальную дозагрузку каждый день в 00:15 UTC
+(с небольшим случайным сдвигом до пяти минут). Пропущенный запуск выполняется
+после включения сервера благодаря `Persistent=true`.
 
 Проверить:
 
 ```bash
 systemctl status mini-grid-api
 systemctl status mini-grid-worker
+systemctl status mini-grid-market-data.timer
+systemctl list-timers mini-grid-market-data.timer
 ```
 
 Логи:
@@ -295,6 +314,7 @@ systemctl status mini-grid-worker
 ```bash
 journalctl -u mini-grid-api -f
 journalctl -u mini-grid-worker -f
+journalctl -u mini-grid-market-data.service -f
 ```
 
 Перезапуск после обновления кода:
@@ -375,6 +395,11 @@ FastAPI :8000  <------> PostgreSQL :5432
                             |
                             v
                        Bybit Demo API
+
+Daily market-data timer ---> PostgreSQL
+           |
+           v
+      Bybit public API
 ```
 
 API и worker — два отдельных Linux-процесса. Рестарт FastAPI не должен останавливать торговый worker.

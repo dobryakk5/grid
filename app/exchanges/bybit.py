@@ -133,6 +133,8 @@ class BybitClient:
                     "high": Decimal(item[2]),
                     "low": Decimal(item[3]),
                     "close": Decimal(item[4]),
+                    "volume": Decimal(item[5]),
+                    "turnover": Decimal(item[6]),
                 }
             oldest = min(int(item[0]) for item in page)
             if len(page) < page_size:

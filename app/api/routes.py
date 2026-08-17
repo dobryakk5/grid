@@ -10,6 +10,7 @@ from app.db.models import (
     GridOrder,
     GridProfile,
     GridRange,
+    MarketCandle,
     PositionLot,
     BreakdownEpisode,
     RecoveryTrade,
@@ -272,6 +273,43 @@ async def price(symbol: str) -> dict:
         return {"symbol": symbol.upper(), "last_price": str(last)}
     finally:
         await exchange.close()
+
+
+@router.get("/market-data/{symbol}/range")
+async def cached_market_range(symbol: str, days: int = 30) -> dict:
+    if not 2 <= days <= 365:
+        raise HTTPException(status_code=422, detail="days must be between 2 and 365")
+    normalized_symbol = symbol.upper()
+    expected_candles = days * 24
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(MarketCandle)
+            .where(
+                MarketCandle.symbol == normalized_symbol,
+                MarketCandle.interval == "60",
+            )
+            .order_by(MarketCandle.timestamp_ms.desc())
+            .limit(expected_candles)
+        )
+        candles = result.scalars().all()
+    if len(candles) < expected_candles:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"not enough cached candles for {normalized_symbol}: "
+                f"found {len(candles)}, need {expected_candles}; "
+                "run the market-data collector first"
+            ),
+        )
+    return {
+        "symbol": normalized_symbol,
+        "days": days,
+        "candles": len(candles),
+        "min_price": str(min(item.low for item in candles)),
+        "max_price": str(max(item.high for item in candles)),
+        "data_through_ms": max(item.timestamp_ms for item in candles),
+        "source": "database",
+    }
 
 
 @router.get("/bybit/status")
@@ -552,21 +590,30 @@ async def start_profile(profile_id: int) -> dict:
 
 @router.post("/backtest")
 async def backtest(payload: BacktestPayload) -> dict:
-    exchange = BybitClient()
-    try:
-        # The last item is the currently forming candle and must not be used.
-        candles = await exchange.klines(
-            payload.symbol.upper(), interval="60", limit=payload.days * 24 + 1
+    symbol = payload.symbol.upper()
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(MarketCandle)
+            .where(
+                MarketCandle.symbol == symbol,
+                MarketCandle.interval == "60",
+            )
+            .order_by(MarketCandle.timestamp_ms.desc())
+            .limit(payload.days * 24)
         )
-    except BybitError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        await exchange.close()
-    closed = candles[:-1]
-    if len(closed) < 2:
-        raise HTTPException(status_code=400, detail="not enough historical candles")
-    closes = [item["close"] for item in closed]
-    timestamps = [item["timestamp_ms"] for item in closed]
+        candles = list(reversed(result.scalars().all()))
+    expected_candles = payload.days * 24
+    if len(candles) < expected_candles:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"not enough cached candles for {symbol}: "
+                f"found {len(candles)}, need {expected_candles}; "
+                "run the market-data collector first"
+            ),
+        )
+    closes = [item.close for item in candles]
+    timestamps = [item.timestamp_ms for item in candles]
     results = [
         run_grid_backtest(
             closes,
@@ -586,9 +633,12 @@ async def backtest(payload: BacktestPayload) -> dict:
         for step in payload.steps
     ]
     return {
-        "symbol": payload.symbol.upper(),
+        "symbol": symbol,
         "interval": "1h closes",
-        "candles": len(closed),
+        "source": "database",
+        "candles": len(candles),
+        "data_from_ms": timestamps[0],
+        "data_through_ms": timestamps[-1],
         "assumption": "fills are counted only when consecutive hourly closes cross a level",
         "results": results,
     }

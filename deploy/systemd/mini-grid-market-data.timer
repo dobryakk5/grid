@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Mini Grid Bot market data every day
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+Unit=mini-grid-market-data.service
+
+[Install]
+WantedBy=timers.target

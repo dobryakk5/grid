@@ -1,4 +1,4 @@
-.PHONY: install test api worker bybit-status health
+.PHONY: install test api worker market-data bybit-status health
 
 install:
 	python3 -m venv .venv
@@ -13,6 +13,9 @@ api:
 
 worker:
 	./scripts/run-worker.sh
+
+market-data:
+	./scripts/run-market-data.sh
 
 bybit-status:
 	curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool
