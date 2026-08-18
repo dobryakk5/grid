@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.api.routes import ProfilePayload
+from app.api.routes import ProfileNamePayload, ProfilePayload
 
 
 def payload(**overrides):
@@ -30,6 +30,10 @@ def test_existing_payload_defaults_to_accumulation_arithmetic():
     assert profile.break_up_action == "stop"
     assert profile.buy_below_grid is True
     assert profile.sell_below_grid is False
+
+
+def test_profile_name_payload_accepts_a_new_name():
+    assert ProfileNamePayload(name="XRP Grid").name == "XRP Grid"
 
 
 def test_below_grid_lower_price_must_be_below_main_grid():

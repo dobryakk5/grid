@@ -105,6 +105,10 @@ class DemoFundsRequest(BaseModel):
     usdt: Decimal = Field(default=Decimal("10000"), gt=0, le=Decimal("100000"))
 
 
+class ProfileNamePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 class BacktestPayload(BaseModel):
     symbol: str = Field(default="BTCUSDT", min_length=3, max_length=32)
     lower_price: Decimal = Field(gt=0)
@@ -411,6 +415,20 @@ async def create_profile(payload: ProfilePayload) -> dict:
         await session.commit()
         await session.refresh(profile)
         return await profile_stats(session, profile)
+
+
+@router.patch("/profiles/{profile_id}/name")
+async def rename_profile(profile_id: int, payload: ProfileNamePayload) -> dict:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="profile name cannot be empty")
+    async with SessionLocal() as session:
+        profile = await session.get(GridProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        profile.name = name
+        await session.commit()
+        return {"ok": True, "id": profile.id, "name": profile.name}
 
 
 @router.put("/profiles/{profile_id}")

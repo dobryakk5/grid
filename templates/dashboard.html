@@ -350,6 +350,60 @@
       gap:12px
     }
 
+    .profile-title-row{
+      display:flex;
+      align-items:center;
+      gap:10px
+    }
+
+    .rename-btn{
+      padding:5px 9px;
+      color:var(--muted);
+      background:transparent;
+      font-size:12px
+    }
+
+    .profile-actions{
+      display:flex;
+      gap:9px;
+      flex-wrap:wrap
+    }
+
+    .modal-backdrop{
+      position:fixed;
+      inset:0;
+      z-index:20;
+      display:grid;
+      place-items:center;
+      padding:20px;
+      background:#05070bbf
+    }
+
+    .modal{
+      width:min(820px,100%);
+      max-height:90vh;
+      overflow:auto;
+      padding:20px;
+      background:var(--panel);
+      border:1px solid var(--line);
+      border-radius:16px;
+      box-shadow:0 24px 80px #000b
+    }
+
+    .modal-head{
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      gap:16px
+    }
+
+    .modal-close{font-size:22px;line-height:1;padding:5px 10px}
+    .backtest-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}
+    .backtest-metric{padding:12px;background:var(--panel2);border:1px solid var(--line2);border-radius:10px}
+    .backtest-metric span{display:block;color:var(--muted);font-size:11px}
+    .backtest-metric b{display:block;margin-top:3px;font-size:17px}
+    .backtest-note{margin-top:16px;padding:12px;background:var(--panel2);border-radius:10px;color:var(--muted)}
+
     @media(max-width:850px){
       .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
       .position-card{
@@ -381,8 +435,8 @@
     <div class="top-actions">
       <a class="button primary" href="profiles/new">Создать профиль</a>
       <div class="price">
-        <small>BTCUSDT сейчас</small>
-        <span id="btcPrice">—</span>
+        <small id="priceSymbol">Текущая цена</small>
+        <span id="currentPriceValue">—</span>
       </div>
     </div>
   </header>
@@ -399,14 +453,21 @@
     <section class="panel">
       <div class="profile-head">
         <div>
-          <h2 id="profileTitle">—</h2>
+          <div class="profile-title-row">
+            <h2 id="profileTitle">—</h2>
+            <button id="renameBtn" class="rename-btn" type="button">Переименовать</button>
+          </div>
           <div class="profile-meta">
             <span id="profileStatus" class="badge running">RUNNING</span>
             <span id="profileRegime" class="badge">—</span>
+            <span id="profileSymbol" class="muted">—</span>
             <span class="muted">DEMO</span>
           </div>
         </div>
-        <button id="stopBtn" class="stop-btn">Остановить</button>
+        <div class="profile-actions">
+          <button id="runningBacktestBtn" type="button">Backtest</button>
+          <button id="stopBtn" class="stop-btn">Остановить</button>
+        </div>
       </div>
 
       <div id="summary" class="summary"></div>
@@ -449,14 +510,31 @@
   </section>
 </div>
 
+<div class="modal-backdrop hidden" id="runningBacktestModal" role="dialog" aria-modal="true" aria-labelledby="runningBacktestTitle">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2 id="runningBacktestTitle">Backtest профиля</h2>
+        <div class="muted" id="runningBacktestPeriod">Последние 30 дней · данные из БД</div>
+      </div>
+      <button class="modal-close" type="button" id="runningBacktestClose" aria-label="Закрыть">×</button>
+    </div>
+    <div id="runningBacktestResult" class="muted" style="margin-top:18px">Загрузка…</div>
+  </div>
+</div>
+
 <script>
 let profiles = [];
 let selectedId = null;
 let currentPrice = null;
 let currentPnl = null;
 let currentOrders = [];
+let priceRequest = 0;
+let detailsRequest = 0;
 
 const $ = id => document.getElementById(id);
+const selectedProfile = () => profiles.find(p => p.id === selectedId) || null;
+const baseCoin = () => (selectedProfile()?.symbol || '').replace(/USDT$/, '');
 
 const money = v => {
   const n = Number(v);
@@ -491,15 +569,27 @@ async function api(url, options = {}) {
 }
 
 async function loadPrice() {
+  const profile = selectedProfile();
+  if (!profile) {
+    currentPrice = null;
+    $('priceSymbol').textContent = 'Текущая цена';
+    $('currentPriceValue').textContent = '—';
+    return;
+  }
+  const symbol = profile.symbol;
+  const request = ++priceRequest;
+  $('priceSymbol').textContent = `${symbol} сейчас`;
   try {
-    const p = await api('/api/price/BTCUSDT');
+    const p = await api(`/api/price/${encodeURIComponent(symbol)}`);
+    if (request !== priceRequest || selectedProfile()?.symbol !== symbol) return;
     currentPrice = Number(p.last_price);
-    $('btcPrice').textContent = money(currentPrice) + ' USDT';
+    $('currentPriceValue').textContent = money(currentPrice) + ' USDT';
     renderOpenPositions();
     renderNextStep();
   } catch {
+    if (request !== priceRequest) return;
     currentPrice = null;
-    $('btcPrice').textContent = 'нет связи';
+    $('currentPriceValue').textContent = 'нет связи';
   }
 }
 
@@ -529,6 +619,7 @@ function renderProfiles() {
 
 async function loadProfiles() {
   try {
+    const previousId = selectedId;
     profiles = (await api('/api/profiles')).filter(p => p.enabled);
 
     if (!profiles.some(p => p.id === selectedId)) {
@@ -538,7 +629,11 @@ async function loadProfiles() {
     renderProfiles();
 
     if (selectedId) {
-      await loadDetails();
+      if (selectedId !== previousId) {
+        await Promise.all([loadPrice(), loadDetails()]);
+      } else {
+        await loadDetails();
+      }
     }
   } catch (e) {
     $('profiles').innerHTML = `<div class="error">${esc(e.message)}</div>`;
@@ -547,8 +642,11 @@ async function loadProfiles() {
 
 async function selectProfile(id) {
   selectedId = id;
+  currentPrice = null;
+  currentPnl = null;
+  currentOrders = [];
   renderProfiles();
-  await loadDetails();
+  await Promise.all([loadPrice(), loadDetails()]);
 }
 
 function renderProfileHeader() {
@@ -556,6 +654,7 @@ function renderProfileHeader() {
   if (!p) return;
 
   $('profileTitle').textContent = p.name;
+  $('profileSymbol').textContent = p.symbol;
   $('profileRegime').textContent = p.regime_state || '—';
   $('profileStatus').textContent = p.enabled ? 'RUNNING' : 'STOPPED';
   $('profileStatus').classList.toggle('running', !!p.enabled);
@@ -655,7 +754,7 @@ function renderOpenPositions() {
                   : `SELL ${money(p.sellPrice)}`}
               </div>
               <div class="position-sub">
-                ${money(p.qty)} BTC
+                ${money(p.qty)} ${esc(baseCoin())}
               </div>
             </div>
 
@@ -733,12 +832,12 @@ function renderNextStep() {
         <div>
           <span class="badge next">NEXT</span>
           <div style="margin-top:9px">
-            <div class="muted">Следующая покупка</div>
+            <div class="muted">Следующая лимитная покупка</div>
             <div class="next-price">BUY ${money(next.price)} USDT</div>
           </div>
 
           <div class="next-details">
-            <span>Количество: <b>${money(qty)} BTC</b></span>
+            <span>Количество: <b>${money(qty)} ${esc(baseCoin())}</b></span>
             ${targetSell != null
               ? `<span>После покупки цель: <b>SELL ${money(targetSell)}</b></span>`
               : ''}
@@ -808,7 +907,7 @@ function renderTechnical() {
     <div class="tech-grid">
       <div class="box"><span>Циклов</span><b>${t.cycles}</b></div>
       <div class="box"><span>Комиссии</span><b>${money(t.fees_quote)}</b></div>
-      <div class="box"><span>BTC inventory</span><b>${money(t.base_inventory)}</b></div>
+      <div class="box"><span>${esc(baseCoin())} inventory</span><b>${money(t.base_inventory)}</b></div>
     </div>
   ` : '';
 
@@ -886,6 +985,8 @@ function renderTechnical() {
 async function loadDetails() {
   const p = profiles.find(x => x.id === selectedId);
   if (!p) return;
+  const request = ++detailsRequest;
+  const requestedId = selectedId;
 
   $('details').classList.remove('hidden');
   renderProfileHeader();
@@ -895,9 +996,16 @@ async function loadDetails() {
       api(`/api/profiles/${selectedId}/pnl`),
       api(`/api/profiles/${selectedId}/orders?limit=150`)
     ]);
+    if (request !== detailsRequest || requestedId !== selectedId) return;
 
     currentPnl = pnl;
     currentOrders = orders;
+    const pnlPrice = Number(pnl?.total?.market_price);
+    if (Number.isFinite(pnlPrice)) {
+      currentPrice = pnlPrice;
+      $('priceSymbol').textContent = `${p.symbol} сейчас`;
+      $('currentPriceValue').textContent = money(currentPrice) + ' USDT';
+    }
 
     renderSummary();
     renderOpenPositions();
@@ -905,10 +1013,101 @@ async function loadDetails() {
     renderHistory();
     renderTechnical();
   } catch (e) {
+    if (request !== detailsRequest || requestedId !== selectedId) return;
     $('openPositions').innerHTML = `<div class="error">${esc(e.message)}</div>`;
     $('nextStep').innerHTML = `<div class="error">${esc(e.message)}</div>`;
   }
 }
+
+const closeRunningBacktest = () => $('runningBacktestModal').classList.add('hidden');
+
+$('runningBacktestClose').addEventListener('click', closeRunningBacktest);
+$('runningBacktestModal').addEventListener('click', event => {
+  if (event.target === $('runningBacktestModal')) closeRunningBacktest();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeRunningBacktest();
+});
+
+$('runningBacktestBtn').addEventListener('click', async () => {
+  const profile = selectedProfile();
+  if (!profile) return;
+  const modal = $('runningBacktestModal');
+  const root = $('runningBacktestResult');
+  const coin = profile.symbol.replace(/USDT$/, '');
+  modal.classList.remove('hidden');
+  $('runningBacktestTitle').textContent = `Backtest · ${profile.name} · ${profile.symbol}`;
+  $('runningBacktestPeriod').textContent = 'Последние 30 дней · данные из БД';
+  root.className = 'muted';
+  root.textContent = 'Расчёт по часовым свечам из БД…';
+  try {
+    const data = await api('/api/backtest', {
+      method:'POST',
+      body:JSON.stringify({
+        symbol:profile.symbol,
+        lower_price:profile.lower_price,
+        upper_price:profile.upper_price,
+        steps:[profile.step_price],
+        quote_per_level:profile.quote_per_level,
+        fee_rate:'0.001',
+        days:30,
+        below_grid_lower_price:profile.below_grid_lower_price,
+        buy_below_grid:profile.buy_below_grid,
+        sell_below_grid:profile.sell_below_grid,
+        break_down_action:profile.break_down_action,
+        break_up_action:profile.break_up_action
+      })
+    });
+    const result = data.results[0];
+    const positive = Number(result.total_pnl) >= 0;
+    const modeResult = result.status === 'STOPPED'
+      ? `STOPPED · ${result.stop_reason}`
+      : 'Работал весь период';
+    $('runningBacktestPeriod').textContent = `Последние 30 дней · ${data.candles} закрытых часовых свечей · данные из БД`;
+    root.className = '';
+    root.innerHTML = `
+      <div class="backtest-summary">
+        <div class="backtest-metric"><span>Результат режима</span><b class="${result.status === 'STOPPED' ? 'bad' : 'good'}">${esc(modeResult)}</b></div>
+        <div class="backtest-metric"><span>Total PnL</span><b class="${positive ? 'good' : 'bad'}">${money(result.total_pnl)} USDT</b></div>
+        <div class="backtest-metric"><span>Realized PnL</span><b>${money(result.realized_pnl)} USDT</b></div>
+        <div class="backtest-metric"><span>Unrealized PnL</span><b>${money(result.unrealized_pnl)} USDT</b></div>
+        <div class="backtest-metric"><span>Завершённых циклов</span><b>${result.cycles}</b></div>
+        <div class="backtest-metric"><span>Комиссии</span><b>${money(result.fees)} USDT</b></div>
+        <div class="backtest-metric"><span>Max drawdown</span><b>${money(result.max_drawdown_pct)}%</b></div>
+        <div class="backtest-metric"><span>Вне основной сетки</span><b>${money(result.outside_time_pct)}%</b></div>
+        <div class="backtest-metric"><span>${esc(coin)} inventory</span><b>${money(result.base_inventory)}</b></div>
+        <div class="backtest-metric"><span>Стартовый капитал</span><b>${money(result.initial_quote)} USDT</b></div>
+        <div class="backtest-metric"><span>Итоговая стоимость</span><b>${money(result.final_equity)} USDT</b></div>
+      </div>
+      <div class="backtest-note">Параметры сохранённого профиля: LOW ${money(profile.lower_price)}, HIGH ${money(profile.upper_price)}, шаг ${money(profile.step_price)}, BUY ${money(profile.quote_per_level)} USDT. Комиссия: 0,1%.</div>
+    `;
+  } catch (error) {
+    root.className = 'error';
+    root.textContent = error.message;
+  }
+});
+
+$('renameBtn').addEventListener('click', async () => {
+  const profile = selectedProfile();
+  if (!profile) return;
+  const value = prompt('Новое название профиля', profile.name);
+  if (value == null || value.trim() === profile.name) return;
+  if (!value.trim()) {
+    alert('Название не может быть пустым');
+    return;
+  }
+  try {
+    const result = await api(`/api/profiles/${profile.id}/name`, {
+      method:'PATCH',
+      body:JSON.stringify({name:value.trim()})
+    });
+    profile.name = result.name;
+    renderProfiles();
+    renderProfileHeader();
+  } catch (e) {
+    alert(e.message);
+  }
+});
 
 async function cancelOrder(orderId) {
   if (!confirm('Отменить эту заявку?')) return;
