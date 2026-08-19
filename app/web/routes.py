@@ -15,3 +15,8 @@ async def dashboard(request: Request):
 @router.get("/profiles/new")
 async def profile_editor(request: Request):
     return templates.TemplateResponse(request=request, name="profile_form.html", context={})
+
+
+@router.get("/analysis")
+async def grid_analysis_page(request: Request):
+    return templates.TemplateResponse(request=request, name="grid_analysis.html", context={})

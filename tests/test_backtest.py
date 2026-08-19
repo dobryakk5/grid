@@ -13,6 +13,16 @@ def test_backtest_completes_grid_cycle_and_counts_fees():
     assert Decimal(result["realized_pnl"]) > 0
     assert Decimal(result["fees"]) > 0
     assert result["base_inventory"] == "0.00000000"
+    assert result["trades"] == [{
+        "status": "CLOSED",
+        "entry_at_ms": None,
+        "entry_price": "63.00000000",
+        "exit_at_ms": None,
+        "exit_price": "64.00000000",
+        "qty": "1.58571429",
+        "pnl": "1.38422857",
+        "fees": "0.20148571",
+    }]
 
 
 def test_backtest_marks_open_inventory_and_time_outside_range():
@@ -24,6 +34,23 @@ def test_backtest_marks_open_inventory_and_time_outside_range():
     assert Decimal(result["base_inventory"]) > 0
     assert Decimal(result["unrealized_pnl"]) < 0
     assert result["outside_candles"] == 1
+    assert all(item["status"] == "OPEN" for item in result["trades"])
+
+
+def test_backtest_trade_log_contains_entry_and_exit_dates():
+    hour = 60 * 60 * 1000
+    result = run_grid_backtest(
+        [Decimal("64"), Decimal("63"), Decimal("64")],
+        lower=Decimal("62"), upper=Decimal("67"), step=Decimal("1"),
+        quote_per_level=Decimal("100"), fee_rate=Decimal("0"),
+        timestamps_ms=[0, hour, 2 * hour],
+    )
+    trade = result["trades"][0]
+    assert trade["entry_at_ms"] == 2 * hour
+    assert trade["exit_at_ms"] == 3 * hour
+    assert trade["entry_price"] == "63.00000000"
+    assert trade["exit_price"] == "64.00000000"
+    assert Decimal(trade["pnl"]) > 0
 
 
 def test_below_grid_lot_is_accumulated_unless_selling_is_enabled():

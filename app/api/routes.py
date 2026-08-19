@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -27,11 +28,13 @@ from app.trading.recommendations import (
     reject_recommendation,
 )
 from app.trading.backtest import run_grid_backtest
+from app.trading.grid_analysis import analyze_grid
 from app.trading.pnl import grid_cell_statistics
 from app.trading.math import configured_grid_cells, strategy_grid_cells
 from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 class ProfilePayload(BaseModel):
@@ -142,6 +145,11 @@ class BacktestPayload(BaseModel):
                     mode="arithmetic",
                 )
         return self
+
+
+class GridAnalysisPayload(BaseModel):
+    symbol: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9]+$")
+    profile_id: int | None = Field(default=None, ge=1)
 
 
 async def create_current_range(session, profile: GridProfile, *, reason: str) -> GridRange:
@@ -660,6 +668,53 @@ async def backtest(payload: BacktestPayload) -> dict:
         "assumption": "fills are counted only when consecutive hourly closes cross a level",
         "results": results,
     }
+
+
+@router.post("/grid-analysis")
+async def grid_analysis(payload: GridAnalysisPayload) -> dict:
+    symbol = payload.symbol.upper()
+    logger.info("GRID_ANALYSIS_STARTED symbol=%s profile_id=%s", symbol, payload.profile_id)
+    try:
+        async with SessionLocal() as session:
+            profile = await session.get(GridProfile, payload.profile_id) if payload.profile_id else None
+            if payload.profile_id and profile is None:
+                raise HTTPException(status_code=404, detail="profile not found")
+            if profile is not None and profile.symbol.upper() != symbol:
+                raise HTTPException(status_code=409, detail="profile symbol does not match analysis symbol")
+            result = await session.execute(
+                select(MarketCandle)
+                .where(MarketCandle.symbol == symbol, MarketCandle.interval == "60")
+                .order_by(MarketCandle.timestamp_ms.desc())
+                .limit(90 * 24)
+            )
+            candles = list(reversed(result.scalars().all()))
+        if len(candles) < 90 * 24:
+            raise HTTPException(
+                status_code=409,
+                detail=f"not enough cached candles for {symbol}: found {len(candles)}, need {90 * 24}; run the market-data collector first",
+            )
+        logger.info("MARKET_REGIME_CALCULATED symbol=%s", symbol)
+        analysis = analyze_grid(
+            candles,
+            quote_per_level=Decimal(profile.quote_per_level) if profile is not None else None,
+            capital_limit=(Decimal(profile.max_investment) if profile is not None and profile.max_investment is not None else None),
+        )
+        logger.info("GRID_CANDIDATES_GENERATED symbol=%s count=%d", symbol, analysis["candidate_counts"]["generated"])
+        for item in analysis["rejected_candidates"]:
+            logger.info("GRID_CANDIDATE_REJECTED symbol=%s range=%s step=%s reason=%s", symbol, item["range_type"], item["step_pct"], item["reason"])
+        logger.info("TRAIN_BACKTEST_COMPLETED symbol=%s", symbol)
+        logger.info("TEST_BACKTEST_COMPLETED symbol=%s", symbol)
+        logger.info("GRID_ANALYSIS_COMPLETED symbol=%s candidates=%d", symbol, len(analysis["candidates"]))
+        return {"symbol": symbol, **analysis}
+    except HTTPException:
+        logger.exception("GRID_ANALYSIS_FAILED symbol=%s", symbol)
+        raise
+    except ValueError as exc:
+        logger.exception("GRID_ANALYSIS_FAILED symbol=%s", symbol)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("GRID_ANALYSIS_FAILED symbol=%s", symbol)
+        raise
 
 
 @router.post("/profiles/{profile_id}/stop")

@@ -1021,6 +1021,29 @@ async function loadDetails() {
 
 const closeRunningBacktest = () => $('runningBacktestModal').classList.add('hidden');
 
+function backtestTradesTable(trades, coin) {
+  if (!trades?.length) return '<div class="empty">Тестовых покупок за период не было.</div>';
+  return `
+    <h3 style="margin:20px 0 9px">Тестовые позиции (${trades.length})</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Статус</th><th>Дата входа</th><th>Вход</th><th>Дата выхода</th><th>Выход</th><th>Количество</th><th>PnL</th></tr></thead>
+        <tbody>${trades.map(trade => {
+          const pnl = Number(trade.pnl);
+          return `<tr>
+            <td>${trade.status === 'CLOSED' ? 'Закрыта' : 'Открыта'}</td>
+            <td>${trade.entry_at_ms ? new Date(trade.entry_at_ms).toLocaleString('ru-RU') : '—'}</td>
+            <td>${money(trade.entry_price)} USDT</td>
+            <td>${trade.exit_at_ms ? new Date(trade.exit_at_ms).toLocaleString('ru-RU') : '—'}</td>
+            <td>${trade.exit_price != null ? `${money(trade.exit_price)} USDT` : '—'}</td>
+            <td>${money(trade.qty)} ${esc(coin)}</td>
+            <td class="${pnl >= 0 ? 'good' : 'bad'}">${pnl >= 0 ? '+' : ''}${money(pnl)} USDT</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
 $('runningBacktestClose').addEventListener('click', closeRunningBacktest);
 $('runningBacktestModal').addEventListener('click', event => {
   if (event.target === $('runningBacktestModal')) closeRunningBacktest();
@@ -1079,6 +1102,7 @@ $('runningBacktestBtn').addEventListener('click', async () => {
         <div class="backtest-metric"><span>Стартовый капитал</span><b>${money(result.initial_quote)} USDT</b></div>
         <div class="backtest-metric"><span>Итоговая стоимость</span><b>${money(result.final_equity)} USDT</b></div>
       </div>
+      ${backtestTradesTable(result.trades, coin)}
       <div class="backtest-note">Параметры сохранённого профиля: LOW ${money(profile.lower_price)}, HIGH ${money(profile.upper_price)}, шаг ${money(profile.step_price)}, BUY ${money(profile.quote_per_level)} USDT. Комиссия: 0,1%.</div>
     `;
   } catch (error) {

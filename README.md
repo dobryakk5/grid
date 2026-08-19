@@ -450,3 +450,10 @@ python3 -m venv .venv
 - шифрование API credentials, если появятся несколько аккаунтов;
 - Alembic migrations;
 - алерты и kill switch.
+# Single-symbol Grid analysis
+
+`POST /api/grid-analysis` accepts `{"symbol":"XRPUSDT"}` and optionally a
+matching `profile_id`. It calculates a 90-day market regime, builds no more than
+eight candidates exclusively from the first 20 days of the optimization window,
+and ranks the best two by their independent 10-day TEST score. The profile UI
+shows a short result and `/analysis?symbol=XRPUSDT` opens the detailed report.
