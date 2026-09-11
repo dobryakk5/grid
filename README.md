@@ -22,6 +22,9 @@
 
 ## Robinhood Chain / Uniswap (on-chain venue)
 
+Полное описание работающего процесса — порядок операций, гарантии, учёт и
+проверенные вживую транзакции — в [docs/dex-flow.md](docs/dex-flow.md).
+
 Третья площадка (`exchange=robinhood`) добавляется тем же способом, что и MEXC —
 через `ExchangeClient`, поэтому `grid.py` не должен знать, что под ним DEX. Но на
 DEX нет лимитных ордеров, поэтому `place_limit_order` там будет создавать
