@@ -1,4 +1,4 @@
-.PHONY: install test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry chain-tape chain-tape-bench chain-tape-rebuild
+.PHONY: install test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed chain-tape chain-tape-bench chain-tape-rebuild
 
 install:
 	python3 -m venv .venv
@@ -28,6 +28,9 @@ dex-worker:
 
 fomo-registry:
 	./scripts/run-fomo-registry.sh
+
+fomo-seed:
+	.venv/bin/python scripts/seed_fomo_wallets.py
 
 chain-tape:
 	./scripts/run-chain-tape.sh

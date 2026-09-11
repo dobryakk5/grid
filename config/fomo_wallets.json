@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Wallets the chain tape watches, curated by hand -- no FOMO session required.",
+    "Addresses come from public profiles and from the public chain itself:",
+    "scripts/chain_tape_bench.py shows which wallets are actually trading a",
+    "watched pair, and anything with real swap activity is a candidate here.",
+    "fomo_user_id is optional -- omit it and a stable 'manual:<address>' id is",
+    "derived, so a wallet known only by address still gets a registry row.",
+    "Fill in handle/display_name when you know who a wallet belongs to."
+  ],
+  "wallets": [
+    {
+      "address": "0xf2A0bE59AB76b96f957bd5E5b967F2B75e8dB269",
+      "note": "PONS/USDG: heavy seller, 13 swaps in a 400-block sample"
+    },
+    {
+      "address": "0xCef7501b9B060a599a81735bEAD6641C0E6bAF46",
+      "note": "PONS/USDG: accumulator, 10 buys and no sells in the same window"
+    },
+    {
+      "address": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+      "note": "PONS/USDG: 7 swaps, mostly distribution"
+    },
+    {
+      "address": "0x623265CB986174e0C90D54C0B93153651bF9c466",
+      "note": "PONS/USDG: 3 buys, ~$4.2k"
+    }
+  ]
+}

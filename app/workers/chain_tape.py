@@ -131,6 +131,12 @@ async def run_backfill_pass(client: ChainClient, pairs: list[DexPair], token_add
     current_block = await client.w3.eth.block_number
     from_block = max(current_block - settings.fomo_new_wallet_backfill_blocks, 0)
     done = 0
+    # Shared across every wallet in this pass: trades cluster in the same
+    # blocks, and each repeat lookup is a round trip we do not need.
+    block_times: dict[int, int] = {}
+
+    async with SessionLocal() as session:
+        all_wallets = await _tracked_wallets(session)
 
     for trader in pending:
         wallet = trader.evm_address
@@ -139,12 +145,21 @@ async def run_backfill_pass(client: ChainClient, pairs: list[DexPair], token_add
             grouped: dict[str, list[dict]] = {}
             rows: list[ChainSwapRow] = []
             for tx_hash in tx_hashes:
-                transfers = await fetch_transaction_transfers(client, tx_hash, token_addresses)
+                transfers = await fetch_transaction_transfers(
+                    client, tx_hash, token_addresses, block_time_cache=block_times
+                )
                 if not transfers:
                     continue
                 grouped[tx_hash] = transfers
                 for pair in pairs:
-                    rows.extend(classify(transfers, {wallet}, pair, chain_id=chain_id))
+                    # Classify against *every* tracked wallet, not just the one
+                    # being backfilled: we fetched the whole receipt, so if this
+                    # transaction also moved another tracked wallet's tokens,
+                    # that row is free to record here. Scoping to one wallet
+                    # would leave it to that wallet's own backfill window, which
+                    # may not reach back this far. The composite PK makes the
+                    # overlap idempotent.
+                    rows.extend(classify(transfers, all_wallets, pair, chain_id=chain_id))
         except Exception:
             logger.exception("backfill failed for wallet %s; will retry next pass", wallet)
             continue

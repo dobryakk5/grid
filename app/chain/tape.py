@@ -239,13 +239,22 @@ async def discover_wallet_tx_hashes(
 
 
 async def fetch_transaction_transfers(
-    client: ChainClient, tx_hash: str, token_addresses: list[str]
+    client: ChainClient,
+    tx_hash: str,
+    token_addresses: list[str],
+    *,
+    block_time_cache: dict[int, int] | None = None,
 ) -> list[dict]:
     """All ``Transfer`` legs of an already-known transaction, via its receipt.
 
     Used by backfill so a discovered wallet's history carries the same
     complete-transaction raw data as the realtime path -- not just the legs
     that happen to touch that one wallet.
+
+    ``block_time_cache`` is shared across a backfill run on purpose: a busy
+    market puts many transactions in the same block, and on a rate-limited
+    public RPC an extra ``eth_getBlockByNumber`` per transaction is the
+    difference between a backfill that finishes and one that crawls.
     """
     receipt = await client.w3.eth.get_transaction_receipt(tx_hash)
     token_set = {a.lower() for a in token_addresses}
@@ -258,10 +267,14 @@ async def fetch_transaction_transfers(
     ]
     if not decoded:
         return []
-    block = await client.w3.eth.get_block(decoded[0]["block_number"])
-    block_time_ms = int(block["timestamp"]) * 1000
+
+    cache = block_time_cache if block_time_cache is not None else {}
+    block_number = decoded[0]["block_number"]
+    if block_number not in cache:
+        block = await client.w3.eth.get_block(block_number)
+        cache[block_number] = int(block["timestamp"]) * 1000
     for item in decoded:
-        item["block_time_ms"] = block_time_ms
+        item["block_time_ms"] = cache[block_number]
     return decoded
 
 
