@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # the pace a wallet first touches one.
 _TTL_SECONDS = 60.0
 _last_load = 0.0
+# Addresses already reported as unregisterable. The registry is re-read every
+# minute and the same impostor tokens fail every time; saying so once is
+# information, saying so 1440 times a day buries everything else.
+_warned: set[str] = set()
 
 
 async def load_dynamic_tokens(session_factory, *, chain_id: int | None = None, force: bool = False) -> int:
@@ -56,6 +60,9 @@ async def load_dynamic_tokens(session_factory, *, chain_id: int | None = None, f
             registered += 1
         except DexConfigError as exc:
             # A token claiming a name the registry already pins to another
-            # address. Worth a line in the log, not a crash.
-            logger.warning("skipped dynamic token: %s", exc)
+            # address -- on this chain, three separate contracts call
+            # themselves USDG. Worth knowing once, not on every reload.
+            if row.address not in _warned:
+                _warned.add(row.address)
+                logger.warning("skipped dynamic token: %s", exc)
     return registered
