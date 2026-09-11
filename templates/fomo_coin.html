@@ -59,7 +59,7 @@
         <option value="24" selected>за сутки</option>
         <option value="168">за неделю</option>
       </select>
-      <a class="button" href="/fomo">← К списку монет</a>
+      <a id="backLink" class="button" href="../">← К списку монет</a>
     </div>
   </header>
 
@@ -130,6 +130,12 @@
 </div>
 
 <script>
+// The app may be served under a prefix (nginx proxies /grid/ -> /), so every
+// link and fetch is built from the path we were actually served at. Hardcoding
+// either case breaks the other, and a prefix set in server config breaks again
+// the next time that config is regenerated.
+const BASE = location.pathname.replace(/\/fomo(\/.*)?$/, '');
+
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt = (v, n=2) => v === null || v === undefined ? '—' : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: n});
@@ -179,7 +185,7 @@ function renderSide(target, rows, kind) {
 
 async function load() {
   try {
-    const data = await api(`/api/fomo/coins/${encodeURIComponent(ADDRESS)}?hours=${$('hours').value}`);
+    const data = await api(BASE + `/api/fomo/coins/${encodeURIComponent(ADDRESS)}?hours=${$('hours').value}`);
     const name = data.symbol || short(data.token_address);
     document.title = `${name} — FOMO Smart Money`;
     $('coinTitle').textContent = name;
@@ -208,6 +214,10 @@ async function load() {
 
 function renderLevels(levels) {
   if (!levels.length) { $('levelsWrap').innerHTML = ''; return; }
+  // An armed level is inert on its own: it is the DEX worker that watches the
+  // price and executes, and it needs funds to do so. Saying this next to the
+  // levels beats discovering it when one silently never fills.
+  const waiting = levels.filter(l => l.status === 'WAITING').length;
   const rows = levels.map(l => `
     <tr>
       <td>${esc(l.symbol)}</td>
@@ -221,6 +231,10 @@ function renderLevels(levels) {
     </tr>`).join('');
   $('levelsWrap').innerHTML = `
     <h3 style="margin-top:18px">Взведённые уровни</h3>
+    ${waiting ? `<p class="muted" style="font-size:12px;margin:6px 0 0">
+      Уровни исполняет отдельный процесс <span class="addr">mini-grid-dex-worker</span>
+      — пока он не запущен, они просто ждут. И на торговом кошельке должно хватать
+      средств: покупка тратит квоту, продажа — базовый токен, плюс ETH на газ.</p>` : ''}
     <table>
       <thead><tr><th>Пара</th><th>Сторона</th><th>Цена</th><th>Сумма</th><th>Статус</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
@@ -228,7 +242,7 @@ function renderLevels(levels) {
   for (const b of $('levelsWrap').querySelectorAll('[data-cancel]')) {
     b.onclick = async () => {
       if (!confirm('Отменить уровень?')) return;
-      try { await api(`/api/fomo/limit-order/${b.dataset.cancel}/cancel`, {method: 'POST'}); await load(); }
+      try { await api(BASE + `/api/fomo/limit-order/${b.dataset.cancel}/cancel`, {method: 'POST'}); await load(); }
       catch (e) { alert('Ошибка: ' + e.message); }
     };
   }
@@ -306,7 +320,7 @@ async function armLevel() {
     : '';
   if (!confirm(`Взвести ${word} ${symbol}\nпо цене ${limit_price}\nна ${amount_quote} ${$('quoteCoin').textContent}?${blocked}${warning}`)) return;
   try {
-    const r = await api('/api/fomo/limit-order', {
+    const r = await api(BASE + '/api/fomo/limit-order', {
       method: 'POST', body: JSON.stringify({symbol, side, limit_price, amount: amount_quote}),
     });
     $('tradeResult').innerHTML = `<span class="good">Уровень #${r.intent_id} взведён (${esc(r.status)}).</span> <span class="muted">${esc(r.note)}</span>`;
@@ -320,6 +334,7 @@ async function armLevel() {
 $('armBtn').onclick = armLevel;
 $('tradeSymbol').onchange = () => { updateQuoteLabel(); renderGate(); };
 $('tradeSide').onchange = updateQuoteLabel;
+$('backLink').href = BASE + '/fomo';
 $('hours').onchange = load;
 load();
 </script>

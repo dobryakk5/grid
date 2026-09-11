@@ -59,7 +59,7 @@
         <option value="168">за неделю</option>
       </select>
       <button id="refreshBtn">Обновить</button>
-      <a class="button" href="/">← К профилям</a>
+      <a id="backLink" class="button" href="../">← К профилям</a>
     </div>
   </header>
 
@@ -124,6 +124,12 @@
 </div>
 
 <script>
+// The app may be served under a prefix (nginx proxies /grid/ -> /), so every
+// link and fetch is built from the path we were actually served at. Hardcoding
+// either case breaks the other, and a prefix set in server config breaks again
+// the next time that config is regenerated.
+const BASE = location.pathname.replace(/\/fomo(\/.*)?$/, '');
+
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt = (v, n=2) => v === null || v === undefined ? '—' : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: n});
@@ -140,7 +146,7 @@ async function api(url, options = {}) {
 async function loadStatus() {
   const pill = $('sessionPill'), text = $('sessionPillText'), info = $('registryInfo');
   try {
-    const s = await api('/api/fomo/status');
+    const s = await api(BASE + '/api/fomo/status');
     pill.className = 'pill ' + (s.authenticated ? 'on' : 'off');
     text.textContent = s.authenticated
       ? `сессия активна${s.expires_in != null ? ', ~' + Math.max(0, Math.round(s.expires_in / 60)) + ' мин' : ''}`
@@ -161,7 +167,7 @@ async function saveJwt() {
   const jwt = $('jwtInput').value.trim();
   if (!jwt) return;
   try {
-    await api('/api/fomo/session', {method: 'POST', body: JSON.stringify({jwt})});
+    await api(BASE + '/api/fomo/session', {method: 'POST', body: JSON.stringify({jwt})});
     $('jwtInput').value = '';
     await loadStatus();
     await loadAll();
@@ -171,7 +177,7 @@ async function saveJwt() {
 }
 
 async function forgetJwt() {
-  await api('/api/fomo/session', {method: 'DELETE'});
+  await api(BASE + '/api/fomo/session', {method: 'DELETE'});
   await loadStatus();
 }
 
@@ -187,7 +193,7 @@ function traderLabel(row) {
 
 async function loadCoins() {
   try {
-    const data = await api(`/api/fomo/coins?hours=${$('hours').value}&limit=50`);
+    const data = await api(BASE + `/api/fomo/coins?hours=${$('hours').value}&limit=50`);
     if (!data.coins.length) {
       $('coinsSummary').innerHTML = '';
       $('coinsWrap').innerHTML = '<div class="empty">За выбранный период сделок не записано.</div>';
@@ -227,7 +233,7 @@ async function loadCoins() {
         <tbody>${rows}</tbody>
       </table>`;
     for (const tr of $('coinsWrap').querySelectorAll('tr.clickable')) {
-      tr.onclick = () => { location.href = '/fomo/coin/' + encodeURIComponent(tr.dataset.address); };
+      tr.onclick = () => { location.href = BASE + '/fomo/coin/' + encodeURIComponent(tr.dataset.address); };
     }
   } catch (e) {
     $('coinsWrap').innerHTML = `<div class="empty bad">Ошибка: ${esc(e.message)}</div>`;
@@ -245,7 +251,7 @@ function tokenBadges(tokens) {
 
 async function loadLeaders() {
   try {
-    const data = await api(`/api/fomo/leaders?hours=${$('hours').value}&limit=50`);
+    const data = await api(BASE + `/api/fomo/leaders?hours=${$('hours').value}&limit=50`);
     if (!data.leaders.length) {
       $('leadersWrap').innerHTML = '<div class="empty">За выбранный период сделок не записано.</div>';
       return;
@@ -293,8 +299,8 @@ function buildSnippet(tokenAddresses) {
 async function refreshNamesPanel() {
   try {
     const [status, coins] = await Promise.all([
-      api('/api/fomo/status'),
-      api(`/api/fomo/coins?hours=${$('hours').value}&limit=10`),
+      api(BASE + '/api/fomo/status'),
+      api(BASE + `/api/fomo/coins?hours=${$('hours').value}&limit=10`),
     ]);
     const tracked = status.traders_known || 0;
     $('namesCount').textContent = `кошельков: ${tracked}`;
@@ -320,7 +326,7 @@ async function importNames() {
     return;
   }
   try {
-    const r = await api('/api/fomo/names/bulk', {method: 'POST', body: JSON.stringify({names})});
+    const r = await api(BASE + '/api/fomo/names/bulk', {method: 'POST', body: JSON.stringify({names})});
     $('importResult').textContent = `Импортировано ${r.applied}, с именем ${r.named} из ${r.tracked}`;
     $('namesInput').value = '';
     await loadAll();
@@ -346,6 +352,7 @@ $('copySnippetBtn').onclick = async () => {
 };
 $('hours').onchange = loadAll;
 
+$('backLink').href = BASE + '/';
 loadStatus();
 loadAll();
 </script>
