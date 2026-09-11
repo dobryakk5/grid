@@ -5,9 +5,14 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
+from app.core.config import settings
 from app.db.models import (
+    ChainScanCursor,
+    ChainSwap,
+    FomoTrader,
+    FomoTraderRank,
     GridOrder,
     GridProfile,
     GridRange,
@@ -23,10 +28,18 @@ from app.exchanges import (
     BybitClient,
     ExchangeError,
     make_exchange,
+    split_symbol,
 )
 from app.dex.dexscreener import DexScreenerError
-from app.dex.tokens import DexConfigError, list_pairs
+from app.dex.tokens import DexConfigError, list_pairs, resolve_pair, resolve_token
 from app.exchanges.robinhood import RobinhoodClient
+from app.fomo.client import FomoAuthError, FomoClient, FomoError, FomoRateLimited
+from app.fomo.session import (
+    clear_session as clear_fomo_session,
+    current_jwt as current_fomo_jwt,
+    session_status as fomo_session_status,
+    set_session as set_fomo_session,
+)
 from app.trading.grid import GridEngine, OPEN_STATUSES
 from app.trading.events import record_strategy_event
 from app.trading.recommendations import (
@@ -47,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 class ProfilePayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    exchange: Literal["bybit", "mexc"] = "bybit"
+    exchange: Literal["bybit", "mexc", "robinhood"] = "bybit"
     symbol: str = Field(default="BTCUSDT", min_length=3, max_length=32)
     lower_price: Decimal = Field(gt=0)
     upper_price: Decimal = Field(gt=0)
@@ -83,6 +96,26 @@ class ProfilePayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_range(self):
+        if self.exchange == "robinhood":
+            # The venue has no market orders yet (app/exchanges/robinhood.py
+            # place_market_order raises), and those paths -- classic's initial
+            # buy, DCA, recovery -- would only fail at runtime, mid-cycle.
+            if self.strategy != "accumulation":
+                raise ValueError("robinhood supports only the accumulation strategy")
+            if self.break_down_action == "trailing_buy":
+                raise ValueError(
+                    "robinhood does not support break_down_action=trailing_buy "
+                    "(trailing buy places a market order)"
+                )
+            try:
+                resolve_pair(self.symbol)
+            except DexConfigError as exc:
+                raise ValueError(str(exc)) from exc
+            if self.quote_per_level < settings.dex_min_order_quote:
+                raise ValueError(
+                    f"quote_per_level must be at least {settings.dex_min_order_quote} "
+                    "(DEX_MIN_ORDER_QUOTE) on robinhood"
+                )
         cells = strategy_grid_cells(
             self.lower_price, self.upper_price, self.step_price,
             mode=self.grid_mode, step_percent=self.step_percent,
@@ -1031,7 +1064,7 @@ async def profile_diagnostics(profile_id: int) -> dict:
                     legacy_inventory -= qty
                 # The exchange uses the base coin as fee currency for the common
                 # spot pairs supported by this MVP.
-                if (execution.fee_currency or "").upper() == profile.symbol[:-4].upper():
+                if (execution.fee_currency or "").upper() == split_symbol(profile.symbol)[0]:
                     legacy_inventory -= fee
         lot_inventory = Decimal(lot_inventory or 0)
         current_range = await session.get(GridRange, profile.current_range_id) if profile.current_range_id else None
@@ -1197,3 +1230,327 @@ async def stop_recommendation(recommendation_id: int) -> dict:
         profile.enabled = False
         await session.commit()
         return {"ok": True, "enabled": False, "note": "worker cancels open orders on next tick"}
+
+
+# ---- FOMO smart-money page --------------------------------------------
+#
+# Everything below reads this app's own database -- the trader registry
+# (`app.workers.fomo_registry`) and the on-chain trade tape
+# (`app.workers.chain_tape`) -- rather than proxying FOMO live. The one
+# exception is `/fomo/raw`, a development-only passthrough for inspecting the
+# upstream schema, gated by `settings.fomo_debug_api`.
+
+_FOMO_WINDOWS: tuple[tuple[str, int], ...] = (
+    ("1h", 3_600_000), ("6h", 21_600_000), ("24h", 86_400_000),
+)
+_FOMO_RAW_ENDPOINTS = {"leaderboard", "balances", "trades", "trade", "holders", "user"}
+
+
+class FomoSessionPayload(BaseModel):
+    jwt: str = Field(min_length=10)
+
+
+def _resolve_fomo_token_address(token: str) -> str:
+    text = token.strip()
+    if text.lower().startswith("0x"):
+        return text.lower()
+    try:
+        return resolve_token(text.upper()).address.lower()
+    except DexConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/fomo/session")
+async def set_fomo_session_endpoint(payload: FomoSessionPayload) -> dict:
+    """Accept a pasted JWT; it is never returned to the browser again."""
+    set_fomo_session(payload.jwt)
+    return fomo_session_status()
+
+
+@router.get("/fomo/session")
+async def get_fomo_session_endpoint() -> dict:
+    return fomo_session_status()
+
+
+@router.delete("/fomo/session")
+async def delete_fomo_session_endpoint() -> dict:
+    clear_fomo_session()
+    return fomo_session_status()
+
+
+@router.get("/fomo/status")
+async def fomo_status() -> dict:
+    # Never raises -- the page needs a status even when the DB query itself
+    # or the session is in a bad state, same convention as /api/bybit/status.
+    result: dict = {**fomo_session_status()}
+    try:
+        async with SessionLocal() as session:
+            newest_rank = await session.scalar(select(func.max(FomoTraderRank.captured_at)))
+            traders_known = await session.scalar(select(func.count(FomoTrader.fomo_user_id)))
+            traders_with_wallet = await session.scalar(
+                select(func.count(FomoTrader.fomo_user_id)).where(FomoTrader.evm_address.is_not(None))
+            )
+            pending_backfill = await session.scalar(
+                select(func.count(FomoTrader.fomo_user_id)).where(
+                    FomoTrader.backfilled_from_block.is_(None),
+                    FomoTrader.evm_address.is_not(None),
+                )
+            )
+            cursor = await session.get(ChainScanCursor, (settings.rh_chain_id, "realtime"))
+        result.update({
+            "registry_last_updated": newest_rank.isoformat() if newest_rank else None,
+            "traders_known": traders_known or 0,
+            "traders_with_wallet": traders_with_wallet or 0,
+            "wallets_pending_backfill": pending_backfill or 0,
+            "chain_scan_last_block": cursor.last_block if cursor else None,
+            "chain_id": settings.rh_chain_id,
+            "chain_name": settings.rh_chain_name,
+        })
+    except Exception as exc:
+        result["db_error"] = str(exc)
+    return result
+
+
+async def _window_stats(session, token_address: str, since_ms: int) -> dict:
+    rows = (await session.execute(
+        select(
+            ChainSwap.side,
+            ChainSwap.pricing_source,
+            func.count().label("n"),
+            func.coalesce(func.sum(ChainSwap.value_usd), 0).label("usd"),
+        )
+        .where(ChainSwap.token_address == token_address, ChainSwap.block_time_ms >= since_ms)
+        .group_by(ChainSwap.side, ChainSwap.pricing_source)
+    )).all()
+
+    buys_usd = sells_usd = Decimal("0")
+    buy_count = sell_count = 0
+    by_source = {"QUOTE_LEG": Decimal("0"), "MARKET_PRICE": Decimal("0")}
+    unpriced_trades = 0
+    for side, source, n, usd in rows:
+        if source == "UNPRICED":
+            unpriced_trades += n
+        else:
+            by_source[source] = by_source.get(source, Decimal("0")) + Decimal(usd or 0)
+        if side == "BUY":
+            buys_usd += Decimal(usd or 0)
+            buy_count += n
+        else:
+            sells_usd += Decimal(usd or 0)
+            sell_count += n
+
+    return {
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "buys_usd": str(buys_usd),
+        "sells_usd": str(sells_usd),
+        "net_flow_usd": str(buys_usd - sells_usd),
+        "priced_quote_leg_usd": str(by_source["QUOTE_LEG"]),
+        "priced_market_usd": str(by_source["MARKET_PRICE"]),
+        "unpriced_trades": unpriced_trades,
+    }
+
+
+async def _ranked_holders(session, token_address: str, limit: int) -> list[dict]:
+    """Traders (ranked or not) whose own chain_swaps net to a positive position.
+
+    "Position" here is net BUY-minus-SELL within our own recorded tape only --
+    honest about it via the trade counts returned alongside, not a claim of a
+    full historical balance (that is what /balances cross-checks, in a later
+    iteration).
+    """
+    latest_rank = (
+        select(FomoTraderRank.fomo_user_id, FomoTraderRank.rank)
+        .distinct(FomoTraderRank.fomo_user_id)
+        .order_by(FomoTraderRank.fomo_user_id, FomoTraderRank.captured_at.desc())
+        .subquery()
+    )
+    position = (
+        select(
+            ChainSwap.wallet_address.label("wallet_address"),
+            func.sum(
+                case((ChainSwap.side == "BUY", ChainSwap.token_amount), else_=-ChainSwap.token_amount)
+            ).label("net_qty"),
+            func.max(ChainSwap.block_time_ms).label("last_trade_ms"),
+        )
+        .where(ChainSwap.token_address == token_address)
+        .group_by(ChainSwap.wallet_address)
+        .subquery()
+    )
+
+    query = (
+        select(
+            FomoTrader.fomo_user_id,
+            FomoTrader.evm_address,
+            FomoTrader.user_handle,
+            FomoTrader.display_name,
+            latest_rank.c.rank,
+            position.c.net_qty,
+            position.c.last_trade_ms,
+        )
+        .join(position, func.lower(position.c.wallet_address) == func.lower(FomoTrader.evm_address))
+        .outerjoin(latest_rank, latest_rank.c.fomo_user_id == FomoTrader.fomo_user_id)
+        .where(position.c.net_qty > 0)
+        .order_by(latest_rank.c.rank.asc().nulls_last(), position.c.net_qty.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(query)).all()
+    return [
+        {
+            "fomo_user_id": row.fomo_user_id,
+            "evm_address": row.evm_address,
+            "handle": row.user_handle,
+            "display_name": row.display_name,
+            "rank": row.rank,
+            "net_token_amount": str(row.net_qty),
+            "last_trade_at_ms": row.last_trade_ms,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/fomo/token")
+async def fomo_token_report(token: str, network_id: int | None = None, limit: int = 20) -> dict:
+    token_address = _resolve_fomo_token_address(token)
+    limit = max(1, min(limit, 200))
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    async with SessionLocal() as session:
+        holders = await _ranked_holders(session, token_address, limit)
+        windows = {label: await _window_stats(session, token_address, now_ms - span) for label, span in _FOMO_WINDOWS}
+    return {
+        "token_address": token_address,
+        "chain_id": network_id or settings.rh_chain_id,
+        "as_of_ms": now_ms,
+        "ranked_holders": holders,
+        "windows": windows,
+    }
+
+
+@router.get("/fomo/tape")
+async def fomo_tape(limit: int = 100) -> dict:
+    limit = max(1, min(limit, 500))
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(ChainSwap).order_by(ChainSwap.block_time_ms.desc()).limit(limit)
+        )).scalars())
+        wallets = {row.wallet_address.lower() for row in rows}
+        traders_by_wallet: dict[str, FomoTrader] = {}
+        if wallets:
+            trader_rows = list((await session.execute(
+                select(FomoTrader).where(func.lower(FomoTrader.evm_address).in_(wallets))
+            )).scalars())
+            traders_by_wallet = {trader.evm_address.lower(): trader for trader in trader_rows}
+    return {
+        "trades": [
+            {
+                "tx_hash": row.tx_hash,
+                "wallet_address": row.wallet_address,
+                "handle": (traders_by_wallet[row.wallet_address.lower()].user_handle
+                           if row.wallet_address.lower() in traders_by_wallet else None),
+                "symbol": row.symbol,
+                "side": row.side,
+                "token_amount": str(row.token_amount),
+                "quote_amount": str(row.quote_amount) if row.quote_amount is not None else None,
+                "value_usd": str(row.value_usd) if row.value_usd is not None else None,
+                "pricing_source": row.pricing_source,
+                "block_time_ms": row.block_time_ms,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/fomo/traders/{fomo_user_id}")
+async def fomo_trader_detail(fomo_user_id: str) -> dict:
+    async with SessionLocal() as session:
+        trader = await session.get(FomoTrader, fomo_user_id)
+        if trader is None:
+            raise HTTPException(status_code=404, detail="unknown trader")
+        ranks = list((await session.execute(
+            select(FomoTraderRank)
+            .where(FomoTraderRank.fomo_user_id == fomo_user_id)
+            .order_by(FomoTraderRank.captured_at.desc())
+            .limit(50)
+        )).scalars())
+        swaps = []
+        if trader.evm_address:
+            swaps = list((await session.execute(
+                select(ChainSwap)
+                .where(func.lower(ChainSwap.wallet_address) == trader.evm_address.lower())
+                .order_by(ChainSwap.block_time_ms.desc())
+                .limit(100)
+            )).scalars())
+    return {
+        "fomo_user_id": trader.fomo_user_id,
+        "evm_address": trader.evm_address,
+        "handle": trader.user_handle,
+        "display_name": trader.display_name,
+        "backfilled_from_block": trader.backfilled_from_block,
+        "rank_history": [{"captured_at": r.captured_at.isoformat(), "rank": r.rank} for r in ranks],
+        "trades": [
+            {
+                "tx_hash": s.tx_hash,
+                "symbol": s.symbol,
+                "side": s.side,
+                "token_amount": str(s.token_amount),
+                "value_usd": str(s.value_usd) if s.value_usd is not None else None,
+                "pricing_source": s.pricing_source,
+                "block_time_ms": s.block_time_ms,
+            }
+            for s in swaps
+        ],
+    }
+
+
+@router.get("/fomo/raw")
+async def fomo_raw(
+    endpoint: str,
+    user_id: str | None = None,
+    trade_id: str | None = None,
+    token: str | None = None,
+    network_id: int | None = None,
+    handle: str | None = None,
+    limit: int = 25,
+) -> object:
+    """Unparsed FOMO response, for sanity-checking `app.fomo.schema` against
+    the live API. Development only -- off unless FOMO_DEBUG_API=true."""
+    if not settings.fomo_debug_api:
+        raise HTTPException(status_code=404, detail="not found")
+    if endpoint not in _FOMO_RAW_ENDPOINTS:
+        raise HTTPException(
+            status_code=422, detail=f"unknown endpoint; expected one of {sorted(_FOMO_RAW_ENDPOINTS)}"
+        )
+
+    fomo = FomoClient(jwt=current_fomo_jwt())
+    try:
+        if endpoint == "leaderboard":
+            return await fomo.leaderboard(limit=limit)
+        if endpoint == "balances":
+            if not user_id:
+                raise HTTPException(status_code=422, detail="user_id is required")
+            return await fomo.balances(user_id)
+        if endpoint == "trades":
+            if not user_id:
+                raise HTTPException(status_code=422, detail="user_id is required")
+            return await fomo.trades(user_id, limit=limit)
+        if endpoint == "trade":
+            if not trade_id:
+                raise HTTPException(status_code=422, detail="trade_id is required")
+            return await fomo.trade(trade_id)
+        if endpoint == "holders":
+            if not token:
+                raise HTTPException(status_code=422, detail="token is required")
+            return await fomo.holders(_resolve_fomo_token_address(token), network_id or settings.rh_chain_id)
+        if endpoint == "user":
+            if not handle:
+                raise HTTPException(status_code=422, detail="handle is required")
+            return await fomo.user_by_handle(handle)
+        raise HTTPException(status_code=422, detail="unhandled endpoint")
+    except FomoAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except FomoRateLimited as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except FomoError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        await fomo.close()

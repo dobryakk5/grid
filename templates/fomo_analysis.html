@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FOMO Smart Money</title>
+  <style>
+    :root{
+      color-scheme:dark;
+      --bg:#0b0e14;
+      --panel:#121722;
+      --panel2:#0e131d;
+      --line:#273044;
+      --line2:#202838;
+      --text:#e6eaf2;
+      --muted:#8e9aaf;
+      --good:#58d68d;
+      --bad:#ff6b6b;
+      --accent:#6ea8fe;
+      --accent-bg:#172338;
+      --warn:#f2c66d;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    button,a,select,input{font:inherit}
+    button,a{transition:.15s ease}
+    .wrap{max-width:1180px;margin:auto;padding:24px 20px 60px}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+    h1,h2,h3{margin:0}
+    h1{font-size:24px}
+    h2{font-size:17px}
+    h3{font-size:14px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .field{display:flex;flex-direction:column;gap:4px}
+    .field label{font-size:11px;color:var(--muted)}
+    input[type=text],input[type=password],input[type=number]{
+      border:1px solid var(--line);background:#0e131d;color:var(--text);
+      padding:9px 11px;border-radius:9px;min-width:200px
+    }
+    button,.button{
+      border:1px solid var(--line);background:#171d2a;color:var(--text);
+      padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none
+    }
+    button:hover,.button:hover{border-color:#3a4660}
+    .primary{border-color:var(--accent);background:#1c4d8f}
+    .muted{color:var(--muted)}
+    .good{color:var(--good)}
+    .bad{color:var(--bad)}
+    .warn{color:var(--warn)}
+    .hidden{display:none!important}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;border:1px solid var(--line);font-size:12px;font-weight:650}
+    .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+    .pill.on .dot{background:var(--good)}
+    .pill.off .dot{background:var(--bad)}
+    .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:6px}
+    .tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+    .tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
+    .tile .value{font-size:19px;font-weight:750}
+    table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+    th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+    th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+    tr:hover td{background:#141a26}
+    .side-buy{color:var(--good);font-weight:700}
+    .side-sell{color:var(--bad);font-weight:700}
+    .badge{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+    .empty{padding:20px 8px;text-align:center;color:var(--muted)}
+    pre{white-space:pre-wrap;word-break:break-all;background:#0e131d;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;max-height:400px;overflow:auto}
+    details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:4px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>FOMO Smart Money</h1>
+    <div class="row">
+      <a class="button" href="/">← Вернуться к профилям</a>
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="row" style="justify-content:space-between">
+      <div class="row">
+        <span id="sessionPill" class="pill off"><span class="dot"></span><span id="sessionPillText">проверка…</span></span>
+        <span id="registryInfo" class="muted"></span>
+      </div>
+      <div class="row">
+        <input id="jwtInput" type="password" placeholder="Вставить свежий FOMO JWT">
+        <button id="saveJwtBtn" class="primary">Сохранить</button>
+        <button id="forgetJwtBtn">Забыть</button>
+      </div>
+    </div>
+    <div id="sessionNote" class="muted" style="margin-top:8px;font-size:12px"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Токен</h2>
+    <div class="row" style="margin-top:10px">
+      <div class="field">
+        <label for="tokenInput">Символ или адрес</label>
+        <input id="tokenInput" type="text" value="PONS" placeholder="PONS или 0x…">
+      </div>
+      <div class="field">
+        <label for="networkInput">Network ID</label>
+        <input id="networkInput" type="number" value="4663" style="min-width:110px">
+      </div>
+      <button id="analyzeBtn" class="primary" style="align-self:flex-end">Анализировать</button>
+    </div>
+    <div id="tokenError" class="bad hidden" style="margin-top:10px"></div>
+
+    <div id="tokenResult" class="hidden">
+      <div class="tiles" id="summaryTiles"></div>
+
+      <h3 style="margin-top:18px">Ранжированные холдеры</h3>
+      <div id="holdersWrap"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head" style="display:flex;justify-content:space-between;align-items:center">
+      <h2>Лента сделок</h2>
+      <button id="refreshTapeBtn">Обновить</button>
+    </div>
+    <div id="tapeWrap"></div>
+  </section>
+
+  <section class="panel">
+    <details id="rawDetails">
+      <summary>Сырой ответ FOMO (для сверки схемы)</summary>
+      <div class="row" style="margin-top:10px">
+        <select id="rawEndpoint">
+          <option value="leaderboard">leaderboard</option>
+          <option value="holders">holders</option>
+          <option value="balances">balances (user_id)</option>
+          <option value="trades">trades (user_id)</option>
+        </select>
+        <input id="rawUserId" type="text" placeholder="user_id (для balances/trades)">
+        <button id="loadRawBtn">Загрузить</button>
+      </div>
+      <pre id="rawOutput" class="muted">—</pre>
+    </details>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const fmt = (v, n=4) => v === null || v === undefined ? '—' : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: n});
+const fmtUsd = v => v === null || v === undefined ? '—' : '$' + Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2});
+
+async function api(url, options = {}) {
+  const r = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || `HTTP ${r.status}`));
+  return d;
+}
+
+async function loadStatus() {
+  const pill = $('sessionPill'), text = $('sessionPillText'), info = $('registryInfo'), note = $('sessionNote');
+  try {
+    const s = await api('/api/fomo/status');
+    pill.className = 'pill ' + (s.authenticated ? 'on' : 'off');
+    text.textContent = s.authenticated
+      ? `сессия активна (${s.source}${s.expires_in != null ? ', ~' + Math.max(0, Math.round(s.expires_in / 60)) + ' мин' : ''})`
+      : 'нет FOMO-сессии';
+    const parts = [];
+    if (s.traders_known != null) parts.push(`трейдеров в реестре: ${s.traders_known}`);
+    if (s.traders_with_wallet != null) parts.push(`с кошельком: ${s.traders_with_wallet}`);
+    if (s.wallets_pending_backfill) parts.push(`ждут backfill: ${s.wallets_pending_backfill}`);
+    if (s.chain_scan_last_block != null) parts.push(`сканер на блоке ${s.chain_scan_last_block}`);
+    info.textContent = parts.join(' · ');
+    note.textContent = s.authenticated
+      ? 'Лента сделок и объёмы читаются из собственной БД и не зависят от FOMO-сессии.'
+      : 'Без FOMO-сессии пропадают только хэндлы/ранги — кошельки, сделки и объёмы остаются на месте.';
+  } catch (e) {
+    pill.className = 'pill off';
+    text.textContent = 'статус недоступен';
+    info.textContent = String(e.message || e);
+  }
+}
+
+async function saveJwt() {
+  const jwt = $('jwtInput').value.trim();
+  if (!jwt) return;
+  try {
+    await api('/api/fomo/session', {method: 'POST', body: JSON.stringify({jwt})});
+    $('jwtInput').value = '';
+    await loadStatus();
+  } catch (e) {
+    alert('Не удалось сохранить сессию: ' + e.message);
+  }
+}
+
+async function forgetJwt() {
+  await api('/api/fomo/session', {method: 'DELETE'});
+  await loadStatus();
+}
+
+function renderHolders(holders) {
+  if (!holders.length) {
+    $('holdersWrap').innerHTML = '<div class="empty">Ранжированные холдеры с позицией в этом токене не найдены в собственной ленте сделок.</div>';
+    return;
+  }
+  const rows = holders.map(h => `
+    <tr>
+      <td>${h.rank != null ? '#' + h.rank : '<span class="muted">—</span>'}</td>
+      <td>${h.handle ? esc(h.handle) : (h.display_name ? esc(h.display_name) : '<span class="muted">без хэндла</span>')}</td>
+      <td class="muted">${esc((h.evm_address || '').slice(0, 6) + '…' + (h.evm_address || '').slice(-4))}</td>
+      <td>${fmt(h.net_token_amount)}</td>
+      <td class="muted">${h.last_trade_at_ms ? new Date(h.last_trade_at_ms).toLocaleString('ru-RU') : '—'}</td>
+    </tr>`).join('');
+  $('holdersWrap').innerHTML = `
+    <table>
+      <thead><tr><th>Ранг</th><th>Трейдер</th><th>Кошелёк</th><th>Позиция (наша лента)</th><th>Последняя сделка</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderSummary(data) {
+  const w = data.windows;
+  const tiles = [
+    ['Ранжированных холдеров', data.ranked_holders.length],
+    ['Топ-10 среди них', data.ranked_holders.filter(h => h.rank != null && h.rank <= 10).length],
+    ['Покупки 1ч / 6ч / 24ч', `${w['1h'].buy_count} / ${w['6h'].buy_count} / ${w['24h'].buy_count}`],
+    ['Продажи 1ч / 6ч / 24ч', `${w['1h'].sell_count} / ${w['6h'].sell_count} / ${w['24h'].sell_count}`],
+    ['Куплено 24ч', fmtUsd(w['24h'].buys_usd)],
+    ['Продано 24ч', fmtUsd(w['24h'].sells_usd)],
+    ['Net flow 24ч', fmtUsd(w['24h'].net_flow_usd)],
+    ['Измерено по quote-ноге / рынку / без цены (24ч)',
+      `${fmtUsd(w['24h'].priced_quote_leg_usd)} / ${fmtUsd(w['24h'].priced_market_usd)} / ${w['24h'].unpriced_trades} сделок`],
+  ];
+  $('summaryTiles').innerHTML = tiles.map(([label, value]) => `
+    <div class="tile"><div class="label">${esc(label)}</div><div class="value">${typeof value === 'string' ? esc(value) : value}</div></div>
+  `).join('');
+}
+
+async function analyzeToken() {
+  const token = $('tokenInput').value.trim();
+  const networkId = $('networkInput').value.trim();
+  $('tokenError').classList.add('hidden');
+  if (!token) return;
+  try {
+    const data = await api(`/api/fomo/token?token=${encodeURIComponent(token)}&network_id=${encodeURIComponent(networkId)}`);
+    renderSummary(data);
+    renderHolders(data.ranked_holders);
+    $('tokenResult').classList.remove('hidden');
+  } catch (e) {
+    $('tokenResult').classList.add('hidden');
+    $('tokenError').textContent = 'Ошибка: ' + e.message;
+    $('tokenError').classList.remove('hidden');
+  }
+}
+
+async function loadTape() {
+  try {
+    const data = await api('/api/fomo/tape?limit=100');
+    if (!data.trades.length) {
+      $('tapeWrap').innerHTML = '<div class="empty">Сделок пока не записано — индексер ещё не догнал историю, или не настроены DEX_WATCH_SYMBOLS.</div>';
+      return;
+    }
+    const rows = data.trades.map(t => `
+      <tr>
+        <td class="muted">${new Date(t.block_time_ms).toLocaleString('ru-RU')}</td>
+        <td>${t.handle ? esc(t.handle) : '<span class="muted">' + esc((t.wallet_address || '').slice(0, 6) + '…' + (t.wallet_address || '').slice(-4)) + '</span>'}</td>
+        <td class="side-${t.side.toLowerCase()}">${t.side}</td>
+        <td>${esc(t.symbol || '?')}</td>
+        <td>${fmt(t.token_amount)}</td>
+        <td>${fmtUsd(t.value_usd)} <span class="badge">${esc(t.pricing_source)}</span></td>
+      </tr>`).join('');
+    $('tapeWrap').innerHTML = `
+      <table>
+        <thead><tr><th>Время</th><th>Трейдер</th><th>Сторона</th><th>Токен</th><th>Кол-во</th><th>Сумма</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (e) {
+    $('tapeWrap').innerHTML = `<div class="empty bad">Ошибка: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadRaw() {
+  const endpoint = $('rawEndpoint').value;
+  const userId = $('rawUserId').value.trim();
+  const params = new URLSearchParams({endpoint});
+  if (endpoint === 'holders') { params.set('token', $('tokenInput').value.trim() || 'PONS'); params.set('network_id', $('networkInput').value.trim() || '4663'); }
+  if ((endpoint === 'balances' || endpoint === 'trades') && userId) params.set('user_id', userId);
+  try {
+    const data = await api('/api/fomo/raw?' + params.toString());
+    $('rawOutput').textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    $('rawOutput').textContent = 'Ошибка: ' + e.message + '\n\n(включите FOMO_DEBUG_API=true, если эндпоинт выключен)';
+  }
+}
+
+$('saveJwtBtn').onclick = saveJwt;
+$('forgetJwtBtn').onclick = forgetJwt;
+$('analyzeBtn').onclick = analyzeToken;
+$('refreshTapeBtn').onclick = loadTape;
+$('loadRawBtn').onclick = loadRaw;
+
+loadStatus();
+loadTape();
+analyzeToken();
+</script>
+</body>
+</html>

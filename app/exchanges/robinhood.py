@@ -29,7 +29,12 @@ from app.dex.intents import SIGNED_STATUSES, IntentStatus
 from app.dex.repository import DexIntentRepository
 from app.dex.risk import RiskVerdict, evaluate
 from app.dex.tokens import DexConfigError, list_pairs, resolve_pair, resolve_token
-from app.exchanges.base import ExchangeError, InstrumentInfo, decimal_str
+from app.exchanges.base import (
+    ExchangeError,
+    InstrumentInfo,
+    OrderNotCancellable,
+    decimal_str,
+)
 
 __all__ = ["RobinhoodClient", "RobinhoodError", "DexNotImplementedError"]
 
@@ -205,6 +210,7 @@ class RobinhoodClient:
                 amount_in=qty if selling else qty * price,
                 amount_in_coin=pair.base_coin if selling else pair.quote_coin,
                 order_link_id=order_link_id,
+                profile_id=_profile_id(order_link_id),
             )
             await session.commit()
             return {
@@ -259,7 +265,7 @@ class RobinhoodClient:
             if intent is None:
                 raise RobinhoodError(f"no level with id {order_id}")
             if intent.status in SIGNED_STATUSES:
-                raise RobinhoodError(
+                raise OrderNotCancellable(
                     f"level {order_id} is already broadcast as {intent.tx_hash}; "
                     "it cannot be cancelled, only replaced by the worker"
                 )
@@ -283,6 +289,12 @@ _ORDER_STATUS = {
     IntentStatus.EXPIRED: "Deactivated",
     IntentStatus.FAILED: "Rejected",
 }
+
+
+def _profile_id(order_link_id: str) -> int | None:
+    """The engine tags every order ``g<profile_id>-<uuid>``; anything else is manual."""
+    head = order_link_id.split("-", 1)[0]
+    return int(head[1:]) if head.startswith("g") and head[1:].isdigit() else None
 
 
 def _base_amounts(intent) -> tuple[Decimal, Decimal]:
@@ -331,4 +343,12 @@ def _execution_dict(intent) -> dict:
         "execTime": (
             int(intent.submitted_at.timestamp() * 1000) if intent.submitted_at else None
         ),
+        # Gas in its native coin (ETH), alongside the quote-converted figure
+        # above: PnL sums the quote side, but the native amount stays available
+        # for reconciliation against the chain.
+        "feeNativeAmount": (
+            decimal_str(Decimal(intent.gas_native)) if intent.gas_native else None
+        ),
+        "feeNativeCoin": intent.gas_native_coin,
+        "txHash": intent.tx_hash,
     }

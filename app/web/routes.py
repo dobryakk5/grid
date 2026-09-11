@@ -20,3 +20,8 @@ async def profile_editor(request: Request):
 @router.get("/analysis")
 async def grid_analysis_page(request: Request):
     return templates.TemplateResponse(request=request, name="grid_analysis.html", context={})
+
+
+@router.get("/fomo")
+async def fomo_analysis_page(request: Request):
+    return templates.TemplateResponse(request=request, name="fomo_analysis.html", context={})

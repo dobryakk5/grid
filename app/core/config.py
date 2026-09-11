@@ -100,5 +100,42 @@ class Settings(BaseSettings):
     # Pairs the sampler watches on top of any profile using exchange=robinhood.
     dex_watch_symbols: str = "PONSUSDG"
 
+    # ---- FOMO (internal API, research access under one's own account) -----
+    # The JWT expires quickly (a ~1h Privy session); the page can override
+    # this with a pasted-in session instead of restarting the process.
+    fomo_jwt: str = ""
+    fomo_base_url: str = "https://prod-api.fomo.family"
+    fomo_supported_chains: str = "1,56,143,4663,8453,1399811149"
+    # A token report fans out to every trader's trades -- this caps how often
+    # any one FOMO endpoint is actually re-fetched.
+    fomo_cache_seconds: float = 30.0
+    fomo_leaderboard_limit: int = 50
+    # 429 backoff, mirroring the known FOMO web client: start here, double on
+    # every further 429, cap at the ceiling; the last good response is served
+    # while a backoff window is open.
+    fomo_backoff_start_seconds: float = 60.0
+    fomo_backoff_max_seconds: float = 300.0
+    # How often the trader registry re-polls the leaderboard and holders.
+    fomo_registry_poll_seconds: float = 900.0
+    # How far back (in blocks) a newly discovered wallet is backfilled, so the
+    # trade that got it noticed is not the one trade that goes missing.
+    fomo_new_wallet_backfill_blocks: int = 43_200  # ~24h at 2s/block
+    # Raw-response inspection endpoint; off by default outside development.
+    fomo_debug_api: bool = False
+
+    # ---- Robinhood Chain trade tape (on-chain source of truth) ------------
+    rh_chain_name: str = "Robinhood Chain"
+    # Quote symbols close enough to $1 that the swap's own quote leg is a
+    # better USD estimate than any external price feed.
+    usd_quote_symbols: str = "USDG"
+    chain_tape_poll_seconds: float = 5.0
+    chain_tape_block_batch_max: int = 2000
+    chain_tape_block_batch_min: int = 50
+    # Blocks the tape stays behind the chain head before treating a block as
+    # settled -- a cheap reorg guard, not a real one.
+    chain_tape_confirmations: int = 3
+    # 0 means "start from the current head" on a brand-new cursor.
+    chain_tape_start_block: int = 0
+
 
 settings = Settings()

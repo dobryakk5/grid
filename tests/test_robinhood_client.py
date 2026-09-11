@@ -11,6 +11,7 @@ from app.exchanges.robinhood import (
     RobinhoodError,
     _execution_dict,
     _order_dict,
+    _profile_id,
 )
 
 
@@ -172,6 +173,8 @@ class FakeIntent:
             "fill_price": None,
             "gas_quote": None,
             "gas_quote_coin": None,
+            "gas_native": None,
+            "gas_native_coin": None,
             "tx_hash": None,
             "submitted_at": None,
         }
@@ -235,6 +238,7 @@ def test_the_execution_carries_gas_as_a_quote_denominated_fee():
         status="FILLED", filled_amount_in=Decimal("250"),
         filled_amount_out=Decimal("460"), fill_price=Decimal("0.5434"),
         gas_quote=Decimal("1"), gas_quote_coin="USDG",
+        gas_native=Decimal("0.000022"), gas_native_coin="ETH",
         tx_hash="0x" + "ab" * 32,
     ))
 
@@ -244,3 +248,33 @@ def test_the_execution_carries_gas_as_a_quote_denominated_fee():
     assert execution["execFee"] == "1"
     assert execution["feeCurrency"] == "USDG"
     assert execution["isMaker"] is False
+    # The native (ETH) gas figure travels alongside the quote-converted one,
+    # so the fill can be reconciled against the chain without redoing the math.
+    assert execution["feeNativeAmount"] == "0.000022"
+    assert execution["feeNativeCoin"] == "ETH"
+    assert execution["txHash"] == "0x" + "ab" * 32
+
+
+def test_the_execution_omits_native_gas_when_it_was_never_converted():
+    # gas stays unconverted (app/dex/pricing.py) when no ETH pool exists for
+    # the pair; the execution must not fabricate a figure for it.
+    execution = _execution_dict(FakeIntent(status="FILLED"))
+
+    assert execution["feeNativeAmount"] is None
+    assert execution["feeNativeCoin"] is None
+
+
+@pytest.mark.parametrize(
+    "order_link_id,expected",
+    [
+        ("g1-abc", 1),
+        ("g42-abcdef1234567890abcdef12", 42),
+        # scripts/dex_swap.py and other manual callers do not follow the
+        # engine's "g<profile_id>-<uuid>" convention.
+        ("manual-swap-123", None),
+        ("g-abc", None),
+        ("gabc-def", None),
+    ],
+)
+def test_profile_id_is_read_from_the_engines_order_link_id(order_link_id, expected):
+    assert _profile_id(order_link_id) == expected

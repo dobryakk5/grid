@@ -1,4 +1,4 @@
-.PHONY: install test db-init api worker market-data dex-sampler dex-worker bybit-status health
+.PHONY: install test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry chain-tape chain-tape-bench chain-tape-rebuild
 
 install:
 	python3 -m venv .venv
@@ -25,6 +25,18 @@ dex-sampler:
 
 dex-worker:
 	./scripts/run-dex-worker.sh
+
+fomo-registry:
+	./scripts/run-fomo-registry.sh
+
+chain-tape:
+	./scripts/run-chain-tape.sh
+
+chain-tape-bench:
+	.venv/bin/python scripts/chain_tape_bench.py
+
+chain-tape-rebuild:
+	.venv/bin/python scripts/rebuild-chain-swaps.py
 
 bybit-status:
 	curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool

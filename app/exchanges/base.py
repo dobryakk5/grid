@@ -17,6 +17,14 @@ class ExchangeError(RuntimeError):
     """Raised for any venue-reported failure (auth, rejected order, bad symbol)."""
 
 
+class OrderNotCancellable(ExchangeError):
+    """The order is past the point where the venue can still withdraw it.
+
+    On-chain venues sign and broadcast; once they have, no cancel exists. The
+    engine treats this as a decision, not a transient failure: it stops asking.
+    """
+
+
 @dataclass(frozen=True)
 class InstrumentInfo:
     symbol: str
@@ -25,6 +33,23 @@ class InstrumentInfo:
     tick_size: Decimal
     base_precision: Decimal
     min_order_amt: Decimal
+
+
+# Quote currencies this deployment trades against, longest-lived first. Symbols
+# carry no separator, so the quote suffix is the only way to split them.
+QUOTE_COINS = ("USDT", "USDC", "USDG", "BTC", "ETH")
+
+
+def split_symbol(symbol: str) -> tuple[str, str]:
+    """``("PONS", "USDG")`` -- base and quote, or ``("", "")`` if unknown."""
+    upper = symbol.upper()
+    for quote in QUOTE_COINS:
+        if upper.endswith(quote):
+            base = upper[: -len(quote)]
+            # A bare quote coin is not a pair: "USDG" must not read as base "".
+            if base:
+                return base, quote
+    return "", ""
 
 
 def decimal_str(value: Decimal) -> str:
@@ -45,9 +70,14 @@ class ExchangeClient(Protocol):
       ``cumExecQty``, ``avgPrice``, ``orderLinkId`` -- or ``None`` when unknown.
     * ``get_executions`` -> ``list[dict]`` with ``execId``, ``execPrice``,
       ``execQty``, ``execValue``, ``execFee``, ``feeCurrency``, ``isMaker``,
-      ``execTime``.
+      ``execTime``. On-chain venues additionally carry ``feeNativeAmount``,
+      ``feeNativeCoin`` and ``txHash`` -- gas paid in a coin that is neither
+      base nor quote, and the transaction it was paid in. Other venues omit
+      these three keys entirely.
     * ``klines`` -> oldest-first ``list[dict]`` with ``timestamp_ms``, ``open``,
       ``high``, ``low``, ``close``, ``volume``, ``turnover``.
+    * ``cancel_order`` raises ``OrderNotCancellable`` for an order the venue can
+      no longer withdraw (e.g. an already-broadcast on-chain swap).
     """
 
     name: str

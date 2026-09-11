@@ -12,6 +12,7 @@ from app.db.models import (
     StrategyEvent,
 )
 from app.db.session import SessionLocal, engine
+from app.exchanges.base import split_symbol
 
 
 OPEN_STATUSES = {"New", "PartiallyFilled", "Untriggered", "Created"}
@@ -83,13 +84,6 @@ async def bootstrap_current_ranges() -> None:
             await session.commit()
 
 
-def _base_coin(symbol: str) -> str:
-    for quote in ("USDT", "USDC", "BTC", "ETH"):
-        if symbol.upper().endswith(quote):
-            return symbol.upper()[:-len(quote)]
-    return ""
-
-
 async def bootstrap_live_position_lots() -> None:
     """Create lots only for inventory still represented by the current range."""
     async with SessionLocal() as session:
@@ -141,8 +135,9 @@ async def bootstrap_live_position_lots() -> None:
                 for execution in sorted(buy_executions, key=lambda item: item.id):
                     if execution.id in existing:
                         continue
+                    base_coin, quote_coin = split_symbol(buy.symbol)
                     acquired = Decimal(execution.exec_qty)
-                    if (execution.fee_currency or "").upper() == _base_coin(buy.symbol):
+                    if (execution.fee_currency or "").upper() == base_coin:
                         acquired -= Decimal(execution.exec_fee or 0)
                     remaining = max(min(acquired, acquired - sold), Decimal("0"))
                     sold -= max(acquired - remaining, Decimal("0"))
@@ -150,7 +145,7 @@ async def bootstrap_live_position_lots() -> None:
                         continue
                     quote_fee = (
                         Decimal(execution.exec_fee or 0)
-                        if (execution.fee_currency or "").upper() in {"USDT", "USDC"}
+                        if (execution.fee_currency or "").upper() == quote_coin
                         else Decimal("0")
                     )
                     session.add(PositionLot(
@@ -215,6 +210,9 @@ async def init_db() -> None:
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS current_range_id INTEGER REFERENCES grid_ranges(id) ON DELETE SET NULL",
             "ALTER TABLE grid_orders ADD COLUMN IF NOT EXISTS order_role VARCHAR(32) NOT NULL DEFAULT 'grid'",
             "ALTER TABLE grid_orders ADD COLUMN IF NOT EXISTS range_id INTEGER REFERENCES grid_ranges(id) ON DELETE SET NULL",
+            # A "Created" row is committed before the venue assigns an id
+            # (GridEngine._place_and_store); NULL is the in-flight state.
+            "ALTER TABLE grid_orders ALTER COLUMN exchange_order_id DROP NOT NULL",
             "ALTER TABLE recovery_trades ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(48)",
             # On-chain fills: native gas fee kept next to its quote conversion.
             "ALTER TABLE grid_executions ADD COLUMN IF NOT EXISTS fee_native_amount NUMERIC(38, 18)",

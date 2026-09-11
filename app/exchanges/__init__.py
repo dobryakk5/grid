@@ -6,7 +6,14 @@ default) and get a client that satisfies ``ExchangeClient``.
 """
 
 from app.core.config import settings
-from app.exchanges.base import ExchangeClient, ExchangeError, InstrumentInfo, decimal_str
+from app.exchanges.base import (
+    ExchangeClient,
+    ExchangeError,
+    InstrumentInfo,
+    OrderNotCancellable,
+    decimal_str,
+    split_symbol,
+)
 from app.exchanges.bybit import BybitClient, BybitError
 from app.exchanges.mexc import MexcClient, MexcError
 from app.exchanges.robinhood import RobinhoodClient, RobinhoodError
@@ -14,8 +21,10 @@ from app.exchanges.robinhood import RobinhoodClient, RobinhoodError
 __all__ = [
     "ExchangeClient",
     "ExchangeError",
+    "OrderNotCancellable",
     "InstrumentInfo",
     "decimal_str",
+    "split_symbol",
     "BybitClient",
     "BybitError",
     "MexcClient",

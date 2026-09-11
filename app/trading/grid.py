@@ -20,7 +20,7 @@ from app.db.models import (
     StrategyRecommendation,
 )
 from app.exchanges import make_exchange
-from app.exchanges.base import ExchangeClient, InstrumentInfo
+from app.exchanges.base import ExchangeClient, InstrumentInfo, OrderNotCancellable, split_symbol
 from app.trading.events import record_strategy_event
 from app.trading.math import (
     dca_initial_percent,
@@ -32,7 +32,10 @@ from app.trading.recommendations import create_recommendation, expire_recommenda
 
 logger = logging.getLogger(__name__)
 
-OPEN_STATUSES = {"New", "PartiallyFilled", "Untriggered", "Created"}
+OPEN_STATUSES = {"New", "PartiallyFilled", "Untriggered", "Created", "CancelRefused"}
+# CancelRefused stays open (still syncs, still counts as the one BUY) but is
+# never worth asking the venue to cancel again -- it already said no.
+CANCELLABLE_STATUSES = OPEN_STATUSES - {"CancelRefused"}
 SYNC_STATUSES = OPEN_STATUSES | {
     "CancelRequested", "CancelRequestedBreakdown", "CancelRequestedByUser",
 }
@@ -196,11 +199,13 @@ class GridEngine:
         buys = list(result.scalars())
         if len(buys) <= 1:
             return
-        # Keep only the closest/highest pending BUY. Older versions seeded every
-        # lower level at once; this collapses such profiles to sequential mode.
-        keep = max(buys, key=lambda item: Decimal(item.price))
+        # A signed order cannot be superseded: it will fill or fail on its own,
+        # so it -- not the newest level -- is the one open BUY. Cancelling it
+        # was already refused once; asking again would just repeat that.
+        irreversible = [order for order in buys if order.status == "CancelRefused"]
+        keep = max(irreversible or buys, key=lambda item: Decimal(item.price))
         for order in buys:
-            if order.id == keep.id:
+            if order.id == keep.id or order.status == "CancelRefused":
                 continue
             await self.exchange.cancel_order(
                 order_id=order.exchange_order_id, symbol=order.symbol
@@ -847,18 +852,43 @@ class GridEngine:
             return []
 
         for order in orders:
-            remote = await self.exchange.get_order(
-                order_id=order.exchange_order_id, symbol=order.symbol
-            )
-            if remote is None:
-                logger.warning("Order %s not found on exchange", order.exchange_order_id)
-                continue
+            if order.exchange_order_id is None:
+                # A crash between committing this "Created" row and placing the
+                # order with the venue (app/exchanges/robinhood.py
+                # place_limit_order) can leave either state. The venue, keyed
+                # by the link id committed before that call, is the only way
+                # to tell which one happened.
+                remote = await self.exchange.get_order_by_link_id(
+                    order_link_id=order.order_link_id, symbol=order.symbol
+                )
+                if remote is None:
+                    order.status = "Rejected"
+                    record_strategy_event(
+                        session, profile_id=profile.id, event_type="ORDER_SYNCED",
+                        from_state="Created", to_state="Rejected",
+                        reason="no matching order on the venue after restart",
+                        metadata={"order_id": order.id, "order_link_id": order.order_link_id},
+                    )
+                    continue
+                order.exchange_order_id = remote["orderId"]
+            else:
+                remote = await self.exchange.get_order(
+                    order_id=order.exchange_order_id, symbol=order.symbol
+                )
+                if remote is None:
+                    logger.warning("Order %s not found on exchange", order.exchange_order_id)
+                    continue
 
             old_status = order.status
             remote_status = remote.get("orderStatus", order.status)
             if remote_status == "Cancelled" and old_status.startswith("CancelRequested"):
                 suffix = old_status.removeprefix("CancelRequested")
                 order.status = f"Cancelled{suffix}"
+            elif old_status == "CancelRefused" and remote_status == "New":
+                # The refusal stands until the venue itself reports the level
+                # is done -- "New" only means the signed transaction is still
+                # in flight, not that the cancel is worth trying again.
+                pass
             else:
                 order.status = remote_status
             if remote.get("cumExecQty"):
@@ -1211,6 +1241,14 @@ class GridEngine:
                     exec_time_ms=(
                         int(item["execTime"]) if item.get("execTime") else None
                     ),
+                    # On-chain venues only (app/exchanges/robinhood.py); every
+                    # other venue omits these keys, so these stay NULL there.
+                    fee_native_amount=(
+                        Decimal(item["feeNativeAmount"])
+                        if item.get("feeNativeAmount") else None
+                    ),
+                    fee_native_coin=item.get("feeNativeCoin") or None,
+                    tx_hash=item.get("txHash") or None,
             )
             session.add(execution)
             new_executions.append(execution)
@@ -1233,10 +1271,7 @@ class GridEngine:
 
     @staticmethod
     def _base_coin(symbol: str) -> str:
-        for quote in ("USDT", "USDC", "BTC", "ETH"):
-            if symbol.upper().endswith(quote):
-                return symbol.upper()[:-len(quote)]
-        return ""
+        return split_symbol(symbol)[0]
 
     async def ensure_position_lot_for_execution(
         self, session: AsyncSession, order: GridOrder, execution: GridExecution,
@@ -1259,12 +1294,12 @@ class GridEngine:
         )
         if existing is not None:
             return existing
-        base_coin = self._base_coin(order.symbol)
+        base_coin, quote_coin = split_symbol(order.symbol)
         fee_currency = (execution.fee_currency or "").upper()
         qty = Decimal(execution.exec_qty)
         fee = Decimal(execution.exec_fee or 0)
         acquired = qty - fee if fee_currency == base_coin else qty
-        quote_fee = fee if fee_currency in {"USDT", "USDC"} else Decimal("0")
+        quote_fee = fee if fee_currency == quote_coin else Decimal("0")
         lot = PositionLot(
             profile_id=order.profile_id,
             source_execution_id=execution.id,
@@ -1380,6 +1415,13 @@ class GridEngine:
         latest_by_cell: dict[Decimal, GridOrder] = {}
         for order in result.scalars():
             latest_by_cell[Decimal(order.grid_buy_price)] = order
+
+        # A signed-but-uncancellable BUY (app/exchanges/robinhood.py) is the
+        # range's one open BUY until it fills or fails. Seeding a fresh cell
+        # above it would only get cancelled by enforce_single_open_buy next
+        # tick, land back in retry_statuses, and reseed here -- forever.
+        if any(order.status == "CancelRefused" for order in latest_by_cell.values()):
+            return
 
         retry_statuses = {
             "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled",
@@ -1669,7 +1711,9 @@ class GridEngine:
     ) -> None:
         conditions = [
             GridOrder.profile_id == profile_id,
-            GridOrder.status.in_(OPEN_STATUSES),
+            # CancelRefused already got its answer; asking again would only
+            # repeat the same refusal every tick.
+            GridOrder.status.in_(CANCELLABLE_STATUSES),
         ]
         if range_id is not None:
             conditions.append(GridOrder.range_id == range_id)
@@ -1689,6 +1733,21 @@ class GridEngine:
                 suffix = local_status.removeprefix("Cancelled")
                 order.status = f"CancelRequested{suffix}"
                 await session.commit()
+            except OrderNotCancellable as exc:
+                # A signed order cannot be withdrawn -- it will fill or fail on
+                # its own. Record the refusal once instead of retrying it every
+                # tick for as long as the transaction is in flight.
+                order.status = "CancelRefused"
+                record_strategy_event(
+                    session, profile_id=profile_id, event_type="ORDER_CANCEL_REFUSED",
+                    to_state="CancelRefused", reason=str(exc),
+                    metadata={"order_id": order.id, "exchange_order_id": order.exchange_order_id},
+                )
+                await session.commit()
+                logger.warning(
+                    "Order %s cannot be cancelled (%s); leaving it to fill or fail",
+                    order.exchange_order_id, exc,
+                )
             except Exception:
                 logger.exception("Could not cancel order %s", order.exchange_order_id)
 
@@ -1706,6 +1765,30 @@ class GridEngine:
         range_id: int | None = None,
     ) -> GridOrder:
         link_id = f"g{profile.id}-{uuid.uuid4().hex[:24]}"
+        # The row is committed, keyed by a link id already fixed, before the
+        # venue is asked to place anything. A crash on either side of that
+        # call then leaves exactly one row for sync_open_orders to resolve --
+        # adopt the order the venue actually created, or drop the cell and let
+        # it be seeded again -- never a silent duplicate, never a fill the
+        # grid has no record of. Same shape as the DEX engine's own "PERSIST
+        # before broadcast" (docs/dex-flow.md).
+        row = GridOrder(
+            profile_id=profile.id,
+            range_id=range_id,
+            exchange_order_id=None,
+            order_link_id=link_id,
+            symbol=profile.symbol,
+            side=side,
+            grid_buy_price=grid_buy_price,
+            price=price,
+            qty=qty,
+            status="Created",
+            replacement_for=replacement_for,
+            order_role=order_role,
+        )
+        session.add(row)
+        await session.commit()
+
         response = await self.exchange.place_limit_order(
             symbol=profile.symbol,
             side=side,
@@ -1713,23 +1796,8 @@ class GridEngine:
             price=price,
             order_link_id=link_id,
         )
-        result = response["result"]
-        row = GridOrder(
-            profile_id=profile.id,
-            range_id=range_id,
-            exchange_order_id=result["orderId"],
-            order_link_id=link_id,
-            symbol=profile.symbol,
-            side=side,
-            grid_buy_price=grid_buy_price,
-            price=price,
-            qty=qty,
-            status="New",
-            replacement_for=replacement_for,
-            order_role=order_role,
-        )
-        session.add(row)
-        await session.flush()
+        row.exchange_order_id = response["result"]["orderId"]
+        row.status = "New"
         return row
 
     @staticmethod
@@ -1745,5 +1813,5 @@ class GridEngine:
         amount = price * qty
         if amount < info.min_order_amt:
             raise ValueError(
-                f"Order amount {amount} is below Bybit minOrderAmt={info.min_order_amt}"
+                f"Order amount {amount} is below minOrderAmt={info.min_order_amt}"
             )

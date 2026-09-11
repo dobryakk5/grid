@@ -153,7 +153,10 @@ class GridOrder(Base):
     range_id: Mapped[int | None] = mapped_column(
         ForeignKey("grid_ranges.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    exchange_order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    # NULL between the "Created" row's own commit and the venue call that
+    # assigns it (see GridEngine._place_and_store); unique still holds since
+    # Postgres does not compare NULLs equal to each other.
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
     order_link_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -507,6 +510,129 @@ class StrategyEvent(Base):
     market_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     event_metadata: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FomoTrader(Base):
+    """A FOMO identity, joined to the on-chain wallet it actually trades from.
+
+    ``evm_address`` is what makes this table useful: without it a FOMO trader
+    is just a leaderboard row with no way to watch what they do on chain.
+    """
+
+    __tablename__ = "fomo_traders"
+
+    fomo_user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    evm_address: Mapped[str | None] = mapped_column(String(42), nullable=True, index=True)
+    user_handle: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Where evm_address came from: "leaderboard", "holders", "trade", or
+    # "manual" for a hand-seeded fallback row.
+    source: Mapped[str] = mapped_column(String(24), nullable=False, default="leaderboard")
+    # NULL means never backfilled -- the queue chain_tape drains before it
+    # advances the global cursor. Set once the wallet's recent history has
+    # been scanned, so the trade that got this wallet noticed is not lost.
+    backfilled_from_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class FomoTraderRank(Base):
+    """Rank history, not a snapshot -- rank #5 today says nothing about rank
+    #5 a month ago, so overwriting a single row would throw that away."""
+
+    __tablename__ = "fomo_trader_ranks"
+
+    fomo_user_id: Mapped[str] = mapped_column(
+        ForeignKey("fomo_traders.fomo_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True, server_default=func.now()
+    )
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stats: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class ChainTransaction(Base):
+    """Raw ERC-20 ``Transfer`` legs for one transaction, kept independent of
+    however ``classify()`` currently reads them.
+
+    Exists for one reason: if the classification logic turns out to be wrong
+    for some Universal Router path, the fix must not require re-reading the
+    chain for the whole history. ``scripts/rebuild-chain-swaps.py`` replays
+    this table through the current ``classify()`` with zero RPC calls.
+    """
+
+    __tablename__ = "chain_transactions"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tx_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    block_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Every Transfer leg observed for this tx, exactly as decoded from logs.
+    transfers: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_chain_transactions_block", "chain_id", "block_number"),
+    )
+
+
+class ChainSwap(Base):
+    """One reconstructed BUY/SELL for one tracked wallet, read straight off
+    the chain -- the source of trade truth this app relies on, not FOMO.
+
+    A single transaction can touch more than one tracked wallet (e.g. a
+    router batching two users' swaps), hence the composite key rather than
+    keying on ``tx_hash`` alone.
+    """
+
+    __tablename__ = "chain_swaps"
+
+    tx_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    wallet_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    block_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    token_address: Mapped[str] = mapped_column(String(42), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY | SELL
+    token_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    quote_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    quote_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quote_amount: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    value_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    # QUOTE_LEG (priced off the swap's own USD-pegged leg -- the most honest
+    # figure available), MARKET_PRICE (fallback to a price feed), or
+    # UNPRICED. Kept per-row so aggregates can separate measured from
+    # estimated volume rather than silently blending them.
+    pricing_source: Mapped[str] = mapped_column(String(16), nullable=False, default="UNPRICED")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_chain_swaps_token_time", "token_address", "block_time_ms"),
+        Index("ix_chain_swaps_wallet_time", "wallet_address", "block_time_ms"),
+    )
+
+
+class ChainScanCursor(Base):
+    """How far the tape has scanned, per chain and per scope.
+
+    ``scope`` is ``"realtime"`` for the main forward scan; a wallet backfill
+    does not use this table at all -- it is bounded and one-shot, tracked
+    instead by ``FomoTrader.backfilled_from_block``.
+    """
+
+    __tablename__ = "chain_scan_cursors"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(24), primary_key=True)
+    last_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 Index("ix_grid_orders_profile_range", GridOrder.profile_id, GridOrder.range_id)
