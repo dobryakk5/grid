@@ -70,6 +70,11 @@ class SwapOutcome:
     reason: str = ""
     market_price: Decimal | None = None
     quoted_price: Decimal | None = None
+    # The worst the swap can do without reverting -- what the limit is judged on.
+    worst_price: Decimal | None = None
+    worst_amount_out: Decimal | None = None
+    gas_estimate_native: Decimal | None = None
+    gas_estimate_usd: Decimal | None = None
     fill_price: Decimal | None = None
     amount_in: Decimal | None = None
     amount_out: Decimal | None = None
@@ -264,6 +269,11 @@ async def execute_swap(
             ),
             market_price=snapshot.price_quote,
             quoted_price=executable,
+            worst_price=guaranteed,
+            worst_amount_out=token_out.from_wei(
+                quote.min_amount_out or quote.amount_out
+            ),
+            **_gas_estimate(quote),
         )
 
     expected_out = token_out.from_wei(quote.amount_out)
@@ -286,8 +296,11 @@ async def execute_swap(
             reason="; ".join(notes),
             market_price=snapshot.price_quote,
             quoted_price=executable,
+            worst_price=guaranteed,
+            worst_amount_out=guaranteed_out,
             amount_in=amount_in,
             amount_out=expected_out,
+            **_gas_estimate(quote),
         )
     if session is None:
         raise ChainError("a live swap needs a database session to record intent")
@@ -525,6 +538,18 @@ async def _build_transaction(
     else:
         tx.update(await chain.fee_fields())
     return tx
+
+
+def _gas_estimate(quote) -> dict:
+    """The router's own gas estimate, for a preview to show before signing."""
+    return {
+        "gas_estimate_native": (
+            Decimal(quote.gas_fee_native_wei).scaleb(-18)
+            if quote.gas_fee_native_wei
+            else None
+        ),
+        "gas_estimate_usd": quote.gas_fee_usd,
+    }
 
 
 def _check_router(target: str) -> None:

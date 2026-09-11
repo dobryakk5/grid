@@ -175,13 +175,25 @@ make dex-worker
 продажа наоборот, но лимит всегда в «котировка за базу» — покупка исполняется по
 нему или ниже, продажа по нему или выше.
 
+Живой прогон требует трёх отдельных действий, потому что тратит настоящие
+деньги: `DEX_DRY_RUN=false`, `--execute` и `--confirm-live`. Без последнего
+скрипт запрашивает котировку, печатает экран `LIVE ORDER` с худшим возможным
+исполнением и останавливается. Котировка для подписи запрашивается заново после
+подтверждения — та, которую человек только что прочитал, для подписи уже стара.
+
 Ручной end-to-end прогон:
 
 ```bash
-scripts/dex_swap.py --symbol PONSETH --side buy  --amount 0.001 --limit 0.00022
-scripts/dex_swap.py --symbol PONSETH --side sell --amount 100   --limit 0.00025
-scripts/dex_swap.py --symbol PONSETH --side buy  --amount 0.001 --limit 0.00022 --execute
+scripts/dex_swap.py --symbol PONSUSDG --side buy  --amount 10 --limit 0.55
+scripts/dex_swap.py --symbol PONSUSDG --side sell --amount 20 --limit 0.62
+scripts/dex_swap.py --symbol PONSETH  --side buy  --amount 0.0004 --limit 0.00026 \
+    --execute --confirm-live
 ```
+
+Торговая пара — `PONSUSDG`: уровень в долларах не уезжает вместе с ETH. `PONSETH`
+годится как smoke-test исполнения, но не как сетка — там уровень выражен в ETH
+за PONS, и движение самого ETH сдвигает все уровни относительно доллара. ETH на
+бот-кошельке нужен под газ.
 
 `--execute` дополнительно требует `DEX_DRY_RUN=false` в `.env` — одного флага
 недостаточно. Для покупки за USDG approve на Permit2 отправляется автоматически

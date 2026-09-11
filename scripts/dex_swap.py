@@ -11,7 +11,16 @@ filled at market.
 
     scripts/dex_swap.py --symbol PONSETH --side buy  --amount 0.001 --limit 0.00022
     scripts/dex_swap.py --symbol PONSETH --side sell --amount 100   --limit 0.00025
-    scripts/dex_swap.py --symbol PONSETH --side buy  --amount 0.001 --limit 0.00022 --execute
+
+A live run takes three separate acts of intent, because it spends real money:
+``DEX_DRY_RUN=false``, ``--execute``, and ``--confirm-live``. Without the last
+one it quotes, prints exactly what would be signed -- including the worst fill
+the transaction could produce -- and stops.
+
+    scripts/dex_swap.py --symbol PONSETH --side buy --amount 0.0004 \
+        --limit 0.00026 --execute                  # preview, signs nothing
+    scripts/dex_swap.py --symbol PONSETH --side buy --amount 0.0004 \
+        --limit 0.00026 --execute --confirm-live   # sends it
 """
 
 import argparse
@@ -48,7 +57,11 @@ async def main() -> int:
     )
     parser.add_argument(
         "--execute", action="store_true",
-        help="sign and broadcast; without it nothing leaves the machine",
+        help="intend to trade for real; still previews unless --confirm-live",
+    )
+    parser.add_argument(
+        "--confirm-live", action="store_true",
+        help="actually sign and broadcast, after reading the preview",
     )
     args = parser.parse_args()
 
@@ -74,6 +87,9 @@ async def main() -> int:
         )
 
         async with SessionLocal() as session:
+            # Always quote first without signing. For a live run this is the
+            # preview; the money-moving pass re-quotes afterwards, because a
+            # quote a human just read is already too old to sign.
             outcome = await execute_swap(
                 session,
                 symbol=pair.symbol,
@@ -83,8 +99,24 @@ async def main() -> int:
                 chain=chain,
                 uniswap=uniswap,
                 market=market,
-                dry_run=not args.execute,
+                dry_run=True,
             )
+            if args.execute and outcome.status == "DRY_RUN":
+                _preview(chain, pair, args, outcome, selling=selling)
+                if not args.confirm_live:
+                    print("Not sent. Add --confirm-live to sign and broadcast.")
+                    return 0
+                outcome = await execute_swap(
+                    session,
+                    symbol=pair.symbol,
+                    side="Sell" if selling else "Buy",
+                    amount_in=args.amount,
+                    limit_price=args.limit,
+                    chain=chain,
+                    uniswap=uniswap,
+                    market=market,
+                    dry_run=False,
+                )
     finally:
         await chain.close()
         await uniswap.close()
@@ -97,6 +129,7 @@ async def main() -> int:
     for label, value in (
         ("Pool price", outcome.market_price),
         ("Executable", outcome.quoted_price),
+        ("Worst case", outcome.worst_price),
         ("Filled at", outcome.fill_price),
         ("Spent", outcome.amount_in),
         ("Received", outcome.amount_out),
@@ -108,6 +141,40 @@ async def main() -> int:
         if value is not None:
             print(f"{label}: {value}")
     return 0 if outcome.status in {"DRY_RUN", "FILLED", "WAITING", "BLOCKED"} else 1
+
+
+def _preview(chain, pair, args, outcome, *, selling: bool) -> None:
+    """What is about to be signed, in the terms it will be signed in."""
+    spent = pair.base_coin if selling else pair.quote_coin
+    received = pair.quote_coin if selling else pair.base_coin
+    unit = f"{pair.quote_coin}/{pair.base_coin}"
+
+    print()
+    print("=" * 52)
+    print("LIVE ORDER")
+    print("=" * 52)
+    print(f"  Chain:      {pair.chain} {settings.rh_chain_id}")
+    print(f"  Wallet:     {chain.wallet_address}")
+    print(f"  Side:       {args.side.upper()}")
+    print(f"  Pair:       {pair.base_coin}/{pair.quote_coin}")
+    print(f"  Spend max:  {args.amount} {spent}")
+    print(f"  Limit:      {args.limit} {unit} "
+          f"({'at least' if selling else 'at most'})")
+    print()
+    print(f"  Quoted:     {outcome.amount_out} {received}")
+    if outcome.worst_amount_out is not None:
+        print(f"  Worst case: {outcome.worst_amount_out} {received}")
+    if outcome.worst_price is not None:
+        print(f"  Worst px:   {outcome.worst_price} {unit}")
+    if outcome.gas_estimate_native is not None:
+        usd = (
+            f" / ~${outcome.gas_estimate_usd:.4f}"
+            if outcome.gas_estimate_usd is not None else ""
+        )
+        print(f"  Gas est.:   {outcome.gas_estimate_native} ETH{usd}")
+    if "Permit2" in (outcome.reason or ""):
+        print("  Permit2:    an approval and a signature are required first")
+    print("=" * 52)
 
 
 if __name__ == "__main__":

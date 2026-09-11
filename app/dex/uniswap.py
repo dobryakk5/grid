@@ -50,6 +50,12 @@ class QuoteResult:
     # one a limit has to be judged against.
     min_amount_out: int
     permit_data: dict | None
+    # The router's own gas estimate: native wei, and its USD valuation.
+    # (``gasFeeQuote`` is deliberately not read -- it is denominated in the
+    # output token, not in the pair's quote currency, so it is not a fee figure
+    # this code can use.)
+    gas_fee_native_wei: int = 0
+    gas_fee_usd: Decimal | None = None
     received_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -197,6 +203,12 @@ class UniswapClient:
             amount_out=_amount_of(quote.get("output")),
             min_amount_out=_amount_of(quote.get("output"), key="minimumAmount"),
             permit_data=data.get("permitData") or quote.get("permitData"),
+            gas_fee_native_wei=to_int(quote.get("gasFee")) or 0,
+            gas_fee_usd=(
+                Decimal(str(quote["gasFeeUSD"]))
+                if quote.get("gasFeeUSD") is not None
+                else None
+            ),
         )
         if result.amount_out <= 0:
             raise UniswapError("quote returned a zero output amount")
