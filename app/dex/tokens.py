@@ -96,6 +96,9 @@ _BUILTIN_TOKENS: dict[str, Token] = {
     # Wrapped ETH on Robinhood Chain -- needed to recognise ETH-quoted pools.
     "WETH": Token(symbol="WETH", address="", decimals=18),
     "USDG": Token(symbol="USDG", address="", decimals=6),
+    # Addresses are per chain: USDC on Ethereum is not USDC on Robinhood Chain,
+    # so this one is configured rather than baked in.
+    "USDC": Token(symbol="USDC", address="", decimals=6),
     # Official PONS contract (same address on CoinGecko and the main PONS market).
     "PONS": Token(
         symbol="PONS",
@@ -109,6 +112,7 @@ _BUILTIN_PAIRS: dict[str, tuple[str, str, Decimal]] = {
     # symbol -> (base, quote, tick_size)
     "PONSETH": ("PONS", "ETH", Decimal("0.0000000001")),
     "PONSUSDG": ("PONS", "USDG", Decimal("0.0001")),
+    "PONSUSDC": ("PONS", "USDC", Decimal("0.0001")),
     "CASHCATETH": ("CASHCAT", "ETH", Decimal("0.0000000001")),
     "CASHCATUSDG": ("CASHCAT", "USDG", Decimal("0.000001")),
 }

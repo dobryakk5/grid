@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Trading wallet key -- a dedicated bot account, never the main wallet's
     # seed. Read lazily by app/dex/chain.py and never logged or persisted.
     rh_private_key: str = ""
+    # Read-only address for dry runs: quoting needs a swapper and balance checks
+    # need an owner, but neither needs a key. Ignored once a key is configured.
+    rh_wallet_address: str = ""
     # Robinhood Chain only ever deployed Universal Router 2.1.1; asking for 2.0
     # is an error there, so the version is pinned rather than left to a default.
     rh_universal_router_version: str = "2.1.1"

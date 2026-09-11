@@ -137,9 +137,20 @@ class ChainClient:
 
     @property
     def wallet_address(self) -> str:
-        if self._account is None:
-            raise ChainError("RH_PRIVATE_KEY is not configured")
-        return self._account.address
+        """The wallet we act for.
+
+        A dry run only needs the address -- to quote against, and to read
+        balances and allowances for -- so a configured address stands in when no
+        key is present. Signing still requires the key, and refuses without it.
+        """
+        if self._account is not None:
+            return self._account.address
+        configured = (settings.rh_wallet_address or "").strip()
+        if configured:
+            return AsyncWeb3.to_checksum_address(configured)
+        raise ChainError(
+            "no wallet: set RH_PRIVATE_KEY to trade, or RH_WALLET_ADDRESS to dry-run"
+        )
 
     async def ensure_ready(self) -> None:
         """Fail before any money moves if the RPC points at the wrong chain."""

@@ -104,3 +104,22 @@ async def test_native_received_adds_back_what_we_spent_ourselves():
     )
 
     assert received == 23_000_000_000_000_000
+
+
+def test_a_dry_run_can_name_a_wallet_without_holding_its_key(monkeypatch):
+    monkeypatch.setattr(
+        settings, "rh_wallet_address", "0x071a4377479956ffbab52d189b21491c9b895a5b"
+    )
+    chain = client()
+
+    assert chain.has_key is False
+    # Checksummed, so it can be used as a quote swapper and a balance owner.
+    assert chain.wallet_address == "0x071A4377479956fFBaB52d189b21491C9B895A5B"
+
+
+def test_signing_still_refuses_without_a_key(monkeypatch):
+    monkeypatch.setattr(
+        settings, "rh_wallet_address", "0x071A4377479956fFBaB52d189b21491C9B895A5B"
+    )
+    with pytest.raises(ChainError):
+        client().sign({"chainId": 4663, "nonce": 0, "to": None, "value": 0})
