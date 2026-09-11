@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -27,6 +28,9 @@ class GridProfile(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    exchange: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="bybit", server_default="bybit", index=True
+    )
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, default="BTCUSDT", index=True)
     lower_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     upper_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
@@ -258,6 +262,13 @@ class GridExecution(Base):
     fee_rate: Mapped[Decimal | None] = mapped_column(Numeric(28, 12), nullable=True)
     is_maker: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     exec_time_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # On-chain fills pay gas in the chain's native coin, which is neither the
+    # base nor the quote of the pair. `exec_fee`/`fee_currency` stay the
+    # quote-denominated figure PnL consumes; these keep the original numbers so
+    # the conversion can always be re-derived or audited.
+    fee_native_amount: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    fee_native_coin: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True, index=True)
 
     order: Mapped[GridOrder] = relationship(back_populates="executions")
     position_lot: Mapped["PositionLot | None"] = relationship(
@@ -282,8 +293,100 @@ class MarketCandle(Base):
     high: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     low: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     close: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
-    volume: Mapped[Decimal] = mapped_column(Numeric(38, 12), nullable=False)
-    turnover: Mapped[Decimal] = mapped_column(Numeric(38, 12), nullable=False)
+    # Nullable because DEX-sampled candles have honest OHLC but no per-minute
+    # volume: DexScreener only reports a rolling 24h figure, and dividing it by
+    # 1440 would be a fabricated number sitting in the same column as real ones.
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    turnover: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="exchange", server_default="exchange"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DexPriceObservation(Base):
+    """Raw price samples that 1m DEX candles are folded out of.
+
+    Kept separate from ``market_candles`` so a re-aggregation never has to go
+    back to the upstream API, and so a gap in sampling is visible as missing
+    rows rather than as a flat candle.
+    """
+
+    __tablename__ = "dex_price_observations"
+    __table_args__ = (
+        UniqueConstraint("symbol", "timestamp_ms", name="uq_dex_observation_symbol_time"),
+        Index("ix_dex_observations_lookup", "symbol", "timestamp_ms"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    timestamp_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    price_quote: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    volume_h24_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    pair_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DexIntent(Base):
+    """A synthetic limit order: what the grid asked for, and its on-chain trace.
+
+    Status vocabulary and legal transitions live in ``app.dex.intents``. Every
+    column from ``wallet_address`` down exists so that a worker restarting mid
+    flight can tell "signed but maybe not broadcast" from "never signed" and
+    re-broadcast the *same* transaction instead of buying twice.
+    """
+
+    __tablename__ = "dex_intents"
+    __table_args__ = (
+        Index("ix_dex_intents_status_symbol", "status", "symbol"),
+        UniqueConstraint("wallet_address", "nonce", name="uq_dex_intent_wallet_nonce"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("grid_profiles.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    order_link_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="WAITING", index=True)
+
+    # What the level promises: fill at `limit_price` or better, never worse.
+    limit_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    amount_in: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    amount_in_coin: Mapped[str] = mapped_column(String(24), nullable=False)
+    min_amount_out: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+
+    # Market health when the level was armed -- the baseline collapse guards
+    # compare against (see app/dex/risk.py).
+    baseline_liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    baseline_volume_h24_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ---- signing / broadcast trace -------------------------------------
+    wallet_address: Mapped[str | None] = mapped_column(String(42), nullable=True, index=True)
+    nonce: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Hash of the signed payload, known before broadcast; the recovery key.
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True, unique=True, index=True)
+    # Held only between signing and confirmation so a crashed worker can
+    # re-broadcast verbatim; cleared once the receipt is in.
+    raw_tx: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    block_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    execution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("grid_executions.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

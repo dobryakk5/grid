@@ -18,7 +18,15 @@ from app.db.models import (
     StrategyRecommendation,
 )
 from app.db.session import SessionLocal
-from app.exchanges.bybit import BybitClient, BybitError
+from app.exchanges import (
+    SUPPORTED_EXCHANGES,
+    BybitClient,
+    ExchangeError,
+    make_exchange,
+)
+from app.dex.dexscreener import DexScreenerError
+from app.dex.tokens import DexConfigError, list_pairs
+from app.exchanges.robinhood import RobinhoodClient
 from app.trading.grid import GridEngine, OPEN_STATUSES
 from app.trading.events import record_strategy_event
 from app.trading.recommendations import (
@@ -39,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 class ProfilePayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    exchange: Literal["bybit", "mexc"] = "bybit"
     symbol: str = Field(default="BTCUSDT", min_length=3, max_length=32)
     lower_price: Decimal = Field(gt=0)
     upper_price: Decimal = Field(gt=0)
@@ -195,6 +204,7 @@ def profile_dict(profile: GridProfile, *, current_range: GridRange | None = None
         "id": profile.id,
         "name": profile.name,
         "enabled": profile.enabled,
+        "exchange": getattr(profile, "exchange", "bybit"),
         "symbol": profile.symbol,
         "lower_price": str(profile.lower_price),
         "upper_price": str(profile.upper_price),
@@ -278,13 +288,18 @@ async def profile_stats(session, profile: GridProfile) -> dict:
 
 
 @router.get("/price/{symbol}")
-async def price(symbol: str) -> dict:
-    exchange = BybitClient()
+async def price(symbol: str, exchange: str = "bybit") -> dict:
+    venue = exchange.strip().lower()
+    if venue not in SUPPORTED_EXCHANGES:
+        raise HTTPException(status_code=422, detail=f"unknown exchange {venue!r}")
+    client = make_exchange(venue)
     try:
-        last = await exchange.last_price(symbol.upper())
-        return {"symbol": symbol.upper(), "last_price": str(last)}
+        last = await client.last_price(symbol.upper())
+        return {"symbol": symbol.upper(), "exchange": venue, "last_price": str(last)}
+    except ExchangeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        await exchange.close()
+        await client.close()
 
 
 @router.get("/market-data/{symbol}/range")
@@ -348,12 +363,50 @@ async def bybit_status() -> dict:
         await exchange.close()
 
 
+@router.get("/dex/pairs")
+async def dex_pairs() -> dict:
+    client = RobinhoodClient()
+    try:
+        info = (await client.api_key_info())["result"]
+        return {"pairs": list(list_pairs()), **info}
+    finally:
+        await client.close()
+
+
+@router.get("/dex/{symbol}/snapshot")
+async def dex_snapshot(symbol: str) -> dict:
+    """Pool price plus the health metrics a level would be risk-checked against."""
+    client = RobinhoodClient()
+    try:
+        snapshot = await client.market_snapshot(symbol.upper())
+        verdict = await client.risk_verdict(symbol.upper())
+    except (DexConfigError, DexScreenerError, ExchangeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await client.close()
+    return {
+        "symbol": snapshot.symbol,
+        "observed_at_ms": snapshot.observed_at_ms,
+        "price_quote": str(snapshot.price_quote),
+        "price_usd": str(snapshot.price_usd),
+        "pair_address": snapshot.pair_address,
+        "pair_liquidity_usd": str(snapshot.pair_liquidity_usd),
+        "token_liquidity_usd": str(snapshot.token_liquidity_usd),
+        "token_volume_h24_usd": str(snapshot.token_volume_h24),
+        "pools_considered": snapshot.pools_considered,
+        "risk": verdict.as_dict(),
+        # An indicative pool mid, not a fillable price -- execution decisions
+        # need a Uniswap quote for the actual size.
+        "price_is_indicative": True,
+    }
+
+
 @router.get("/balance")
 async def balance() -> dict:
     exchange = BybitClient()
     try:
         return await exchange.wallet_balance()
-    except BybitError as exc:
+    except ExchangeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await exchange.close()
@@ -364,7 +417,7 @@ async def demo_funds(payload: DemoFundsRequest) -> dict:
     exchange = BybitClient()
     try:
         return await exchange.apply_demo_usdt(payload.usdt)
-    except BybitError as exc:
+    except ExchangeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await exchange.close()
@@ -383,6 +436,7 @@ async def create_profile(payload: ProfilePayload) -> dict:
         profile = GridProfile(
             name=payload.name.strip(),
             enabled=False,
+            exchange=payload.exchange,
             symbol=payload.symbol.upper(),
             lower_price=payload.lower_price,
             upper_price=payload.upper_price,
@@ -511,6 +565,7 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         )
 
         profile.name = payload.name.strip()
+        profile.exchange = payload.exchange
         profile.symbol = payload.symbol.upper()
         profile.lower_price = payload.lower_price
         profile.upper_price = payload.upper_price
@@ -560,18 +615,24 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
 
 @router.post("/profiles/{profile_id}/start")
 async def start_profile(profile_id: int) -> dict:
-    # Bybit Demo is the project's paper-trading environment. No live endpoint
-    # is supported by this MVP.
-    exchange = BybitClient()
+    async with SessionLocal() as session:
+        profile = await session.get(GridProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        venue = getattr(profile, "exchange", "bybit")
+
+    # Verify the venue's API key can place spot orders before enabling the
+    # profile. On Bybit this is the demo account; MEXC is live.
+    exchange = make_exchange(venue)
     try:
         info = await exchange.api_key_info()
         result = info["result"]
         if result.get("readOnly") == 1:
-            raise HTTPException(status_code=409, detail="Bybit API key is read-only")
+            raise HTTPException(status_code=409, detail=f"{venue} API key is read-only")
         if "SpotTrade" not in result.get("permissions", {}).get("Spot", []):
-            raise HTTPException(status_code=409, detail="Bybit API key has no SpotTrade permission")
-    except BybitError as exc:
-        raise HTTPException(status_code=400, detail=f"Bybit authentication failed: {exc}") from exc
+            raise HTTPException(status_code=409, detail=f"{venue} API key has no spot trading permission")
+    except ExchangeError as exc:
+        raise HTTPException(status_code=400, detail=f"{venue} authentication failed: {exc}") from exc
     finally:
         await exchange.close()
 
@@ -590,10 +651,10 @@ async def start_profile(profile_id: int) -> dict:
                 )
             )
             if not has_initial:
-                price_client = BybitClient()
+                price_client = make_exchange(getattr(profile, "exchange", "bybit"))
                 try:
                     current = await price_client.last_price(profile.symbol)
-                except BybitError as exc:
+                except ExchangeError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
                 finally:
                     await price_client.close()
@@ -744,12 +805,13 @@ async def stop_profile(profile_id: int) -> dict:
 
 @router.post("/profiles/{profile_id}/recovery/close")
 async def close_recovery(profile_id: int) -> dict:
-    exchange = BybitClient()
+    exchange = None
     try:
         async with SessionLocal() as session:
             profile = await session.get(GridProfile, profile_id)
             if profile is None:
                 raise HTTPException(status_code=404, detail="profile not found")
+            exchange = make_exchange(getattr(profile, "exchange", "bybit"))
             trade = await session.scalar(
                 select(RecoveryTrade)
                 .join(BreakdownEpisode)
@@ -771,10 +833,11 @@ async def close_recovery(profile_id: int) -> dict:
                 session, profile, episode, trade, "MANUAL_CLOSE", market_price
             )
             return {"ok": True, "status": "RECOVERY_EXITING"}
-    except BybitError as exc:
+    except ExchangeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        await exchange.close()
+        if exchange is not None:
+            await exchange.close()
 
 
 @router.get("/profiles/{profile_id}/orders")
@@ -819,12 +882,13 @@ async def cancel_profile_order(profile_id: int, order_id: int) -> dict:
                 status_code=409,
                 detail="Можно отменить только активную неисполненную заявку",
             )
-        exchange = BybitClient()
+        order_profile = await session.get(GridProfile, profile_id)
+        exchange = make_exchange(getattr(order_profile, "exchange", "bybit"))
         try:
             await exchange.cancel_order(
                 order_id=order.exchange_order_id, symbol=order.symbol
             )
-        except BybitError as exc:
+        except ExchangeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             await exchange.close()
@@ -848,11 +912,11 @@ async def profile_pnl(profile_id: int) -> dict:
         )
         orders = list(result.scalars())
 
-    exchange = BybitClient()
+    exchange = make_exchange(getattr(profile, "exchange", "bybit"))
     try:
         info = await exchange.instrument_info(profile.symbol)
         market_price = await exchange.last_price(profile.symbol)
-    except BybitError as exc:
+    except ExchangeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await exchange.close()
@@ -1014,11 +1078,10 @@ async def profile_recommendations(profile_id: int) -> list[dict]:
 
 @router.post("/recommendations/{recommendation_id}/accept")
 async def accept_profile_recommendation(recommendation_id: int) -> dict:
-    exchange = BybitClient()
+    exchange = None
     async with SessionLocal() as session:
         recommendation = await claim_recommendation(session, recommendation_id)
         if recommendation is None:
-            await exchange.close()
             raise HTTPException(status_code=409, detail="recommendation is no longer pending or has expired")
         try:
             if recommendation.type == "START_TRAILING_BUY":
@@ -1047,6 +1110,7 @@ async def accept_profile_recommendation(recommendation_id: int) -> dict:
                     or active_recovery is not None
                 ):
                     raise HTTPException(status_code=409, detail="recommendation no longer matches the current paused range")
+                exchange = make_exchange(getattr(profile, "exchange", "bybit"))
                 await GridEngine(exchange).start_trailing_buy(session, profile)
             await accept_recommendation(session, recommendation)
             await session.commit()
@@ -1072,7 +1136,8 @@ async def accept_profile_recommendation(recommendation_id: int) -> dict:
                 raise
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
-            await exchange.close()
+            if exchange is not None:
+                await exchange.close()
 
 
 @router.post("/recommendations/{recommendation_id}/reject")

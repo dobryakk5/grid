@@ -19,7 +19,8 @@ from app.db.models import (
     RecoveryTrade,
     StrategyRecommendation,
 )
-from app.exchanges.bybit import BybitClient, InstrumentInfo
+from app.exchanges import make_exchange
+from app.exchanges.base import ExchangeClient, InstrumentInfo
 from app.trading.events import record_strategy_event
 from app.trading.math import (
     dca_initial_percent,
@@ -78,9 +79,50 @@ def confirmed_break_down(
 
 
 class GridEngine:
-    def __init__(self, exchange: BybitClient) -> None:
-        self.exchange = exchange
+    def __init__(self, exchange: ExchangeClient | None = None) -> None:
+        # When a client is passed explicitly (API routes acting on one profile)
+        # it is used verbatim. The worker passes nothing and the engine builds
+        # one client per venue on demand, keyed by profile.exchange.
+        self._explicit_exchange = exchange
+        self._active_exchange = exchange
+        self._exchange_pool: dict[str, ExchangeClient] = {}
+        if exchange is not None:
+            self._exchange_pool[getattr(exchange, "name", "bybit")] = exchange
         self._regime_cache: dict[str, tuple[float, list[Decimal]]] = {}
+
+    @property
+    def exchange(self) -> ExchangeClient:
+        if self._active_exchange is None:
+            raise RuntimeError("GridEngine has no active exchange for this operation")
+        return self._active_exchange
+
+    def _select_exchange_for(self, profile: GridProfile) -> ExchangeClient:
+        """Point ``self.exchange`` at the client for this profile's venue."""
+        if self._explicit_exchange is not None:
+            self._active_exchange = self._explicit_exchange
+            return self._active_exchange
+        name = (getattr(profile, "exchange", None) or settings.exchange or "bybit").lower()
+        client = self._exchange_pool.get(name)
+        if client is None:
+            client = make_exchange(name)
+            self._exchange_pool[name] = client
+        self._active_exchange = client
+        return client
+
+    async def aclose(self) -> None:
+        """Close every client this engine opened (worker shutdown)."""
+        seen: set[int] = set()
+        clients = list(self._exchange_pool.values())
+        if self._explicit_exchange is not None:
+            clients.append(self._explicit_exchange)
+        for client in clients:
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            try:
+                await client.close()
+            except Exception:  # pragma: no cover - best-effort shutdown
+                logger.exception("Failed to close exchange client")
 
     async def tick(self, session: AsyncSession) -> None:
         result = await session.execute(select(GridProfile).order_by(GridProfile.id))
@@ -88,6 +130,7 @@ class GridEngine:
 
         for profile in profiles:
             try:
+                self._select_exchange_for(profile)
                 # Backfill actual fills for databases upgraded from an older
                 # version and for any fill that was not persisted on a prior tick.
                 await self.backfill_filled_executions(session, profile)

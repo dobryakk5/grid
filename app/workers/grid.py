@@ -4,7 +4,6 @@ import logging
 from app.core.config import settings
 from app.db.init import init_db
 from app.db.session import SessionLocal
-from app.exchanges.bybit import BybitClient
 from app.trading.grid import GridEngine
 
 logging.basicConfig(
@@ -16,8 +15,9 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     await init_db()
-    exchange = BybitClient()
-    engine = GridEngine(exchange)
+    # No explicit client: the engine opens one per venue (Bybit demo, MEXC)
+    # based on each profile's `exchange` column.
+    engine = GridEngine()
     logger.info("Grid worker started")
 
     try:
@@ -29,7 +29,7 @@ async def main() -> None:
                 logger.exception("Grid tick failed")
             await asyncio.sleep(settings.grid_poll_seconds)
     finally:
-        await exchange.close()
+        await engine.aclose()
 
 
 if __name__ == "__main__":

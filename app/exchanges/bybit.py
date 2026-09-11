@@ -2,30 +2,24 @@ import hashlib
 import hmac
 import json
 import time
-from dataclasses import dataclass
 from decimal import Decimal
 from urllib.parse import urlencode
 
 import httpx
 
 from app.core.config import settings
+from app.exchanges.base import ExchangeError, InstrumentInfo, decimal_str
+
+__all__ = ["BybitClient", "BybitError", "InstrumentInfo", "decimal_str"]
 
 
-class BybitError(RuntimeError):
+class BybitError(ExchangeError):
     pass
 
 
-@dataclass(frozen=True)
-class InstrumentInfo:
-    symbol: str
-    base_coin: str
-    quote_coin: str
-    tick_size: Decimal
-    base_precision: Decimal
-    min_order_amt: Decimal
-
-
 class BybitClient:
+    name = "bybit"
+
     def __init__(self) -> None:
         self.base_url = settings.bybit_base_url.rstrip("/")
         self.api_key = settings.bybit_api_key
@@ -266,7 +260,3 @@ class BybitClient:
                 "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": decimal_str(amount)}],
             },
         )
-
-
-def decimal_str(value: Decimal) -> str:
-    return format(value.normalize(), "f")

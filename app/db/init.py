@@ -182,6 +182,7 @@ async def init_db() -> None:
         # create_all does not add columns to an existing PostgreSQL table.
         # Keep additive migrations here until the project adopts Alembic.
         for statement in (
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS exchange VARCHAR(16) NOT NULL DEFAULT 'bybit'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS regime_state VARCHAR(24) NOT NULL DEFAULT 'RANGE'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS break_down_action VARCHAR(16) NOT NULL DEFAULT 'continue'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS breakout_confirm_bars INTEGER NOT NULL DEFAULT 2",
@@ -215,6 +216,15 @@ async def init_db() -> None:
             "ALTER TABLE grid_orders ADD COLUMN IF NOT EXISTS order_role VARCHAR(32) NOT NULL DEFAULT 'grid'",
             "ALTER TABLE grid_orders ADD COLUMN IF NOT EXISTS range_id INTEGER REFERENCES grid_ranges(id) ON DELETE SET NULL",
             "ALTER TABLE recovery_trades ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(48)",
+            # On-chain fills: native gas fee kept next to its quote conversion.
+            "ALTER TABLE grid_executions ADD COLUMN IF NOT EXISTS fee_native_amount NUMERIC(38, 18)",
+            "ALTER TABLE grid_executions ADD COLUMN IF NOT EXISTS fee_native_coin VARCHAR(24)",
+            "ALTER TABLE grid_executions ADD COLUMN IF NOT EXISTS tx_hash VARCHAR(66)",
+            "CREATE INDEX IF NOT EXISTS ix_grid_executions_tx_hash ON grid_executions(tx_hash)",
+            # DEX-sampled candles carry honest OHLC but no per-minute volume.
+            "ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'exchange'",
+            "ALTER TABLE market_candles ALTER COLUMN volume DROP NOT NULL",
+            "ALTER TABLE market_candles ALTER COLUMN turnover DROP NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_grid_profiles_current_range_id ON grid_profiles(current_range_id)",
             "CREATE INDEX IF NOT EXISTS ix_grid_orders_profile_range ON grid_orders(profile_id, range_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_grid_ranges_one_active_per_profile ON grid_ranges(profile_id) WHERE status = 'ACTIVE'",

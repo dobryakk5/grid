@@ -1,8 +1,73 @@
 # Mini Grid Bot v0.8 — Bybit Demo и backtest, без Docker
 
-Простой **Spot Grid Bot**: FastAPI + локальный PostgreSQL + отдельный worker + Bybit Demo + web-интерфейс.
+Простой **Spot Grid Bot**: FastAPI + локальный PostgreSQL + отдельный worker + Bybit Demo / MEXC + web-интерфейс.
 
-> Пока использовать только Bybit Demo. Это MVP, а не production trading infrastructure.
+> Bybit Demo — это бумажная торговля. **MEXC — реальные деньги** (демо-режима для spot у MEXC нет). Это MVP, а не production trading infrastructure.
+
+## Мультибиржевость (Bybit Demo + MEXC)
+
+- у каждого профиля есть поле `exchange` (`bybit` | `mexc`), выбирается в форме профиля;
+- worker поднимает по одному клиенту на биржу и маршрутизирует профиль по его `exchange`;
+- `EXCHANGE` в `.env` — биржа по умолчанию для профилей без явного выбора и для
+  общих эндпоинтов;
+- ключи MEXC: `MEXC_API_KEY` / `MEXC_API_SECRET` (разрешение **Spot**), `MEXC_BASE_URL`
+  (по умолчанию `https://api.mexc.com`); сервер должен быть в IP-whitelist ключа;
+- сбор часовых свечей (backtest / анализ) по-прежнему идёт с публичного Bybit —
+  MEXC используется только для торговли;
+- клиент MEXC (`app/exchanges/mexc.py`) нормализует ответы под тот же контракт,
+  что и Bybit (`app/exchanges/base.py`), поэтому движок не различает биржи;
+- ограничение MEXC: у части аккаунтов размещение spot-ордеров через API включается
+  отдельно — если MEXC отклоняет `POST /api/v3/order`, это видно в логах worker
+  на каждом тике.
+
+## Robinhood Chain / Uniswap (on-chain venue, этап read-only)
+
+Третья площадка (`exchange=robinhood`) добавляется тем же способом, что и MEXC —
+через `ExchangeClient`, поэтому `grid.py` не должен знать, что под ним DEX. Но на
+DEX нет лимитных ордеров, поэтому `place_limit_order` там будет создавать
+**synthetic limit order** (`dex_intents`) в Postgres, а исполнять его будет
+отдельный DEX-worker.
+
+Сейчас реализован только read-only слой — ключи не читаются нигде, ни одна
+функция не подписывает транзакции:
+
+- `app/dex/tokens.py` — реестр `symbol -> (адрес, decimals)`. Адрес PONS зашит,
+  остальные (USDG, WETH, CASHCAT) задаются через `DEX_TOKENS` в `.env`; пока не
+  задан — пара не резолвится с явной ошибкой, а не с выдуманным адресом;
+- `app/dex/dexscreener.py` — цена пула и метрики здоровья, с TTL-кэшем (тик
+  гридa идёт каждые 3 с, апстрим-вызов — раз в `DEXSCREENER_CACHE_SECONDS`).
+  Цена берётся из пула **нашей** котировки, а ликвидность и объём суммируются по
+  всем пулам токена;
+- `app/dex/risk.py` — гейты: абсолютные пороги и падение относительно момента,
+  когда уровень был взведён (цена дошла до уровня, потому что монета умирает →
+  `BLOCKED`);
+- `app/dex/intents.py` — state machine:
+  `WAITING → TRIGGERED → QUOTED → SIGNING → SUBMITTING → PENDING → FILLED`
+  плюс `BLOCKED` (не терминальный), `CANCELLED`, `EXPIRED`, `FAILED`. Переход
+  `SIGNING → SUBMITTING` — дверь в одну сторону: дальше nonce сожжён и
+  восстановление может только пере-broadcast'ить ту же транзакцию;
+- `app/dex/candles.py` + `app/workers/dex_sampler.py` — на DEX нет klines,
+  поэтому цена сэмплируется и сворачивается в 1m/15m/60m свечи `market_candles`,
+  которые `RobinhoodClient.klines` отдаёт движку обратно. Объём остаётся `NULL`:
+  DexScreener даёт только скользящие 24 ч, а `volume24h / 1440` — выдуманное
+  число в той же колонке, где лежат настоящие.
+
+Запуск сэмплера: `make dex-sampler` (или unit `mini-grid-dex-sampler.service`).
+
+Проверить пару без торговли:
+
+```bash
+curl -s "http://127.0.0.1:8000/api/dex/PONSETH/snapshot" | python3 -m json.tool
+```
+
+`price_quote` оттуда — **индикативный** mid пула, а не цена исполнения: решение
+«уровень достигнут» на следующих этапах принимает Uniswap quote на реальный
+размер.
+
+Что ещё не сделано (по этапам): AsyncWeb3 + RPC и покупка за нативный ETH →
+approval + Permit2 и покупка за USDG → продажи, парсер receipt и учёт газа в
+quote → synthetic limits в воркере → подключение к гриду → hardening
+(gas bump, reorg, kill switch, spend cap).
 
 ## Что изменилось в v0.8
 
@@ -400,6 +465,11 @@ Daily market-data timer ---> PostgreSQL
            |
            v
       Bybit public API
+
+DEX sampler ---> PostgreSQL (dex_price_observations -> market_candles)
+     |
+     v
+DexScreener API
 ```
 
 API и worker — два отдельных Linux-процесса. Рестарт FastAPI не должен останавливать торговый worker.
