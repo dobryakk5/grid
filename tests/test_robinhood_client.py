@@ -5,7 +5,13 @@ import pytest
 from app.core.config import settings
 from app.dex.dexscreener import DexScreenerClient
 from app.exchanges import SUPPORTED_EXCHANGES, make_exchange
-from app.exchanges.robinhood import DexNotImplementedError, RobinhoodClient, RobinhoodError
+from app.exchanges.robinhood import (
+    DexNotImplementedError,
+    RobinhoodClient,
+    RobinhoodError,
+    _execution_dict,
+    _order_dict,
+)
 
 
 class FakeResponse:
@@ -91,24 +97,12 @@ async def test_api_key_info_reports_config_without_key_material():
     assert not any("key" in str(value).lower() for value in result.values())
 
 
-@pytest.mark.parametrize(
-    "call",
-    [
-        lambda c: c.place_limit_order(
-            symbol="PONSETH", side="Buy", qty=Decimal("1"),
-            price=Decimal("1"), order_link_id="x",
-        ),
-        lambda c: c.place_market_order(
-            symbol="PONSETH", side="Buy", qty=Decimal("1"), order_link_id="x",
-        ),
-        lambda c: c.cancel_order(order_id="1", symbol="PONSETH"),
-        lambda c: c.get_order(order_id="1", symbol="PONSETH"),
-        lambda c: c.get_executions(order_id="1", symbol="PONSETH"),
-    ],
-)
-async def test_fund_moving_calls_refuse_loudly_and_name_their_stage(call):
+async def test_market_orders_still_refuse_and_name_their_stage():
+    # A swap has no resting order to skip; the engine path is what is missing.
     with pytest.raises(DexNotImplementedError) as exc:
-        await call(client())
+        await client().place_market_order(
+            symbol="PONSETH", side="Buy", qty=Decimal("1"), order_link_id="x"
+        )
     assert "stage" in str(exc.value)
 
 
@@ -158,3 +152,94 @@ async def test_wallet_balance_reports_per_coin_errors_instead_of_failing(monkeyp
     assert by_coin["ETH"]["walletBalance"] == "0.008"
     # USDG has no address configured; that is reported, not raised.
     assert "DEX_TOKENS" in by_coin["USDG"]["error"]
+
+
+class FakeIntent:
+    """Just the columns the venue-facing mappers read."""
+
+    def __init__(self, **fields):
+        defaults = {
+            "id": 7,
+            "order_link_id": "g1-abc",
+            "status": "WAITING",
+            "side": "Buy",
+            "symbol": "PONSUSDG",
+            "limit_price": Decimal("0.55"),
+            "amount_in": Decimal("250"),
+            "filled_amount_in": None,
+            "filled_amount_out": None,
+            "fill_price": None,
+            "gas_quote": None,
+            "gas_quote_coin": None,
+            "tx_hash": None,
+            "submitted_at": None,
+        }
+        self.__dict__.update({**defaults, **fields})
+
+
+def test_a_watching_level_reads_as_an_open_order():
+    row = _order_dict(FakeIntent())
+
+    assert row["orderStatus"] == "New"
+    # 250 USDG at 0.55 is the base quantity the engine asked for.
+    assert row["qty"].startswith("454.5454")
+    assert row["cumExecQty"] == "0"
+    assert row["avgPrice"] == ""
+
+
+def test_a_swap_waiting_for_a_block_is_still_an_open_order():
+    # A level watching for its price and a transaction waiting to mine are both
+    # simply not done; the engine only needs to know it is not done.
+    assert _order_dict(FakeIntent(status="PENDING"))["orderStatus"] == "New"
+    assert _order_dict(FakeIntent(status="SUBMITTING"))["orderStatus"] == "New"
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("FILLED", "Filled"),
+        ("CANCELLED", "Cancelled"),
+        ("EXPIRED", "Deactivated"),
+        ("FAILED", "Rejected"),
+        ("BLOCKED", "New"),
+    ],
+)
+def test_terminal_states_map_onto_the_engine_vocabulary(status, expected):
+    assert _order_dict(FakeIntent(status=status))["orderStatus"] == expected
+
+
+def test_a_filled_buy_reports_base_quantity_and_realised_price():
+    row = _order_dict(FakeIntent(
+        status="FILLED", filled_amount_in=Decimal("250"),
+        filled_amount_out=Decimal("460"), fill_price=Decimal("0.5434"),
+    ))
+
+    assert row["cumExecQty"] == "460"
+    assert row["avgPrice"] == "0.5434"
+
+
+def test_a_filled_sell_reports_the_base_it_spent():
+    row = _order_dict(FakeIntent(
+        side="Sell", status="FILLED", amount_in=Decimal("500"),
+        filled_amount_in=Decimal("500"), filled_amount_out=Decimal("300"),
+        fill_price=Decimal("0.6"),
+    ))
+
+    assert row["qty"] == "500"
+    assert row["cumExecQty"] == "500"
+
+
+def test_the_execution_carries_gas_as_a_quote_denominated_fee():
+    execution = _execution_dict(FakeIntent(
+        status="FILLED", filled_amount_in=Decimal("250"),
+        filled_amount_out=Decimal("460"), fill_price=Decimal("0.5434"),
+        gas_quote=Decimal("1"), gas_quote_coin="USDG",
+        tx_hash="0x" + "ab" * 32,
+    ))
+
+    assert execution["execId"] == "0x" + "ab" * 32
+    assert execution["execQty"] == "460"
+    assert execution["execValue"] == "250"
+    assert execution["execFee"] == "1"
+    assert execution["feeCurrency"] == "USDG"
+    assert execution["isMaker"] is False

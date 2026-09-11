@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     # Nothing is broadcast while this is true; it is the default on purpose.
     dex_dry_run: bool = True
 
+    # ---- DEX worker ------------------------------------------------------
+    dex_poll_seconds: float = 5.0
+    # How long a level waits for its price before it is given up on.
+    dex_intent_ttl_hours: int = 168
+    # A level blocked by a risk gate re-checks after this long.
+    dex_blocked_retry_seconds: int = 30
+    # A broadcast with no receipt after this is re-sent as-is.
+    dex_rebroadcast_after_seconds: int = 60
+    # A transaction still unmined after this is replaced at the same nonce.
+    dex_stuck_after_seconds: int = 300
+    dex_gas_bump_pct: Decimal = Decimal("25")
+    # How many times a level may be re-armed after an abandoned attempt.
+    dex_max_retries: int = 3
+
     # Price sampler cadence; samples aggregate into 1m candles.
     dex_sample_seconds: float = 15.0
     # Pairs the sampler watches on top of any profile using exchange=robinhood.

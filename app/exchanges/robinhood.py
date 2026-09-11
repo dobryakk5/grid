@@ -25,9 +25,11 @@ from app.db.session import SessionLocal
 from app.dex.candles import DEX_INTERVALS, load_candles
 from app.dex.chain import ChainClient, ChainError
 from app.dex.dexscreener import DexScreenerClient, MarketSnapshot
+from app.dex.intents import SIGNED_STATUSES, IntentStatus
+from app.dex.repository import DexIntentRepository
 from app.dex.risk import RiskVerdict, evaluate
 from app.dex.tokens import DexConfigError, list_pairs, resolve_pair, resolve_token
-from app.exchanges.base import ExchangeError, InstrumentInfo
+from app.exchanges.base import ExchangeError, InstrumentInfo, decimal_str
 
 __all__ = ["RobinhoodClient", "RobinhoodError", "DexNotImplementedError"]
 
@@ -182,7 +184,35 @@ class RobinhoodClient:
         self, *, symbol: str, side: str, qty: Decimal, price: Decimal,
         order_link_id: str,
     ) -> dict:
-        raise _pending("synthetic limit orders", "5 (DexIntent worker)")
+        """Record a level and return at once; the DEX worker executes it.
+
+        The engine speaks base quantity at a limit price, as it does on any
+        venue. On chain the spent token differs by direction, so a buy turns
+        into "spend qty * price of the quote token" and a sell into "spend qty
+        of the base token".
+
+        The intent is written in its own transaction, because it is the remote
+        order: if the engine's own transaction rolls back afterwards, the level
+        still exists here, exactly as an exchange-side order would.
+        """
+        pair = self._pair(symbol)
+        selling = side.strip().lower() == "sell"
+        async with SessionLocal() as session:
+            intent = await DexIntentRepository(session).create_level(
+                symbol=pair.symbol,
+                side="Sell" if selling else "Buy",
+                limit_price=price,
+                amount_in=qty if selling else qty * price,
+                amount_in_coin=pair.base_coin if selling else pair.quote_coin,
+                order_link_id=order_link_id,
+            )
+            await session.commit()
+            return {
+                "result": {
+                    "orderId": str(intent.id),
+                    "orderLinkId": intent.order_link_id,
+                }
+            }
 
     async def place_market_order(
         self, *, symbol: str, side: str, qty: Decimal, order_link_id: str,
@@ -193,17 +223,112 @@ class RobinhoodClient:
         raise _pending("engine-driven swaps", "5 (DexIntent worker)")
 
     async def get_order(self, *, order_id: str, symbol: str) -> dict | None:
-        raise _pending("order lookup", "5 (DexIntent worker)")
+        async with SessionLocal() as session:
+            intent = await DexIntentRepository(session).by_id(int(order_id))
+            return _order_dict(intent) if intent is not None else None
 
     async def get_order_by_link_id(
         self, *, order_link_id: str, symbol: str,
     ) -> dict | None:
-        raise _pending("order lookup", "5 (DexIntent worker)")
+        async with SessionLocal() as session:
+            intent = await DexIntentRepository(session).by_link_id(order_link_id)
+            return _order_dict(intent) if intent is not None else None
 
     async def get_executions(self, *, order_id: str, symbol: str) -> list[dict]:
-        # Fills are parsed from the receipt when a swap confirms and written to
-        # Postgres there; nothing scans the chain back on demand.
-        raise _pending("execution lookup", "5 (DexIntent worker)")
+        """The single fill a confirmed swap produced, if it has confirmed.
+
+        Read from Postgres, where the receipt parser wrote it -- a swap is one
+        atomic fill, and nothing scans the chain back on demand.
+        """
+        async with SessionLocal() as session:
+            intent = await DexIntentRepository(session).by_id(int(order_id))
+        if intent is None or intent.status != IntentStatus.FILLED:
+            return []
+        return [_execution_dict(intent)]
 
     async def cancel_order(self, *, order_id: str, symbol: str) -> None:
-        raise _pending("cancellation", "5 (DexIntent worker)")
+        """Withdraw a level that has not been signed yet.
+
+        There is nothing to cancel on chain: an unsigned level exists only here.
+        Once a transaction is signed the nonce is spent and only the worker's
+        replacement path can end it, so cancelling one is refused.
+        """
+        async with SessionLocal() as session:
+            repository = DexIntentRepository(session)
+            intent = await repository.by_id(int(order_id))
+            if intent is None:
+                raise RobinhoodError(f"no level with id {order_id}")
+            if intent.status in SIGNED_STATUSES:
+                raise RobinhoodError(
+                    f"level {order_id} is already broadcast as {intent.tx_hash}; "
+                    "it cannot be cancelled, only replaced by the worker"
+                )
+            await repository.transition(intent, IntentStatus.CANCELLED)
+            await session.commit()
+
+
+# Intent status -> the Bybit vocabulary the engine branches on. Everything still
+# working reads as "New": a level watching for its price and a swap waiting for
+# a block are both simply not done yet.
+_ORDER_STATUS = {
+    IntentStatus.WAITING: "New",
+    IntentStatus.TRIGGERED: "New",
+    IntentStatus.QUOTED: "New",
+    IntentStatus.SIGNING: "New",
+    IntentStatus.SUBMITTING: "New",
+    IntentStatus.PENDING: "New",
+    IntentStatus.BLOCKED: "New",
+    IntentStatus.FILLED: "Filled",
+    IntentStatus.CANCELLED: "Cancelled",
+    IntentStatus.EXPIRED: "Deactivated",
+    IntentStatus.FAILED: "Rejected",
+}
+
+
+def _base_amounts(intent) -> tuple[Decimal, Decimal]:
+    """``(ordered, filled)`` in base-token units, whichever way the swap runs."""
+    selling = intent.side.strip().lower() == "sell"
+    amount_in = Decimal(intent.amount_in)
+    limit = Decimal(intent.limit_price)
+    ordered = amount_in if selling else (amount_in / limit if limit > 0 else Decimal("0"))
+    if selling:
+        filled = Decimal(intent.filled_amount_in or 0)
+    else:
+        filled = Decimal(intent.filled_amount_out or 0)
+    return ordered, filled
+
+
+def _order_dict(intent) -> dict:
+    ordered, filled = _base_amounts(intent)
+    return {
+        "orderId": str(intent.id),
+        "orderLinkId": intent.order_link_id,
+        "orderStatus": _ORDER_STATUS.get(intent.status, "New"),
+        "side": intent.side,
+        "cumExecQty": decimal_str(filled),
+        "avgPrice": decimal_str(Decimal(intent.fill_price)) if intent.fill_price else "",
+        "price": decimal_str(Decimal(intent.limit_price)),
+        "qty": decimal_str(ordered),
+        "txHash": intent.tx_hash,
+    }
+
+
+def _execution_dict(intent) -> dict:
+    selling = intent.side.strip().lower() == "sell"
+    base = Decimal(intent.filled_amount_in if selling else intent.filled_amount_out or 0)
+    quote = Decimal(intent.filled_amount_out if selling else intent.filled_amount_in or 0)
+    return {
+        # A transaction is one atomic fill, so its hash is the execution id.
+        "execId": intent.tx_hash,
+        "execPrice": decimal_str(Decimal(intent.fill_price or 0)),
+        "execQty": decimal_str(base),
+        "execValue": decimal_str(quote),
+        # Gas, already converted into the quote currency PnL sums.
+        "execFee": decimal_str(Decimal(intent.gas_quote or 0)),
+        "feeCurrency": intent.gas_quote_coin,
+        "feeRate": None,
+        "isMaker": False,
+        "execTime": (
+            int(intent.submitted_at.timestamp() * 1000) if intent.submitted_at else None
+        ),
+    }

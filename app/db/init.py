@@ -235,6 +235,7 @@ async def init_db() -> None:
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS gas_quote NUMERIC(38, 18)",
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS gas_quote_coin VARCHAR(24)",
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS native_quote_rate NUMERIC(38, 18)",
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS parent_intent_id INTEGER REFERENCES dex_intents(id) ON DELETE SET NULL",
             "CREATE INDEX IF NOT EXISTS ix_grid_profiles_current_range_id ON grid_profiles(current_range_id)",
             "CREATE INDEX IF NOT EXISTS ix_grid_orders_profile_range ON grid_orders(profile_id, range_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_grid_ranges_one_active_per_profile ON grid_ranges(profile_id) WHERE status = 'ACTIVE'",

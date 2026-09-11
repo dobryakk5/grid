@@ -1,4 +1,4 @@
-.PHONY: install test api worker market-data dex-sampler bybit-status health
+.PHONY: install test api worker market-data dex-sampler dex-worker bybit-status health
 
 install:
 	python3 -m venv .venv
@@ -19,6 +19,9 @@ market-data:
 
 dex-sampler:
 	./scripts/run-dex-sampler.sh
+
+dex-worker:
+	./scripts/run-dex-worker.sh
 
 bybit-status:
 	curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool

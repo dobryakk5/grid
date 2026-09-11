@@ -38,11 +38,20 @@ from app.dex.dexscreener import DexScreenerClient, MarketSnapshot
 from app.dex.intents import IntentStatus, assert_transition
 from app.dex.pricing import GasCost, PricingError, convert_gas
 from app.dex.receipts import FillReport, ReceiptError, parse_swap_fill
+from app.dex.repository import DexIntentRepository
 from app.dex.risk import evaluate
 from app.dex.tokens import DexPair, Token, resolve_pair
 from app.dex.uniswap import UniswapClient, UniswapError
 
-__all__ = ["SwapOutcome", "execute_buy", "execute_sell", "execute_swap"]
+__all__ = [
+    "SwapOutcome",
+    "execute_buy",
+    "execute_sell",
+    "execute_swap",
+    "price_gas",
+    "read_fill",
+    "record_fill",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +111,41 @@ def _meets_limit(executable: Decimal, limit: Decimal, *, selling: bool) -> bool:
     return executable >= limit if selling else executable <= limit
 
 
+class _Progress:
+    """Walks an existing level through the state machine, if there is one.
+
+    The manual script has no row until the moment of signing; the worker has one
+    from the moment the level was armed. Both drive the same code, so every
+    transition is expressed once here and simply does nothing when this swap is
+    not attached to a level.
+    """
+
+    def __init__(
+        self,
+        repository: DexIntentRepository | None,
+        intent: DexIntent | None,
+    ) -> None:
+        self.repository = repository
+        self.intent = intent
+
+    @property
+    def active(self) -> bool:
+        return self.repository is not None and self.intent is not None
+
+    async def to(self, target: str, **fields) -> None:
+        if not self.active or self.intent.status == target:
+            return
+        await self.repository.transition(self.intent, target, **fields)
+
+    async def block(self, reason: str) -> None:
+        if self.active:
+            await self.repository.block(self.intent, reason)
+
+    async def stand_down(self) -> None:
+        """Price moved away or the quote was not good enough: keep watching."""
+        await self.to(IntentStatus.WAITING)
+
+
 async def execute_swap(
     session: AsyncSession | None,
     *,
@@ -115,6 +159,8 @@ async def execute_swap(
     dry_run: bool | None = None,
     profile_id: int | None = None,
     order_link_id: str | None = None,
+    repository: DexIntentRepository | None = None,
+    intent: DexIntent | None = None,
 ) -> SwapOutcome:
     """Trade ``amount_in`` of the spent token, at ``limit_price`` or better.
 
@@ -128,9 +174,12 @@ async def execute_swap(
     token_in, token_out = _direction(pair, side)
     dry = settings.dex_dry_run if dry_run is None else dry_run
 
+    progress = _Progress(repository, intent)
+
     snapshot = await market.snapshot(pair)
     verdict = evaluate(snapshot)
     if not verdict.ok:
+        await progress.block("; ".join(verdict.reasons))
         return SwapOutcome(
             status=IntentStatus.BLOCKED,
             symbol=pair.symbol,
@@ -141,6 +190,7 @@ async def execute_swap(
 
     # The cheap watcher decides whether a quote is worth spending at all.
     if not _within_trigger_band(snapshot.price_quote, limit_price, selling=selling):
+        await progress.stand_down()
         return SwapOutcome(
             status=IntentStatus.WAITING,
             symbol=pair.symbol,
@@ -152,6 +202,7 @@ async def execute_swap(
             market_price=snapshot.price_quote,
         )
 
+    await progress.to(IntentStatus.TRIGGERED)
     await chain.ensure_ready()
     # A wrong decimals value rescales every amount silently; check before money.
     await chain.verify_token(pair.base)
@@ -163,6 +214,9 @@ async def execute_swap(
         else await chain.token_balance(token_in)
     )
     if balance < amount_in:
+        await progress.block(
+            f"wallet holds {balance} {token_in.symbol}, needs {amount_in}"
+        )
         return SwapOutcome(
             status=IntentStatus.BLOCKED,
             symbol=pair.symbol,
@@ -186,8 +240,10 @@ async def execute_swap(
         amount_in_wei=amount_in_wei,
         swapper=chain.wallet_address,
     )
+    await progress.to(IntentStatus.QUOTED)
     executable = quote.price(pair, side)
     if not _meets_limit(executable, limit_price, selling=selling):
+        await progress.stand_down()
         return SwapOutcome(
             status=IntentStatus.WAITING,
             symbol=pair.symbol,
@@ -202,6 +258,7 @@ async def execute_swap(
 
     expected_out = token_out.from_wei(quote.amount_out)
     if dry:
+        await progress.stand_down()
         notes = ["DEX_DRY_RUN is on; nothing was signed or sent"]
         if approval is not None and not approval.sufficient:
             notes.append(
@@ -222,9 +279,12 @@ async def execute_swap(
     if session is None:
         raise ChainError("a live swap needs a database session to record intent")
 
+    await progress.to(IntentStatus.SIGNING)
     signature = sign_permit(chain, quote.permit_data) if quote.needs_permit else None
     swap = await uniswap.build_swap(quote, signature=signature)
-    tx = await _build_transaction(chain, swap, native_input=token_in.native)
+    tx = await _build_transaction(
+        chain, swap, native_input=token_in.native, repository=repository
+    )
     if token_in.native and int(tx["value"]) != amount_in_wei:
         # The router built something other than what we asked to spend.
         raise UniswapError(
@@ -234,6 +294,25 @@ async def execute_swap(
     signed = chain.sign(tx)
 
     # --- everything above is reversible; past this commit it is not ---
+    if progress.active:
+        await progress.to(
+            IntentStatus.SUBMITTING,
+            min_amount_out=expected_out,
+            baseline_liquidity_usd=snapshot.token_liquidity_usd,
+            baseline_volume_h24_usd=snapshot.token_volume_h24,
+            wallet_address=signed.wallet_address,
+            nonce=signed.nonce,
+            tx_hash=signed.tx_hash,
+            raw_tx=signed.raw_hex,
+            gas_native_coin="ETH",
+            approval_tx_hash=approval.tx_hash if approval is not None else None,
+        )
+        await session.commit()
+        return await _broadcast_and_settle(
+            session, intent, signed=signed, pair=pair, side=side, tx=tx,
+            chain=chain, market=market, snapshot=snapshot, quoted_price=executable,
+        )
+
     intent = DexIntent(
         profile_id=profile_id,
         order_link_id=order_link_id or uuid.uuid4().hex,
@@ -255,6 +334,27 @@ async def execute_swap(
     )
     session.add(intent)
     await session.commit()
+    return await _broadcast_and_settle(
+        session, intent, signed=signed, pair=pair, side=side, tx=tx,
+        chain=chain, market=market, snapshot=snapshot, quoted_price=executable,
+    )
+
+
+async def _broadcast_and_settle(
+    session: AsyncSession,
+    intent: DexIntent,
+    *,
+    signed,
+    pair: DexPair,
+    side: str,
+    tx: dict,
+    chain: ChainClient,
+    market: DexScreenerClient,
+    snapshot: MarketSnapshot,
+    quoted_price: Decimal,
+) -> SwapOutcome:
+    """Send a signed, persisted swap and settle whatever the chain says."""
+    token_in, token_out = _direction(pair, side)
 
     try:
         await chain.broadcast(signed)
@@ -277,7 +377,7 @@ async def execute_swap(
 
     try:
         receipt = await chain.wait_for_receipt(signed.tx_hash)
-        fill = await _read_fill(
+        fill = await read_fill(
             chain,
             receipt,
             wallet=signed.wallet_address,
@@ -305,10 +405,10 @@ async def execute_swap(
             intent_id=intent.id,
         )
 
-    gas = await _price_gas(market, pair, snapshot, fill)
-    return await _record_fill(
+    gas = await price_gas(market, pair, snapshot, fill)
+    return await record_fill(
         session, intent, pair=pair, side=side, fill=fill, gas=gas,
-        quoted_price=executable,
+        quoted_price=quoted_price,
     )
 
 
@@ -320,7 +420,7 @@ async def execute_sell(session: AsyncSession | None, **kwargs) -> SwapOutcome:
     return await execute_swap(session, side="Sell", **kwargs)
 
 
-async def _read_fill(
+async def read_fill(
     chain: ChainClient,
     receipt: dict,
     *,
@@ -351,7 +451,7 @@ async def _read_fill(
     )
 
 
-async def _price_gas(
+async def price_gas(
     market: DexScreenerClient,
     pair: DexPair,
     snapshot: MarketSnapshot,
@@ -368,11 +468,26 @@ async def _price_gas(
 
 
 async def _build_transaction(
-    chain: ChainClient, swap: dict, *, native_input: bool
+    chain: ChainClient,
+    swap: dict,
+    *,
+    native_input: bool,
+    repository: DexIntentRepository | None = None,
 ) -> dict:
+    # With a repository the nonce is reserved under a row lock, so two workers
+    # cannot hand the same one to two transactions; without it the chain's
+    # pending count is the only source, which is fine for a single manual run.
+    chain_nonce = await chain.pending_nonce()
+    nonce = (
+        await repository.reserve_nonce(
+            wallet=chain.wallet_address, chain_nonce=chain_nonce
+        )
+        if repository is not None
+        else chain_nonce
+    )
     tx: dict = {
         "chainId": chain.chain_id,
-        "nonce": await chain.pending_nonce(),
+        "nonce": nonce,
         "to": swap["to"],
         "data": swap["data"],
         "value": to_int(swap.get("value")) or 0,
@@ -405,7 +520,7 @@ async def _fail(session: AsyncSession, intent: DexIntent, reason: str) -> None:
     await session.commit()
 
 
-async def _record_fill(
+async def record_fill(
     session: AsyncSession,
     intent: DexIntent,
     *,
