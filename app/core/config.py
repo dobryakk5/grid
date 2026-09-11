@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     dex_quote_trigger_band_pct: Decimal = Decimal("1")
     dex_max_slippage_pct: Decimal = Decimal("0.5")
 
+    # Canonical Permit2 deployment; the same address on every chain that has
+    # one. Validated against the quote's own permitData before anything is
+    # signed, so a wrong value here is caught rather than acted on.
+    permit2_address: str = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+    # Permit2's design is a one-time unlimited ERC-20 approval to Permit2, with
+    # the per-swap limit and expiry carried by the signed permit instead. Set
+    # this to true to approve only the amount each swap needs, at one extra
+    # approval transaction per trade.
+    dex_approve_exact: bool = False
+
     uniswap_api_key: str = ""
     uniswap_api_base: str = "https://trade-api.gateway.uniswap.org/v1"
     # Uniswap advises refreshing a quote older than roughly half a minute.

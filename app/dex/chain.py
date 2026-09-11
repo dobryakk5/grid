@@ -17,20 +17,20 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from eth_account import Account
+from eth_account.messages import encode_typed_data
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.exceptions import TransactionNotFound
 
 from app.core.config import settings
 from app.dex.tokens import Token
 
-__all__ = ["ChainClient", "ChainError", "SignedPayload", "to_int"]
+__all__ = ["MAX_UINT256", "ChainClient", "ChainError", "SignedPayload", "to_int"]
 
 
 class ChainError(RuntimeError):
     """RPC unreachable, wrong chain, or a transaction we refuse to send."""
 
 
-# Just the reads we need; approvals add their own methods in the Permit2 stage.
 _ERC20_ABI = [
     {
         "name": "balanceOf",
@@ -53,7 +53,29 @@ _ERC20_ABI = [
         "inputs": [],
         "outputs": [{"name": "", "type": "string"}],
     },
+    {
+        "name": "allowance",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+    {
+        "name": "approve",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+    },
 ]
+
+MAX_UINT256 = 2**256 - 1
 
 
 def to_int(value) -> int | None:
@@ -163,6 +185,27 @@ class ChainClient:
                 f"registry says {token.decimals}; fix DEX_TOKENS before trading"
             )
 
+    async def token_allowance(self, token: Token, spender: str, owner: str | None = None) -> int:
+        """Raw allowance in the token's own units."""
+        holder = AsyncWeb3.to_checksum_address(owner or self.wallet_address)
+        return int(
+            await self._erc20(token)
+            .functions.allowance(holder, AsyncWeb3.to_checksum_address(spender))
+            .call()
+        )
+
+    def encode_approve(self, token: Token, spender: str, amount: int) -> dict:
+        """Calldata for an ERC-20 approve, with no network round-trip."""
+        contract = self._erc20(token)
+        return {
+            "to": AsyncWeb3.to_checksum_address(token.address),
+            "data": contract.encode_abi(
+                abi_element_identifier="approve",
+                args=[AsyncWeb3.to_checksum_address(spender), int(amount)],
+            ),
+            "value": 0,
+        }
+
     async def pending_nonce(self, address: str | None = None) -> int:
         target = AsyncWeb3.to_checksum_address(address or self.wallet_address)
         return await self.w3.eth.get_transaction_count(target, "pending")
@@ -205,6 +248,28 @@ class ChainClient:
             nonce=int(tx["nonce"]),
             wallet_address=self._account.address,
         )
+
+    def sign_typed_data(self, *, domain: dict, types: dict, message: dict) -> str:
+        """EIP-712 signature, returned as a 0x hex string.
+
+        ``EIP712Domain`` is stripped from the type set: the domain is passed
+        separately, and leaving it in makes the primary type ambiguous.
+        """
+        if self._account is None:
+            raise ChainError("RH_PRIVATE_KEY is not configured")
+        message_types = {
+            name: fields for name, fields in types.items() if name != "EIP712Domain"
+        }
+        if not message_types:
+            raise ChainError("typed data carries no message types to sign")
+        try:
+            signable = encode_typed_data(
+                domain_data=domain, message_types=message_types, message_data=message
+            )
+            signed = self._account.sign_message(signable)
+        except Exception as exc:
+            raise ChainError(f"cannot sign typed data: {exc}") from None
+        return "0x" + signed.signature.hex().removeprefix("0x")
 
     async def broadcast(self, payload: SignedPayload) -> str:
         """Send a signed payload; re-sending one already in the pool is fine.

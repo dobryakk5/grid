@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models import DexIntent
+from app.dex.approvals import ensure_allowance, sign_permit
 from app.dex.chain import ChainClient, ChainError, to_int
 from app.dex.dexscreener import DexScreenerClient
 from app.dex.intents import IntentStatus, assert_transition
@@ -58,6 +59,7 @@ class SwapOutcome:
     amount_out: Decimal | None = None
     gas_native: Decimal | None = None
     tx_hash: str | None = None
+    approval_tx_hash: str | None = None
     intent_id: int | None = None
 
     @property
@@ -129,6 +131,15 @@ async def execute_buy(
             market_price=snapshot.price_quote,
         )
 
+    # An ERC-20 input needs a standing approval to Permit2 before a swap can
+    # move it; native ETH needs none. A live approval is waited out here, so the
+    # swap that follows signs against an allowance that is already on chain.
+    approval = None
+    if not pair.quote.native:
+        approval = await ensure_allowance(
+            chain, pair.quote, amount_wei=amount_in_wei, dry_run=dry
+        )
+
     quote = await uniswap.quote_exact_in(
         pair=pair,
         side="Buy",
@@ -150,10 +161,17 @@ async def execute_buy(
 
     expected_out = pair.base.from_wei(quote.amount_out)
     if dry:
+        notes = ["DEX_DRY_RUN is on; nothing was signed or sent"]
+        if approval is not None and not approval.sufficient:
+            notes.append(
+                f"would first approve {approval.token} for Permit2 {approval.spender}"
+            )
+        if quote.needs_permit:
+            notes.append("quote requires a Permit2 signature")
         return SwapOutcome(
             status="DRY_RUN",
             symbol=pair.symbol,
-            reason="DEX_DRY_RUN is on; nothing was signed or sent",
+            reason="; ".join(notes),
             market_price=snapshot.price_quote,
             quoted_price=executable,
             amount_in=amount_in,
@@ -162,7 +180,8 @@ async def execute_buy(
     if session is None:
         raise ChainError("a live swap needs a database session to record intent")
 
-    swap = await uniswap.build_swap(quote)
+    signature = sign_permit(chain, quote.permit_data) if quote.needs_permit else None
+    swap = await uniswap.build_swap(quote, signature=signature)
     tx = await _build_transaction(chain, swap, pair_is_native_in=pair.quote.native)
     if pair.quote.native and int(tx["value"]) != amount_in_wei:
         # The router built something other than what we asked to spend.
@@ -190,6 +209,7 @@ async def execute_buy(
         tx_hash=signed.tx_hash,
         raw_tx=signed.raw_hex,
         gas_native_coin="ETH",
+        approval_tx_hash=approval.tx_hash if approval is not None else None,
     )
     session.add(intent)
     await session.commit()
@@ -203,6 +223,7 @@ async def execute_buy(
             symbol=pair.symbol,
             reason=str(exc),
             tx_hash=signed.tx_hash,
+            approval_tx_hash=intent.approval_tx_hash,
             intent_id=intent.id,
         )
 
@@ -235,6 +256,7 @@ async def execute_buy(
             symbol=pair.symbol,
             reason=str(exc),
             tx_hash=signed.tx_hash,
+            approval_tx_hash=intent.approval_tx_hash,
             intent_id=intent.id,
         )
 
@@ -319,5 +341,6 @@ async def _record_fill(
         amount_out=amount_out,
         gas_native=fill.gas_native,
         tx_hash=fill.tx_hash,
+        approval_tx_hash=intent.approval_tx_hash,
         intent_id=intent.id,
     )

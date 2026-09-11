@@ -14,9 +14,12 @@ WALLET = "0x" + "99" * 20
 
 
 class FakeMarket:
-    def __init__(self, *, price="0.0002", liquidity="7000000", volume="6000000"):
+    def __init__(
+        self, *, price="0.0002", liquidity="7000000", volume="6000000",
+        symbol="PONSETH",
+    ):
         self.snapshot_value = MarketSnapshot(
-            symbol="PONSETH",
+            symbol=symbol,
             observed_at_ms=0,
             price_quote=Decimal(price),
             price_usd=Decimal("0.55"),
@@ -34,8 +37,9 @@ class FakeMarket:
 class FakeChain:
     chain_id = 4663
 
-    def __init__(self, *, balance="1"):
+    def __init__(self, *, balance="1", allowance=0):
         self.balance = Decimal(balance)
+        self.allowance = allowance
         self.calls = []
 
     @property
@@ -54,6 +58,14 @@ class FakeChain:
     async def token_balance(self, token, address=None):
         return self.balance
 
+    async def token_allowance(self, token, spender, owner=None):
+        self.calls.append(f"allowance:{token.symbol}")
+        return self.allowance
+
+    def sign_typed_data(self, *, domain, types, message):
+        self.calls.append("sign_typed_data")
+        return "0x" + "cd" * 65
+
 
 class FakeUniswap:
     def __init__(self, *, amount_out="4500000000000000000"):
@@ -68,7 +80,7 @@ class FakeUniswap:
             routing="CLASSIC",
             amount_in=amount_in_wei,
             amount_out=self.amount_out,
-            permit_data=None,
+            permit_data=getattr(self, "permit_data", None),
         )
 
     async def build_swap(self, quote, *, signature=None):
@@ -176,3 +188,58 @@ async def test_a_live_swap_without_a_session_is_refused():
 
     with pytest.raises(ChainError):
         await buy(dry_run=False)
+
+
+USDG_TOKENS = '{"USDG": {"address": "0x' + "ab" * 20 + '", "decimals": 6}}'
+
+
+async def buy_usdg(*, chain=None, uniswap=None, market=None, limit="0.55",
+                   amount="250", dry_run=None):
+    return await execute_buy(
+        None,
+        symbol="PONSUSDG",
+        amount_in=Decimal(amount),
+        limit_price=Decimal(limit),
+        chain=chain or FakeChain(balance="1000"),
+        # 250 USDG for 460 PONS is 0.5435 -- inside the 0.55 limit.
+        uniswap=uniswap or FakeUniswap(amount_out="460000000000000000000"),
+        market=market or FakeMarket(price="0.549", symbol="PONSUSDG"),
+        dry_run=dry_run,
+    )
+
+
+async def test_an_erc20_input_checks_its_permit2_allowance(monkeypatch):
+    monkeypatch.setattr(settings, "dex_tokens", USDG_TOKENS)
+    chain = FakeChain(balance="1000", allowance=0)
+
+    outcome = await buy_usdg(chain=chain)
+
+    assert outcome.status == "DRY_RUN"
+    assert "allowance:USDG" in chain.calls
+    assert "would first approve USDG" in outcome.reason
+
+
+async def test_a_standing_allowance_needs_no_approval(monkeypatch):
+    monkeypatch.setattr(settings, "dex_tokens", USDG_TOKENS)
+    chain = FakeChain(balance="1000", allowance=10**30)
+
+    outcome = await buy_usdg(chain=chain)
+
+    assert "would first approve" not in outcome.reason
+
+
+async def test_a_native_input_never_asks_about_allowances():
+    chain = FakeChain()
+    await buy(chain=chain)
+
+    assert not any(call.startswith("allowance") for call in chain.calls)
+
+
+async def test_a_permit_requiring_quote_is_announced_in_a_dry_run(monkeypatch):
+    monkeypatch.setattr(settings, "dex_tokens", USDG_TOKENS)
+    uniswap = FakeUniswap(amount_out="460000000000000000000")
+    uniswap.permit_data = {"domain": {}, "types": {"X": []}, "values": {"a": 1}}
+
+    outcome = await buy_usdg(uniswap=uniswap)
+
+    assert "Permit2 signature" in outcome.reason

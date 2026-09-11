@@ -372,6 +372,8 @@ class DexIntent(Base):
 
     # ---- signing / broadcast trace -------------------------------------
     wallet_address: Mapped[str | None] = mapped_column(String(42), nullable=True, index=True)
+    # The ERC-20 -> Permit2 approval this swap had to send first, if any.
+    approval_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     nonce: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Hash of the signed payload, known before broadcast; the recovery key.
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True, unique=True, index=True)

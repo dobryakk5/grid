@@ -63,7 +63,7 @@ curl -s "http://127.0.0.1:8000/api/dex/PONSETH/snapshot" | python3 -m json.tool
 «уровень достигнут» на следующих этапах принимает Uniswap quote на реальный
 размер.
 
-### Исполнение (покупка за нативный ETH)
+### Исполнение
 
 - `app/dex/chain.py` — AsyncWeb3: проверка `chainId`, балансы, nonce, подпись,
   broadcast, receipt. Ожидание разделено: `receipt()` — один неблокирующий
@@ -89,6 +89,19 @@ quote → проверка лимита → build → sign → PERSIST → broad
   никогда не решает купить заново. Всё, что упало до коммита, не потратило
   nonce и ничего не отправило.
 
+- `app/dex/approvals.py` — ERC-20 вход требует двух разрешений, а не одного:
+  обычный `approve` на **Permit2** (один раз на токен) и EIP-712 подпись на
+  каждый swap, с суммой, спендером и сроком. Поэтому первый approve по умолчанию
+  безлимитный: постоянное разрешение выдаётся Permit2, а каждый реальный перевод
+  всё равно гейтится свежей подписью с истечением. `DEX_APPROVE_EXACT=true`
+  переключает на точную сумму ценой лишней транзакции на сделку.
+
+  `permitData` из котировки подписывается только после проверки, что его
+  `verifyingContract` совпадает с `PERMIT2_ADDRESS`, а `chainId` — с нашей
+  сетью: иначе мы бы подписали разрешение контракту, которому ничего не выдавали.
+  `EIP712Domain` из `types` вырезается — иначе eth_account не может определить
+  primary type.
+
 `DEX_DRY_RUN=true` по умолчанию: без явного выключения ничего не подписывается.
 
 Ручной end-to-end прогон:
@@ -99,14 +112,20 @@ scripts/dex_buy.py --symbol PONSETH --amount 0.001 --limit 0.00022 --execute
 ```
 
 `--execute` дополнительно требует `DEX_DRY_RUN=false` в `.env` — одного флага
-недостаточно.
+недостаточно. Для покупки за USDG approve на Permit2 отправляется автоматически
+и дожидается receipt до swap'а; посмотреть или отозвать его:
+
+```bash
+scripts/dex_allowance.py --token USDG
+scripts/dex_allowance.py --token USDG --revoke
+```
 
 Лимит проверяется по **исполнимой** цене из котировки на реальный размер, а не
 по mid пула: котировка хуже лимита → `WAITING`, а не «купим по рынку».
 
-Что ещё не сделано (по этапам): approval + Permit2 и покупка за USDG → продажи
-и учёт газа в quote для PnL → synthetic limits в воркере (nonce manager, retry,
-gas bump) → подключение к гриду → hardening (reorg, kill switch, spend cap).
+Что ещё не сделано (по этапам): продажи и учёт газа в quote для PnL →
+synthetic limits в воркере (nonce manager, retry, gas bump) → подключение к
+гриду → hardening (reorg, kill switch, spend cap).
 
 ## Что изменилось в v0.8
 
