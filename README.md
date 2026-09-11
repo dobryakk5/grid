@@ -502,25 +502,39 @@ curl -s http://127.0.0.1:8000/api/bybit/status | python3 -m json.tool
 
 ## Запуск как сервис через systemd
 
-В репозитории уже есть:
-
-```text
-deploy/systemd/mini-grid-api.service
-deploy/systemd/mini-grid-worker.service
-deploy/systemd/mini-grid-market-data.service
-deploy/systemd/mini-grid-market-data.timer
-```
-
-Установить:
+Юниты не лежат в репозитории готовыми файлами, а генерируются под конкретную
+машину: путь установки и пользователь задаются **в одном месте** —
+`scripts/install-systemd.sh`. Юнит с зашитым чужим путём падает с крайне
+неинформативным `Job for … failed because of unavailable resources or another
+system error`, и понять из него, что дело в несуществующем `WorkingDirectory`,
+нельзя.
 
 ```bash
-sudo cp deploy/systemd/mini-grid-api.service /etc/systemd/system/
-sudo cp deploy/systemd/mini-grid-worker.service /etc/systemd/system/
-sudo cp deploy/systemd/mini-grid-market-data.service /etc/systemd/system/
-sudo cp deploy/systemd/mini-grid-market-data.timer /etc/systemd/system/
-sudo systemctl daemon-reload
+sudo ./scripts/install-systemd.sh
+```
+
+По умолчанию путь берётся из расположения самого скрипта, а пользователь — из
+владельца этого каталога. Если нужно иначе:
+
+```bash
+sudo INSTALL_DIR=/var/py/grid RUN_USER=gridbot ./scripts/install-systemd.sh
+```
+
+Посмотреть, что получится, ничего не записывая:
+
+```bash
+./scripts/install-systemd.sh --print
+```
+
+Скрипт пишет семь юнитов (`api`, `worker`, `dex-worker`, `dex-sampler`,
+`fomo-registry`, `chain-tape`, `market-data`) плюс таймер и делает
+`daemon-reload`. Включать нужное — вручную:
+
+```bash
 sudo systemctl enable --now mini-grid-api mini-grid-worker
 sudo systemctl enable --now mini-grid-market-data.timer
+# on-chain часть:
+sudo systemctl enable --now mini-grid-chain-tape
 ```
 
 Первичную загрузку истории за 365 дней выполнить сразу после установки:
@@ -555,6 +569,10 @@ journalctl -u mini-grid-market-data.service -f
 ```bash
 sudo systemctl restart mini-grid-api mini-grid-worker
 ```
+
+Если каталог установки переехал — перегенерировать юниты тем же скриптом и
+перезапустить: `systemctl daemon-reload` сам по себе перечитает файлы, но уже
+запущенные сервисы продолжат работать со старой командой до явного restart.
 
 ## Web-интерфейс
 

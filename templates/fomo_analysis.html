@@ -80,21 +80,28 @@
   <section class="panel">
     <details id="namesPanel">
       <summary>Имена трейдеров — <span id="namesCount" class="muted"></span></summary>
-      <p class="muted" style="font-size:13px;max-width:760px">
-        Наш сервер получает от FOMO 430 на любой токен, а ваш браузер — нет.
-        Поэтому имена забираются в браузере: откройте
-        <a href="https://fomo.family" target="_blank" rel="noopener">fomo.family</a>,
-        будучи залогиненным, нажмите F12 → Console, вставьте этот код и выполните.
-        Он спросит Bearer-токен (DevTools → Network → любой запрос к
-        <span class="addr">prod-api.fomo.family</span> → Request Headers →
-        Authorization, часть после <span class="addr">Bearer&nbsp;</span>),
-        соберёт пары «кошелёк → имя» и положит JSON в буфер обмена.
+      <p class="muted" style="font-size:13px;max-width:780px">
+        Наш сервер получает от FOMO <b>430</b> на любой токен, а ваш браузер — нет.
+        Поэтому имена собираются <b>во вкладке fomo.family</b>: отсюда, с localhost,
+        тот же запрос браузер режет по CORS.
       </p>
+      <ol class="muted" style="font-size:13px;max-width:780px;line-height:1.8;padding-left:20px">
+        <li><b>Здесь</b> (эта страница) — «Скопировать код».</li>
+        <li>Перейдите на <a href="https://fomo.family" target="_blank" rel="noopener">fomo.family</a>,
+            залогиньтесь, откройте <b>F12 → Console именно там</b>, вставьте код, Enter.</li>
+        <li>Он спросит Bearer-токен. Взять на <b>той же вкладке</b>: F12 → Network →
+            любой запрос к <span class="addr">prod-api.fomo.family</span> →
+            Request Headers → <span class="addr">Authorization</span>,
+            скопировать часть <b>после</b> <span class="addr">Bearer&nbsp;</span>.</li>
+        <li>Код обойдёт монеты и положит JSON в буфер.
+            <b>Вернитесь сюда</b> и вставьте его в поле ниже.</li>
+      </ol>
       <textarea id="snippet" readonly rows="5" style="width:100%;background:#0e131d;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:11px"></textarea>
       <div class="row" style="margin-top:8px">
         <button id="copySnippetBtn">Скопировать код</button>
+        <span class="muted" style="font-size:12px">↑ выполнять в консоли fomo.family, не здесь</span>
       </div>
-      <p class="muted" style="font-size:13px;margin-top:14px">Затем вставьте полученный JSON сюда:</p>
+      <p class="muted" style="font-size:13px;margin-top:14px">Шаг 4 — вставьте JSON из буфера сюда:</p>
       <textarea id="namesInput" rows="4" placeholder='[{"wallet_address":"0x…","handle":"trader","display_name":"Trader"}]'
                 style="width:100%;background:#0e131d;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></textarea>
       <div class="row" style="margin-top:8px">
@@ -266,11 +273,77 @@ async function loadLeaders() {
   }
 }
 
-async function loadAll() { await Promise.all([loadCoins(), loadLeaders()]); }
+// Runs in the user's own fomo.family tab, where the session is genuine --
+// our server gets 430 from that API no matter what token it presents.
+function buildSnippet(tokenAddresses) {
+  const tokens = JSON.stringify(tokenAddresses.map(a => ({address: a, networkId: 4663})));
+  return `(async()=>{const jwt=prompt("Вставьте FOMO Bearer-токен (без слова Bearer)");if(!jwt)return;`
+    + `const out={};for(const t of ${tokens}){`
+    + `const r=await fetch("https://prod-api.fomo.family/hodlers/top?tokens="+encodeURIComponent(JSON.stringify([t])),`
+    + `{headers:{authorization:"Bearer "+jwt,"x-supported-chains":"1,56,143,4663,8453,1399811149"}});`
+    + `if(!r.ok){console.warn("HTTP",r.status,"для",t.address);continue;}`
+    + `let d=await r.json();d=d.responseObject||d;const e=Array.isArray(d)?(d[0]||{}):d;`
+    + `for(const h of (e.topHolders||[])){const u=h.user||{};const a=u.evmAddress;`
+    + `if(a&&(u.userHandle||u.displayName))out[a.toLowerCase()]={wallet_address:a,handle:u.userHandle||null,display_name:u.displayName||null};}}`
+    + `const list=Object.values(out);const json=JSON.stringify(list,null,2);`
+    + `console.log(json);try{await navigator.clipboard.writeText(json);console.log("%cСкопировано: "+list.length+" имён","color:#58d68d");}`
+    + `catch(e){console.log("Скопируйте JSON выше вручную");}})()`;
+}
+
+async function refreshNamesPanel() {
+  try {
+    const [status, coins] = await Promise.all([
+      api('/api/fomo/status'),
+      api(`/api/fomo/coins?hours=${$('hours').value}&limit=10`),
+    ]);
+    const tracked = status.traders_known || 0;
+    $('namesCount').textContent = `кошельков: ${tracked}`;
+    $('snippet').value = buildSnippet(coins.coins.map(c => c.token_address));
+  } catch (e) {
+    $('namesCount').textContent = 'не удалось подготовить код';
+  }
+}
+
+async function importNames() {
+  const raw = $('namesInput').value.trim();
+  if (!raw) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    $('importResult').textContent = 'Это не JSON: ' + e.message;
+    return;
+  }
+  const names = Array.isArray(parsed) ? parsed : (parsed.names || []);
+  if (!names.length) {
+    $('importResult').textContent = 'В JSON нет записей';
+    return;
+  }
+  try {
+    const r = await api('/api/fomo/names/bulk', {method: 'POST', body: JSON.stringify({names})});
+    $('importResult').textContent = `Импортировано ${r.applied}, с именем ${r.named} из ${r.tracked}`;
+    $('namesInput').value = '';
+    await loadAll();
+  } catch (e) {
+    $('importResult').textContent = 'Ошибка: ' + e.message;
+  }
+}
+
+async function loadAll() {
+  await Promise.all([loadCoins(), loadLeaders()]);
+  await refreshNamesPanel();
+}
 
 $('saveJwtBtn').onclick = saveJwt;
 $('forgetJwtBtn').onclick = forgetJwt;
 $('refreshBtn').onclick = loadAll;
+$('importNamesBtn').onclick = importNames;
+$('copySnippetBtn').onclick = async () => {
+  $('snippet').select();
+  try { await navigator.clipboard.writeText($('snippet').value); $('copySnippetBtn').textContent = 'Скопировано'; }
+  catch (e) { document.execCommand('copy'); }
+  setTimeout(() => { $('copySnippetBtn').textContent = 'Скопировать код'; }, 1500);
+};
 $('hours').onchange = loadAll;
 
 loadStatus();

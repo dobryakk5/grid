@@ -1,4 +1,4 @@
-.PHONY: install test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed chain-tape chain-tape-bench chain-tape-rebuild
+.PHONY: install install-systemd test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed chain-tape chain-tape-bench chain-tape-rebuild
 
 install:
 	python3 -m venv .venv
@@ -7,6 +7,10 @@ install:
 
 test:
 	.venv/bin/pytest
+
+# Renders the units for this checkout's path; needs root to write /etc.
+install-systemd:
+	sudo ./scripts/install-systemd.sh
 
 db-init:
 	.venv/bin/python scripts/init_db.py
