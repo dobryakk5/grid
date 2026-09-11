@@ -25,3 +25,8 @@ async def grid_analysis_page(request: Request):
 @router.get("/fomo")
 async def fomo_analysis_page(request: Request):
     return templates.TemplateResponse(request=request, name="fomo_analysis.html", context={})
+
+
+@router.get("/fomo/coin/{token_address}")
+async def fomo_coin_page(request: Request, token_address: str):
+    return templates.TemplateResponse(request=request, name="fomo_coin.html", context={})

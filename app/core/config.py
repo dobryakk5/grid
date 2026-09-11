@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     # Raw-response inspection endpoint; off by default outside development.
     fomo_debug_api: bool = False
 
+    # ---- automatic trader discovery --------------------------------------
+    # The tape only watches wallets it already knows, so the roster has to
+    # refresh itself or it goes stale the moment a new trader shows up.
+    wallet_discovery_enabled: bool = True
+    wallet_discovery_interval_seconds: float = 3600.0
+    # One token-filtered getLogs over this many blocks -- roughly a minute of
+    # chain time at ~15 blocks/second, which is enough to see who is active.
+    wallet_discovery_blocks: int = 900
+    wallet_discovery_top: int = 20
+
     # ---- Robinhood Chain trade tape (on-chain source of truth) ------------
     rh_chain_name: str = "Robinhood Chain"
     # Quote symbols close enough to $1 that the swap's own quote leg is a

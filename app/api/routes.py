@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update as sa_update
 
 from app.core.config import settings
 from app.db.models import (
@@ -1240,9 +1240,6 @@ async def stop_recommendation(recommendation_id: int) -> dict:
 # exception is `/fomo/raw`, a development-only passthrough for inspecting the
 # upstream schema, gated by `settings.fomo_debug_api`.
 
-_FOMO_WINDOWS: tuple[tuple[str, int], ...] = (
-    ("1h", 3_600_000), ("6h", 21_600_000), ("24h", 86_400_000),
-)
 _FOMO_RAW_ENDPOINTS = {"leaderboard", "balances", "trades", "trade", "holders", "user"}
 
 
@@ -1311,118 +1308,251 @@ async def fomo_status() -> dict:
     return result
 
 
-async def _window_stats(session, token_address: str, since_ms: int) -> dict:
-    rows = (await session.execute(
-        select(
-            ChainSwap.side,
-            ChainSwap.pricing_source,
-            func.count().label("n"),
-            func.coalesce(func.sum(ChainSwap.value_usd), 0).label("usd"),
-        )
-        .where(ChainSwap.token_address == token_address, ChainSwap.block_time_ms >= since_ms)
-        .group_by(ChainSwap.side, ChainSwap.pricing_source)
-    )).all()
-
-    buys_usd = sells_usd = Decimal("0")
-    buy_count = sell_count = 0
-    by_source = {"QUOTE_LEG": Decimal("0"), "MARKET_PRICE": Decimal("0")}
-    unpriced_trades = 0
-    for side, source, n, usd in rows:
-        if source == "UNPRICED":
-            unpriced_trades += n
-        else:
-            by_source[source] = by_source.get(source, Decimal("0")) + Decimal(usd or 0)
-        if side == "BUY":
-            buys_usd += Decimal(usd or 0)
-            buy_count += n
-        else:
-            sells_usd += Decimal(usd or 0)
-            sell_count += n
-
-    return {
-        "buy_count": buy_count,
-        "sell_count": sell_count,
-        "buys_usd": str(buys_usd),
-        "sells_usd": str(sells_usd),
-        "net_flow_usd": str(buys_usd - sells_usd),
-        "priced_quote_leg_usd": str(by_source["QUOTE_LEG"]),
-        "priced_market_usd": str(by_source["MARKET_PRICE"]),
-        "unpriced_trades": unpriced_trades,
-    }
-
-
-async def _ranked_holders(session, token_address: str, limit: int) -> list[dict]:
-    """Traders (ranked or not) whose own chain_swaps net to a positive position.
-
-    "Position" here is net BUY-minus-SELL within our own recorded tape only --
-    honest about it via the trade counts returned alongside, not a claim of a
-    full historical balance (that is what /balances cross-checks, in a later
-    iteration).
-    """
+async def _identities(session, wallets: list[str]) -> dict[str, dict]:
+    """``{lowercase wallet: identity}`` for whoever we can put a name to."""
+    if not wallets:
+        return {}
     latest_rank = (
         select(FomoTraderRank.fomo_user_id, FomoTraderRank.rank)
         .distinct(FomoTraderRank.fomo_user_id)
         .order_by(FomoTraderRank.fomo_user_id, FomoTraderRank.captured_at.desc())
         .subquery()
     )
-    position = (
-        select(
-            ChainSwap.wallet_address.label("wallet_address"),
-            func.sum(
-                case((ChainSwap.side == "BUY", ChainSwap.token_amount), else_=-ChainSwap.token_amount)
-            ).label("net_qty"),
-            func.max(ChainSwap.block_time_ms).label("last_trade_ms"),
-        )
-        .where(ChainSwap.token_address == token_address)
-        .group_by(ChainSwap.wallet_address)
-        .subquery()
-    )
-
-    query = (
+    rows = (await session.execute(
         select(
             FomoTrader.fomo_user_id,
             FomoTrader.evm_address,
             FomoTrader.user_handle,
             FomoTrader.display_name,
             latest_rank.c.rank,
-            position.c.net_qty,
-            position.c.last_trade_ms,
         )
-        .join(position, func.lower(position.c.wallet_address) == func.lower(FomoTrader.evm_address))
         .outerjoin(latest_rank, latest_rank.c.fomo_user_id == FomoTrader.fomo_user_id)
-        .where(position.c.net_qty > 0)
-        .order_by(latest_rank.c.rank.asc().nulls_last(), position.c.net_qty.desc())
-        .limit(limit)
-    )
-    rows = (await session.execute(query)).all()
-    return [
-        {
+        .where(func.lower(FomoTrader.evm_address).in_({wallet.lower() for wallet in wallets}))
+    )).all()
+    return {
+        row.evm_address.lower(): {
             "fomo_user_id": row.fomo_user_id,
-            "evm_address": row.evm_address,
             "handle": row.user_handle,
             "display_name": row.display_name,
             "rank": row.rank,
-            "net_token_amount": str(row.net_qty),
-            "last_trade_at_ms": row.last_trade_ms,
         }
         for row in rows
-    ]
+    }
 
 
-@router.get("/fomo/token")
-async def fomo_token_report(token: str, network_id: int | None = None, limit: int = 20) -> dict:
-    token_address = _resolve_fomo_token_address(token)
-    limit = max(1, min(limit, 200))
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+def _window_start_ms(hours: int) -> tuple[int, int]:
+    hours = max(1, min(hours, 24 * 30))
+    return hours, int(datetime.now(timezone.utc).timestamp() * 1000) - hours * 3_600_000
+
+
+class FomoNamePayload(BaseModel):
+    """Attach a human name to a wallet, from wherever the name came from."""
+
+    wallet_address: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    handle: str | None = Field(default=None, max_length=120)
+    display_name: str | None = Field(default=None, max_length=120)
+
+
+@router.post("/fomo/names")
+async def set_fomo_name(payload: FomoNamePayload) -> dict:
+    """Record a wallet -> name match so it survives and shows everywhere.
+
+    Names normally arrive from FOMO's registry, but that needs a live
+    session. This lets a name be set from any other source (a profile page
+    read by hand, a spreadsheet, an explorer label) and stored against the
+    same ``fomo_traders`` row, so the tables stop showing a bare address
+    without anything having to be re-derived later.
+    """
+    address = payload.wallet_address
+    handle = (payload.handle or "").strip() or None
+    display_name = (payload.display_name or "").strip() or None
+    if handle is None and display_name is None:
+        raise HTTPException(status_code=422, detail="handle or display_name is required")
+
     async with SessionLocal() as session:
-        holders = await _ranked_holders(session, token_address, limit)
-        windows = {label: await _window_stats(session, token_address, now_ms - span) for label, span in _FOMO_WINDOWS}
+        updated = await session.execute(
+            sa_update(FomoTrader)
+            .where(func.lower(FomoTrader.evm_address) == address.lower())
+            .values(user_handle=handle, display_name=display_name)
+        )
+        if updated.rowcount == 0:
+            # Naming a wallet we have not seen trade yet is legitimate --
+            # keep it, and the tape will fill in its trades once it is
+            # backfilled like any other newly known wallet.
+            session.add(FomoTrader(
+                fomo_user_id=f"manual:{address.lower()}",
+                evm_address=address,
+                user_handle=handle,
+                display_name=display_name,
+                source="manual",
+            ))
+        await session.commit()
+    return {"wallet_address": address, "handle": handle, "display_name": display_name}
+
+
+class FomoNamesBulkPayload(BaseModel):
+    names: list[FomoNamePayload] = Field(min_length=1, max_length=1000)
+
+
+@router.post("/fomo/names/bulk")
+async def set_fomo_names_bulk(payload: FomoNamesBulkPayload) -> dict:
+    """Import many wallet -> name matches at once.
+
+    Fed by names collected in the browser, where a FOMO session actually
+    works: server-side calls to their API are refused (HTTP 430) even with a
+    valid-looking token, so the page that is already logged in is the one
+    place the mapping can be read from. Once imported it lives in
+    ``fomo_traders`` like any other identity and needs no session again.
+    """
+    applied, created = 0, 0
+    async with SessionLocal() as session:
+        for entry in payload.names:
+            handle = (entry.handle or "").strip() or None
+            display_name = (entry.display_name or "").strip() or None
+            if handle is None and display_name is None:
+                continue
+            address = entry.wallet_address
+            result = await session.execute(
+                sa_update(FomoTrader)
+                .where(func.lower(FomoTrader.evm_address) == address.lower())
+                .values(user_handle=handle, display_name=display_name)
+            )
+            if result.rowcount == 0:
+                session.add(FomoTrader(
+                    fomo_user_id=f"manual:{address.lower()}",
+                    evm_address=address,
+                    user_handle=handle,
+                    display_name=display_name,
+                    source="manual",
+                ))
+                created += 1
+            applied += 1
+        await session.commit()
+
+        named = await session.scalar(
+            select(func.count(FomoTrader.fomo_user_id)).where(FomoTrader.user_handle.is_not(None))
+        )
+        total = await session.scalar(select(func.count(FomoTrader.fomo_user_id)))
+    return {"applied": applied, "created": created, "named": named or 0, "tracked": total or 0}
+
+
+@router.get("/fomo/coins")
+async def fomo_coins(hours: int = 24, limit: int = 50) -> dict:
+    """Which coins the tracked wallets are buying, biggest buy volume first."""
+    hours, since_ms = _window_start_ms(hours)
+    limit = max(1, min(limit, 200))
+
+    # Unpriced trades carry a NULL value_usd; fold them to zero so a coin
+    # with only unpriced activity sums to 0 rather than NULL -- otherwise it
+    # sorts ahead of every real volume, since Postgres orders NULLs first.
+    bought = func.coalesce(
+        func.sum(case((ChainSwap.side == "BUY", func.coalesce(ChainSwap.value_usd, 0)), else_=0)), 0
+    )
+    sold = func.coalesce(
+        func.sum(case((ChainSwap.side == "SELL", func.coalesce(ChainSwap.value_usd, 0)), else_=0)), 0
+    )
+    net_qty = func.sum(case((ChainSwap.side == "BUY", ChainSwap.token_amount), else_=-ChainSwap.token_amount))
+
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(
+                ChainSwap.token_address,
+                func.max(ChainSwap.symbol).label("symbol"),
+                bought.label("bought_usd"),
+                sold.label("sold_usd"),
+                net_qty.label("net_qty"),
+                func.count().filter(ChainSwap.side == "BUY").label("buys"),
+                func.count().filter(ChainSwap.side == "SELL").label("sells"),
+                func.count(func.distinct(ChainSwap.wallet_address)).filter(ChainSwap.side == "BUY").label("buyers"),
+                func.count(func.distinct(ChainSwap.wallet_address)).filter(ChainSwap.side == "SELL").label("sellers"),
+                func.count().filter(ChainSwap.pricing_source == "UNPRICED").label("unpriced"),
+                func.max(ChainSwap.block_time_ms).label("last_trade_ms"),
+            )
+            .where(ChainSwap.block_time_ms >= since_ms)
+            .group_by(ChainSwap.token_address)
+            .order_by(bought.desc(), func.count().desc())
+            .limit(limit)
+        )).all()
+
+    coins = []
+    for row in rows:
+        bought_usd = Decimal(row.bought_usd or 0)
+        sold_usd = Decimal(row.sold_usd or 0)
+        coins.append({
+            "token_address": row.token_address,
+            "symbol": row.symbol,
+            "bought_usd": str(bought_usd),
+            "sold_usd": str(sold_usd),
+            "net_flow_usd": str(bought_usd - sold_usd),
+            "net_token_amount": str(row.net_qty),
+            "buy_count": row.buys,
+            "sell_count": row.sells,
+            "buyers": row.buyers,
+            "sellers": row.sellers,
+            "unpriced_trades": row.unpriced,
+            "last_trade_at_ms": row.last_trade_ms,
+        })
+    return {"hours": hours, "since_ms": since_ms, "coins": coins}
+
+
+@router.get("/fomo/coins/{token_address}")
+async def fomo_coin_detail(token_address: str, hours: int = 24) -> dict:
+    """Who bought this coin and who sold it, with how much of each."""
+    hours, since_ms = _window_start_ms(hours)
+    address = _resolve_fomo_token_address(token_address)
+
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(
+                ChainSwap.wallet_address,
+                ChainSwap.side,
+                func.max(ChainSwap.symbol).label("symbol"),
+                func.coalesce(func.sum(ChainSwap.value_usd), 0).label("usd"),
+                func.sum(ChainSwap.token_amount).label("qty"),
+                func.count().label("trades"),
+                func.count().filter(ChainSwap.pricing_source == "UNPRICED").label("unpriced"),
+                func.max(ChainSwap.block_time_ms).label("last_trade_ms"),
+            )
+            .where(func.lower(ChainSwap.token_address) == address.lower(), ChainSwap.block_time_ms >= since_ms)
+            .group_by(ChainSwap.wallet_address, ChainSwap.side)
+            .order_by(func.coalesce(func.sum(ChainSwap.value_usd), 0).desc())
+        )).all()
+        identities = await _identities(session, [row.wallet_address for row in rows])
+
+    symbol = next((row.symbol for row in rows if row.symbol), None)
+    buyers, sellers = [], []
+    bought_total = sold_total = Decimal("0")
+    for row in rows:
+        identity = identities.get(row.wallet_address.lower(), {})
+        entry = {
+            "wallet_address": row.wallet_address,
+            "fomo_user_id": identity.get("fomo_user_id"),
+            "handle": identity.get("handle"),
+            "display_name": identity.get("display_name"),
+            "rank": identity.get("rank"),
+            "usd": str(Decimal(row.usd or 0)),
+            "token_amount": str(row.qty),
+            "trades": row.trades,
+            "unpriced_trades": row.unpriced,
+            "last_trade_at_ms": row.last_trade_ms,
+        }
+        if row.side == "BUY":
+            buyers.append(entry)
+            bought_total += Decimal(row.usd or 0)
+        else:
+            sellers.append(entry)
+            sold_total += Decimal(row.usd or 0)
+
     return {
-        "token_address": token_address,
-        "chain_id": network_id or settings.rh_chain_id,
-        "as_of_ms": now_ms,
-        "ranked_holders": holders,
-        "windows": windows,
+        "token_address": address,
+        "symbol": symbol,
+        "hours": hours,
+        "since_ms": since_ms,
+        "bought_usd": str(bought_total),
+        "sold_usd": str(sold_total),
+        "net_flow_usd": str(bought_total - sold_total),
+        "buyers": buyers,
+        "sellers": sellers,
     }
 
 
@@ -1434,12 +1564,18 @@ async def fomo_leaders(hours: int = 24, limit: int = 50) -> dict:
     token across every wallet, this one aggregates a wallet across every
     token, which is what "who is accumulating right now" actually asks.
     """
-    hours = max(1, min(hours, 24 * 30))
+    hours, since_ms = _window_start_ms(hours)
     limit = max(1, min(limit, 200))
-    since_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - hours * 3_600_000
 
-    bought = func.sum(case((ChainSwap.side == "BUY", ChainSwap.value_usd), else_=0))
-    sold = func.sum(case((ChainSwap.side == "SELL", ChainSwap.value_usd), else_=0))
+    # Unpriced trades carry a NULL value_usd; fold them to zero so a coin
+    # with only unpriced activity sums to 0 rather than NULL -- otherwise it
+    # sorts ahead of every real volume, since Postgres orders NULLs first.
+    bought = func.coalesce(
+        func.sum(case((ChainSwap.side == "BUY", func.coalesce(ChainSwap.value_usd, 0)), else_=0)), 0
+    )
+    sold = func.coalesce(
+        func.sum(case((ChainSwap.side == "SELL", func.coalesce(ChainSwap.value_usd, 0)), else_=0)), 0
+    )
 
     async with SessionLocal() as session:
         totals = (await session.execute(
@@ -1461,7 +1597,6 @@ async def fomo_leaders(hours: int = 24, limit: int = 50) -> dict:
             return {"hours": hours, "since_ms": since_ms, "leaders": []}
 
         wallets = [row.wallet for row in totals]
-        wallets_lower = {wallet.lower() for wallet in wallets}
 
         # Per-token breakdown -- the "что купили" half of the answer.
         per_token = (await session.execute(
@@ -1481,32 +1616,7 @@ async def fomo_leaders(hours: int = 24, limit: int = 50) -> dict:
             .order_by(bought.desc())
         )).all()
 
-        latest_rank = (
-            select(FomoTraderRank.fomo_user_id, FomoTraderRank.rank)
-            .distinct(FomoTraderRank.fomo_user_id)
-            .order_by(FomoTraderRank.fomo_user_id, FomoTraderRank.captured_at.desc())
-            .subquery()
-        )
-        identities = (await session.execute(
-            select(
-                FomoTrader.fomo_user_id,
-                FomoTrader.evm_address,
-                FomoTrader.user_handle,
-                FomoTrader.display_name,
-                latest_rank.c.rank,
-            )
-            .outerjoin(latest_rank, latest_rank.c.fomo_user_id == FomoTrader.fomo_user_id)
-            .where(func.lower(FomoTrader.evm_address).in_(wallets_lower))
-        )).all()
-
-    by_wallet: dict[str, dict] = {}
-    for row in identities:
-        by_wallet[row.evm_address.lower()] = {
-            "fomo_user_id": row.fomo_user_id,
-            "handle": row.user_handle,
-            "display_name": row.display_name,
-            "rank": row.rank,
-        }
+        by_wallet = await _identities(session, wallets)
 
     tokens_by_wallet: dict[str, list[dict]] = {}
     for row in per_token:
@@ -1542,40 +1652,6 @@ async def fomo_leaders(hours: int = 24, limit: int = 50) -> dict:
         })
 
     return {"hours": hours, "since_ms": since_ms, "leaders": leaders}
-
-
-@router.get("/fomo/tape")
-async def fomo_tape(limit: int = 100) -> dict:
-    limit = max(1, min(limit, 500))
-    async with SessionLocal() as session:
-        rows = list((await session.execute(
-            select(ChainSwap).order_by(ChainSwap.block_time_ms.desc()).limit(limit)
-        )).scalars())
-        wallets = {row.wallet_address.lower() for row in rows}
-        traders_by_wallet: dict[str, FomoTrader] = {}
-        if wallets:
-            trader_rows = list((await session.execute(
-                select(FomoTrader).where(func.lower(FomoTrader.evm_address).in_(wallets))
-            )).scalars())
-            traders_by_wallet = {trader.evm_address.lower(): trader for trader in trader_rows}
-    return {
-        "trades": [
-            {
-                "tx_hash": row.tx_hash,
-                "wallet_address": row.wallet_address,
-                "handle": (traders_by_wallet[row.wallet_address.lower()].user_handle
-                           if row.wallet_address.lower() in traders_by_wallet else None),
-                "symbol": row.symbol,
-                "side": row.side,
-                "token_amount": str(row.token_amount),
-                "quote_amount": str(row.quote_amount) if row.quote_amount is not None else None,
-                "value_usd": str(row.value_usd) if row.value_usd is not None else None,
-                "pricing_source": row.pricing_source,
-                "block_time_ms": row.block_time_ms,
-            }
-            for row in rows
-        ]
-    }
 
 
 @router.get("/fomo/traders/{fomo_user_id}")

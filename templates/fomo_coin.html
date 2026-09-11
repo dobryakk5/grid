@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Монета — FOMO Smart Money</title>
+  <style>
+    :root{
+      color-scheme:dark;
+      --bg:#0b0e14;--panel:#121722;--panel2:#0e131d;--line:#273044;--line2:#202838;
+      --text:#e6eaf2;--muted:#8e9aaf;--good:#58d68d;--bad:#ff6b6b;--accent:#6ea8fe;--warn:#f2c66d;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    button,a,select,input{font:inherit}
+    button,a{transition:.15s ease}
+    .wrap{max-width:1180px;margin:auto;padding:24px 20px 60px}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+    h1,h2,h3{margin:0}
+    h1{font-size:24px}
+    h2{font-size:17px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text);padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none}
+    button:hover,.button:hover{border-color:#3a4660}
+    .muted{color:var(--muted)}
+    .good,.side-buy{color:var(--good)}
+    .bad,.side-sell{color:var(--bad)}
+    .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-top:6px}
+    .tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+    .tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
+    .tile .value{font-size:19px;font-weight:750}
+    table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+    th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+    th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+    tr:hover td{background:#141a26}
+    .badge{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+    .empty{padding:20px 8px;text-align:center;color:var(--muted)}
+    .addr{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+    .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    @media(max-width:860px){.cols{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1 id="coinTitle">Монета</h1>
+      <div id="coinAddress" class="muted addr" style="margin-top:4px"></div>
+    </div>
+    <div class="row">
+      <select id="hours">
+        <option value="1">за 1 час</option>
+        <option value="6">за 6 часов</option>
+        <option value="24" selected>за сутки</option>
+        <option value="168">за неделю</option>
+      </select>
+      <a class="button" href="/fomo">← К списку монет</a>
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="tiles" id="summary"></div>
+  </section>
+
+  <div class="cols">
+    <section class="panel">
+      <h2 class="good">Кто купил</h2>
+      <div id="buyersWrap"></div>
+    </section>
+    <section class="panel">
+      <h2 class="bad">Кто продал</h2>
+      <div id="sellersWrap"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const fmt = (v, n=2) => v === null || v === undefined ? '—' : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: n});
+const fmtUsd = v => v === null || v === undefined ? '—' : '$' + Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2});
+const short = a => a ? a.slice(0, 6) + '…' + a.slice(-4) : '—';
+
+async function api(url, options = {}) {
+  const r = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || `HTTP ${r.status}`));
+  return d;
+}
+
+// The coin address is the last path segment of /fomo/coin/<address>.
+const ADDRESS = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+
+function traderCell(row) {
+  const name = row.handle || row.display_name;
+  const rank = row.rank != null ? `<span class="badge">#${row.rank}</span> ` : '';
+  if (name) {
+    return `${rank}${esc(name)}<div class="muted addr">${esc(short(row.wallet_address))}</div>`;
+  }
+  // No FOMO identity for this wallet -- the address is the honest label.
+  return `${rank}<span class="addr">${esc(short(row.wallet_address))}</span>`;
+}
+
+function renderSide(target, rows, kind) {
+  if (!rows.length) {
+    $(target).innerHTML = `<div class="empty">${kind === 'buy' ? 'Никто не покупал' : 'Никто не продавал'} за этот период.</div>`;
+    return;
+  }
+  const cls = kind === 'buy' ? 'side-buy' : 'side-sell';
+  const body = rows.map(r => `
+    <tr>
+      <td>${traderCell(r)}</td>
+      <td class="${cls}"><b>${fmtUsd(r.usd)}</b>${r.unpriced_trades ? ` <span class="badge">${r.unpriced_trades} без цены</span>` : ''}</td>
+      <td>${fmt(r.token_amount)}</td>
+      <td class="muted">${r.trades}</td>
+      <td class="muted">${r.last_trade_at_ms ? new Date(r.last_trade_at_ms).toLocaleString('ru-RU') : '—'}</td>
+    </tr>`).join('');
+  $(target).innerHTML = `
+    <table>
+      <thead><tr><th>Трейдер</th><th>${kind === 'buy' ? 'Куплено' : 'Продано'}</th><th>Количество</th><th>Сделок</th><th>Последняя</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+async function load() {
+  try {
+    const data = await api(`/api/fomo/coins/${encodeURIComponent(ADDRESS)}?hours=${$('hours').value}`);
+    const name = data.symbol || short(data.token_address);
+    document.title = `${name} — FOMO Smart Money`;
+    $('coinTitle').textContent = name;
+    $('coinAddress').textContent = data.token_address;
+
+    const net = Number(data.net_flow_usd);
+    $('summary').innerHTML = [
+      ['Куплено', fmtUsd(data.bought_usd)],
+      ['Продано', fmtUsd(data.sold_usd)],
+      ['Net flow', (net > 0 ? '+' : '') + fmtUsd(net)],
+      ['Покупателей', data.buyers.length],
+      ['Продавцов', data.sellers.length],
+    ].map(([label, value]) =>
+      `<div class="tile"><div class="label">${esc(label)}</div><div class="value">${typeof value === 'string' ? esc(value) : value}</div></div>`
+    ).join('');
+
+    renderSide('buyersWrap', data.buyers, 'buy');
+    renderSide('sellersWrap', data.sellers, 'sell');
+  } catch (e) {
+    $('summary').innerHTML = '';
+    $('buyersWrap').innerHTML = `<div class="empty bad">Ошибка: ${esc(e.message)}</div>`;
+    $('sellersWrap').innerHTML = '';
+  }
+}
+
+$('hours').onchange = load;
+load();
+</script>
+</body>
+</html>

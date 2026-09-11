@@ -7,18 +7,8 @@
   <style>
     :root{
       color-scheme:dark;
-      --bg:#0b0e14;
-      --panel:#121722;
-      --panel2:#0e131d;
-      --line:#273044;
-      --line2:#202838;
-      --text:#e6eaf2;
-      --muted:#8e9aaf;
-      --good:#58d68d;
-      --bad:#ff6b6b;
-      --accent:#6ea8fe;
-      --accent-bg:#172338;
-      --warn:#f2c66d;
+      --bg:#0b0e14;--panel:#121722;--panel2:#0e131d;--line:#273044;--line2:#202838;
+      --text:#e6eaf2;--muted:#8e9aaf;--good:#58d68d;--bad:#ff6b6b;--accent:#6ea8fe;--warn:#f2c66d;
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -29,26 +19,15 @@
     h1,h2,h3{margin:0}
     h1{font-size:24px}
     h2{font-size:17px}
-    h3{font-size:14px}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .field{display:flex;flex-direction:column;gap:4px}
-    .field label{font-size:11px;color:var(--muted)}
-    input[type=text],input[type=password],input[type=number]{
-      border:1px solid var(--line);background:#0e131d;color:var(--text);
-      padding:9px 11px;border-radius:9px;min-width:200px
-    }
-    button,.button{
-      border:1px solid var(--line);background:#171d2a;color:var(--text);
-      padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none
-    }
+    input[type=password]{border:1px solid var(--line);background:#0e131d;color:var(--text);padding:9px 11px;border-radius:9px;min-width:200px}
+    button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text);padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none}
     button:hover,.button:hover{border-color:#3a4660}
     .primary{border-color:var(--accent);background:#1c4d8f}
     .muted{color:var(--muted)}
-    .good{color:var(--good)}
-    .bad{color:var(--bad)}
-    .warn{color:var(--warn)}
-    .hidden{display:none!important}
+    .good,.side-buy{color:var(--good)}
+    .bad,.side-sell{color:var(--bad)}
     .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;border:1px solid var(--line);font-size:12px;font-weight:650}
     .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
     .pill.on .dot{background:var(--good)}
@@ -61,12 +40,11 @@
     th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
     th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
     tr:hover td{background:#141a26}
-    .side-buy{color:var(--good);font-weight:700}
-    .side-sell{color:var(--bad);font-weight:700}
+    tr.clickable{cursor:pointer}
+    .coin-name{font-weight:750;font-size:15px}
     .badge{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
     .empty{padding:20px 8px;text-align:center;color:var(--muted)}
-    pre{white-space:pre-wrap;word-break:break-all;background:#0e131d;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;max-height:400px;overflow:auto}
-    details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:4px}
+    .addr{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   </style>
 </head>
 <body>
@@ -74,7 +52,14 @@
   <header class="top">
     <h1>FOMO Smart Money</h1>
     <div class="row">
-      <a class="button" href=".">← Вернуться к профилям</a>
+      <select id="hours">
+        <option value="1">за 1 час</option>
+        <option value="6">за 6 часов</option>
+        <option value="24" selected>за сутки</option>
+        <option value="168">за неделю</option>
+      </select>
+      <button id="refreshBtn">Обновить</button>
+      <a class="button" href="/">← К профилям</a>
     </div>
   </header>
 
@@ -90,82 +75,53 @@
         <button id="forgetJwtBtn">Забыть</button>
       </div>
     </div>
-    <div id="sessionNote" class="muted" style="margin-top:8px;font-size:12px"></div>
   </section>
 
   <section class="panel">
-    <h2>Токен</h2>
-    <div class="row" style="margin-top:10px">
-      <div class="field">
-        <label for="tokenInput">Символ или адрес</label>
-        <input id="tokenInput" type="text" value="PONS" placeholder="PONS или 0x…">
+    <details id="namesPanel">
+      <summary>Имена трейдеров — <span id="namesCount" class="muted"></span></summary>
+      <p class="muted" style="font-size:13px;max-width:760px">
+        Наш сервер получает от FOMO 430 на любой токен, а ваш браузер — нет.
+        Поэтому имена забираются в браузере: откройте
+        <a href="https://fomo.family" target="_blank" rel="noopener">fomo.family</a>,
+        будучи залогиненным, нажмите F12 → Console, вставьте этот код и выполните.
+        Он спросит Bearer-токен (DevTools → Network → любой запрос к
+        <span class="addr">prod-api.fomo.family</span> → Request Headers →
+        Authorization, часть после <span class="addr">Bearer&nbsp;</span>),
+        соберёт пары «кошелёк → имя» и положит JSON в буфер обмена.
+      </p>
+      <textarea id="snippet" readonly rows="5" style="width:100%;background:#0e131d;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:11px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="copySnippetBtn">Скопировать код</button>
       </div>
-      <div class="field">
-        <label for="networkInput">Network ID</label>
-        <input id="networkInput" type="number" value="4663" style="min-width:110px">
+      <p class="muted" style="font-size:13px;margin-top:14px">Затем вставьте полученный JSON сюда:</p>
+      <textarea id="namesInput" rows="4" placeholder='[{"wallet_address":"0x…","handle":"trader","display_name":"Trader"}]'
+                style="width:100%;background:#0e131d;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="importNamesBtn" class="primary">Импортировать имена</button>
+        <span id="importResult" class="muted"></span>
       </div>
-      <button id="analyzeBtn" class="primary" style="align-self:flex-end">Анализировать</button>
-    </div>
-    <div id="tokenError" class="bad hidden" style="margin-top:10px"></div>
-
-    <div id="tokenResult" class="hidden">
-      <div class="tiles" id="summaryTiles"></div>
-
-      <h3 style="margin-top:18px">Ранжированные холдеры</h3>
-      <div id="holdersWrap"></div>
-    </div>
+    </details>
   </section>
 
   <section class="panel">
-    <div class="section-head" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-      <h2>Лидеры — что купили</h2>
-      <div class="row">
-        <select id="leadersHours">
-          <option value="1">за 1 час</option>
-          <option value="6">за 6 часов</option>
-          <option value="24" selected>за сутки</option>
-          <option value="168">за неделю</option>
-        </select>
-        <button id="refreshLeadersBtn">Обновить</button>
-      </div>
-    </div>
-    <div id="leadersSummary" class="tiles"></div>
+    <h2>Топ монет — что покупают</h2>
+    <div class="tiles" id="coinsSummary"></div>
+    <div id="coinsWrap"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Лидеры — что купили</h2>
     <div id="leadersWrap"></div>
-  </section>
-
-  <section class="panel">
-    <details>
-      <summary>Лента сделок (по одной сделке)</summary>
-      <div class="row" style="margin-top:10px">
-        <button id="refreshTapeBtn">Обновить</button>
-      </div>
-      <div id="tapeWrap"></div>
-    </details>
-  </section>
-
-  <section class="panel">
-    <details id="rawDetails">
-      <summary>Сырой ответ FOMO (для сверки схемы)</summary>
-      <div class="row" style="margin-top:10px">
-        <select id="rawEndpoint">
-          <option value="leaderboard">leaderboard</option>
-          <option value="holders">holders</option>
-          <option value="balances">balances (user_id)</option>
-          <option value="trades">trades (user_id)</option>
-        </select>
-        <input id="rawUserId" type="text" placeholder="user_id (для balances/trades)">
-        <button id="loadRawBtn">Загрузить</button>
-      </div>
-      <pre id="rawOutput" class="muted">—</pre>
-    </details>
   </section>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const fmt = (v, n=4) => v === null || v === undefined ? '—' : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: n});
+const fmt = (v, n=2) => v === null || v === undefined ? '—' : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: n});
 const fmtUsd = v => v === null || v === undefined ? '—' : '$' + Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2});
+const short = a => a ? a.slice(0, 6) + '…' + a.slice(-4) : '—';
 
 async function api(url, options = {}) {
   const r = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
@@ -175,22 +131,18 @@ async function api(url, options = {}) {
 }
 
 async function loadStatus() {
-  const pill = $('sessionPill'), text = $('sessionPillText'), info = $('registryInfo'), note = $('sessionNote');
+  const pill = $('sessionPill'), text = $('sessionPillText'), info = $('registryInfo');
   try {
     const s = await api('/api/fomo/status');
     pill.className = 'pill ' + (s.authenticated ? 'on' : 'off');
     text.textContent = s.authenticated
-      ? `сессия активна (${s.source}${s.expires_in != null ? ', ~' + Math.max(0, Math.round(s.expires_in / 60)) + ' мин' : ''})`
-      : 'нет FOMO-сессии';
+      ? `сессия активна${s.expires_in != null ? ', ~' + Math.max(0, Math.round(s.expires_in / 60)) + ' мин' : ''}`
+      : 'нет FOMO-сессии — имена недоступны';
     const parts = [];
-    if (s.traders_known != null) parts.push(`трейдеров в реестре: ${s.traders_known}`);
-    if (s.traders_with_wallet != null) parts.push(`с кошельком: ${s.traders_with_wallet}`);
+    if (s.traders_known != null) parts.push(`кошельков: ${s.traders_known}`);
     if (s.wallets_pending_backfill) parts.push(`ждут backfill: ${s.wallets_pending_backfill}`);
-    if (s.chain_scan_last_block != null) parts.push(`сканер на блоке ${s.chain_scan_last_block}`);
+    if (s.chain_scan_last_block != null) parts.push(`блок ${s.chain_scan_last_block}`);
     info.textContent = parts.join(' · ');
-    note.textContent = s.authenticated
-      ? 'Лента сделок и объёмы читаются из собственной БД и не зависят от FOMO-сессии.'
-      : 'Без FOMO-сессии пропадают только хэндлы/ранги — кошельки, сделки и объёмы остаются на месте.';
   } catch (e) {
     pill.className = 'pill off';
     text.textContent = 'статус недоступен';
@@ -205,6 +157,7 @@ async function saveJwt() {
     await api('/api/fomo/session', {method: 'POST', body: JSON.stringify({jwt})});
     $('jwtInput').value = '';
     await loadStatus();
+    await loadAll();
   } catch (e) {
     alert('Не удалось сохранить сессию: ' + e.message);
   }
@@ -215,125 +168,97 @@ async function forgetJwt() {
   await loadStatus();
 }
 
-function renderHolders(holders) {
-  if (!holders.length) {
-    $('holdersWrap').innerHTML = '<div class="empty">Ранжированные холдеры с позицией в этом токене не найдены в собственной ленте сделок.</div>';
-    return;
-  }
-  const rows = holders.map(h => `
-    <tr>
-      <td>${h.rank != null ? '#' + h.rank : '<span class="muted">—</span>'}</td>
-      <td>${h.handle ? esc(h.handle) : (h.display_name ? esc(h.display_name) : '<span class="muted">без хэндла</span>')}</td>
-      <td class="muted">${esc((h.evm_address || '').slice(0, 6) + '…' + (h.evm_address || '').slice(-4))}</td>
-      <td>${fmt(h.net_token_amount)}</td>
-      <td class="muted">${h.last_trade_at_ms ? new Date(h.last_trade_at_ms).toLocaleString('ru-RU') : '—'}</td>
-    </tr>`).join('');
-  $('holdersWrap').innerHTML = `
-    <table>
-      <thead><tr><th>Ранг</th><th>Трейдер</th><th>Кошелёк</th><th>Позиция (наша лента)</th><th>Последняя сделка</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
-
-function renderSummary(data) {
-  const w = data.windows;
-  const tiles = [
-    ['Ранжированных холдеров', data.ranked_holders.length],
-    ['Топ-10 среди них', data.ranked_holders.filter(h => h.rank != null && h.rank <= 10).length],
-    ['Покупки 1ч / 6ч / 24ч', `${w['1h'].buy_count} / ${w['6h'].buy_count} / ${w['24h'].buy_count}`],
-    ['Продажи 1ч / 6ч / 24ч', `${w['1h'].sell_count} / ${w['6h'].sell_count} / ${w['24h'].sell_count}`],
-    ['Куплено 24ч', fmtUsd(w['24h'].buys_usd)],
-    ['Продано 24ч', fmtUsd(w['24h'].sells_usd)],
-    ['Net flow 24ч', fmtUsd(w['24h'].net_flow_usd)],
-    ['Измерено по quote-ноге / рынку / без цены (24ч)',
-      `${fmtUsd(w['24h'].priced_quote_leg_usd)} / ${fmtUsd(w['24h'].priced_market_usd)} / ${w['24h'].unpriced_trades} сделок`],
-  ];
-  $('summaryTiles').innerHTML = tiles.map(([label, value]) => `
-    <div class="tile"><div class="label">${esc(label)}</div><div class="value">${typeof value === 'string' ? esc(value) : value}</div></div>
-  `).join('');
-}
-
-async function analyzeToken() {
-  const token = $('tokenInput').value.trim();
-  const networkId = $('networkInput').value.trim();
-  $('tokenError').classList.add('hidden');
-  if (!token) return;
-  try {
-    const data = await api(`/api/fomo/token?token=${encodeURIComponent(token)}&network_id=${encodeURIComponent(networkId)}`);
-    renderSummary(data);
-    renderHolders(data.ranked_holders);
-    $('tokenResult').classList.remove('hidden');
-  } catch (e) {
-    $('tokenResult').classList.add('hidden');
-    $('tokenError').textContent = 'Ошибка: ' + e.message;
-    $('tokenError').classList.remove('hidden');
-  }
-}
-
+// A wallet with no FOMO identity is shown by address -- that is the honest
+// label, not a placeholder waiting to be filled in.
 function traderLabel(row) {
-  if (row.handle) return esc(row.handle);
-  if (row.display_name) return esc(row.display_name);
-  const a = row.wallet_address || '';
-  return '<span class="muted">' + esc(a.slice(0, 6) + '…' + a.slice(-4)) + '</span>';
+  const name = row.handle || row.display_name;
+  const rank = row.rank != null ? `<span class="badge">#${row.rank}</span> ` : '';
+  return name
+    ? `${rank}${esc(name)} <span class="muted addr">${esc(short(row.wallet_address))}</span>`
+    : `${rank}<span class="addr">${esc(short(row.wallet_address))}</span>`;
 }
 
-function tokenSummary(tokens) {
+async function loadCoins() {
+  try {
+    const data = await api(`/api/fomo/coins?hours=${$('hours').value}&limit=50`);
+    if (!data.coins.length) {
+      $('coinsSummary').innerHTML = '';
+      $('coinsWrap').innerHTML = '<div class="empty">За выбранный период сделок не записано.</div>';
+      return;
+    }
+    const bought = data.coins.reduce((a, c) => a + Number(c.bought_usd), 0);
+    const sold = data.coins.reduce((a, c) => a + Number(c.sold_usd), 0);
+    $('coinsSummary').innerHTML = [
+      ['Монет торговалось', data.coins.length],
+      ['Куплено всего', fmtUsd(bought)],
+      ['Продано всего', fmtUsd(sold)],
+      ['Net flow', (bought - sold > 0 ? '+' : '') + fmtUsd(bought - sold)],
+    ].map(([l, v]) => `<div class="tile"><div class="label">${esc(l)}</div><div class="value">${typeof v === 'string' ? esc(v) : v}</div></div>`).join('');
+
+    const rows = data.coins.map(c => {
+      const net = Number(c.net_flow_usd);
+      const netCls = net > 0 ? 'side-buy' : (net < 0 ? 'side-sell' : 'muted');
+      const name = c.symbol || short(c.token_address);
+      return `
+      <tr class="clickable" data-address="${esc(c.token_address)}">
+        <td><span class="coin-name">${esc(name)}</span>${c.unpriced_trades ? ` <span class="badge">${c.unpriced_trades} без цены</span>` : ''}</td>
+        <td class="side-buy">${fmtUsd(c.bought_usd)}</td>
+        <td class="side-sell">${fmtUsd(c.sold_usd)}</td>
+        <td class="${netCls}"><b>${net > 0 ? '+' : ''}${fmtUsd(net)}</b></td>
+        <td class="muted">${c.buyers} / ${c.sellers}</td>
+        <td class="muted">${c.buy_count} / ${c.sell_count}</td>
+        <td class="muted">${c.last_trade_at_ms ? new Date(c.last_trade_at_ms).toLocaleString('ru-RU') : '—'}</td>
+      </tr>`;
+    }).join('');
+
+    $('coinsWrap').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Монета</th><th>Куплено</th><th>Продано</th><th>Net flow</th>
+          <th>Покуп./прод.</th><th>Сделок B/S</th><th>Последняя</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    for (const tr of $('coinsWrap').querySelectorAll('tr.clickable')) {
+      tr.onclick = () => { location.href = '/fomo/coin/' + encodeURIComponent(tr.dataset.address); };
+    }
+  } catch (e) {
+    $('coinsWrap').innerHTML = `<div class="empty bad">Ошибка: ${esc(e.message)}</div>`;
+  }
+}
+
+function tokenBadges(tokens) {
   if (!tokens || !tokens.length) return '<span class="muted">—</span>';
   return tokens.map(t => {
     const net = Number(t.net_token_amount);
     const cls = net > 0 ? 'side-buy' : (net < 0 ? 'side-sell' : 'muted');
-    const sign = net > 0 ? '+' : '';
-    return `<span class="badge" style="margin-right:4px">${esc(t.symbol || '?')} `
-         + `<b class="${cls}">${sign}${fmt(net, 2)}</b> · ${fmtUsd(t.bought_usd)}</span>`;
+    return `<span class="badge" style="margin-right:4px">${esc(t.symbol || '?')} <b class="${cls}">${net > 0 ? '+' : ''}${fmt(net)}</b></span>`;
   }).join(' ');
 }
 
 async function loadLeaders() {
-  const hours = $('leadersHours').value;
   try {
-    const data = await api(`/api/fomo/leaders?hours=${encodeURIComponent(hours)}&limit=50`);
+    const data = await api(`/api/fomo/leaders?hours=${$('hours').value}&limit=50`);
     if (!data.leaders.length) {
-      $('leadersSummary').innerHTML = '';
       $('leadersWrap').innerHTML = '<div class="empty">За выбранный период сделок не записано.</div>';
       return;
     }
-
-    const totalBought = data.leaders.reduce((a, r) => a + Number(r.bought_usd), 0);
-    const totalSold = data.leaders.reduce((a, r) => a + Number(r.sold_usd), 0);
-    const buyers = data.leaders.filter(r => Number(r.net_flow_usd) > 0).length;
-    const tiles = [
-      ['Трейдеров торговало', data.leaders.length],
-      ['Из них в плюс по потоку', buyers],
-      ['Куплено всего', fmtUsd(totalBought)],
-      ['Продано всего', fmtUsd(totalSold)],
-      ['Net flow', fmtUsd(totalBought - totalSold)],
-    ];
-    $('leadersSummary').innerHTML = tiles.map(([label, value]) =>
-      `<div class="tile"><div class="label">${esc(label)}</div><div class="value">${typeof value === 'string' ? esc(value) : value}</div></div>`
-    ).join('');
-
     const rows = data.leaders.map(r => {
       const net = Number(r.net_flow_usd);
       const netCls = net > 0 ? 'side-buy' : (net < 0 ? 'side-sell' : 'muted');
       return `
       <tr>
-        <td>${r.rank != null ? '#' + r.rank : '<span class="muted">—</span>'}</td>
         <td>${traderLabel(r)}</td>
         <td class="side-buy">${fmtUsd(r.bought_usd)}</td>
         <td class="side-sell">${fmtUsd(r.sold_usd)}</td>
         <td class="${netCls}"><b>${net > 0 ? '+' : ''}${fmtUsd(net)}</b></td>
         <td class="muted">${r.buy_count}/${r.sell_count}</td>
-        <td>${tokenSummary(r.tokens)}</td>
-        <td class="muted">${r.last_trade_at_ms ? new Date(r.last_trade_at_ms).toLocaleString('ru-RU') : '—'}</td>
+        <td>${tokenBadges(r.tokens)}</td>
       </tr>`;
     }).join('');
-
     $('leadersWrap').innerHTML = `
       <table>
-        <thead><tr>
-          <th>Ранг</th><th>Трейдер</th><th>Куплено</th><th>Продано</th><th>Net flow</th>
-          <th>B/S</th><th>Позиция за период</th><th>Последняя сделка</th>
-        </tr></thead>
+        <thead><tr><th>Трейдер</th><th>Куплено</th><th>Продано</th><th>Net flow</th><th>B/S</th><th>Позиция за период</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   } catch (e) {
@@ -341,58 +266,15 @@ async function loadLeaders() {
   }
 }
 
-async function loadTape() {
-  try {
-    const data = await api('/api/fomo/tape?limit=100');
-    if (!data.trades.length) {
-      $('tapeWrap').innerHTML = '<div class="empty">Сделок пока не записано — индексер ещё не догнал историю, или не настроены DEX_WATCH_SYMBOLS.</div>';
-      return;
-    }
-    const rows = data.trades.map(t => `
-      <tr>
-        <td class="muted">${new Date(t.block_time_ms).toLocaleString('ru-RU')}</td>
-        <td>${t.handle ? esc(t.handle) : '<span class="muted">' + esc((t.wallet_address || '').slice(0, 6) + '…' + (t.wallet_address || '').slice(-4)) + '</span>'}</td>
-        <td class="side-${t.side.toLowerCase()}">${t.side}</td>
-        <td>${esc(t.symbol || '?')}</td>
-        <td>${fmt(t.token_amount)}</td>
-        <td>${fmtUsd(t.value_usd)} <span class="badge">${esc(t.pricing_source)}</span></td>
-      </tr>`).join('');
-    $('tapeWrap').innerHTML = `
-      <table>
-        <thead><tr><th>Время</th><th>Трейдер</th><th>Сторона</th><th>Токен</th><th>Кол-во</th><th>Сумма</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
-  } catch (e) {
-    $('tapeWrap').innerHTML = `<div class="empty bad">Ошибка: ${esc(e.message)}</div>`;
-  }
-}
-
-async function loadRaw() {
-  const endpoint = $('rawEndpoint').value;
-  const userId = $('rawUserId').value.trim();
-  const params = new URLSearchParams({endpoint});
-  if (endpoint === 'holders') { params.set('token', $('tokenInput').value.trim() || 'PONS'); params.set('network_id', $('networkInput').value.trim() || '4663'); }
-  if ((endpoint === 'balances' || endpoint === 'trades') && userId) params.set('user_id', userId);
-  try {
-    const data = await api('/api/fomo/raw?' + params.toString());
-    $('rawOutput').textContent = JSON.stringify(data, null, 2);
-  } catch (e) {
-    $('rawOutput').textContent = 'Ошибка: ' + e.message + '\n\n(включите FOMO_DEBUG_API=true, если эндпоинт выключен)';
-  }
-}
+async function loadAll() { await Promise.all([loadCoins(), loadLeaders()]); }
 
 $('saveJwtBtn').onclick = saveJwt;
 $('forgetJwtBtn').onclick = forgetJwt;
-$('analyzeBtn').onclick = analyzeToken;
-$('refreshLeadersBtn').onclick = loadLeaders;
-$('leadersHours').onchange = loadLeaders;
-$('refreshTapeBtn').onclick = loadTape;
-$('loadRawBtn').onclick = loadRaw;
+$('refreshBtn').onclick = loadAll;
+$('hours').onchange = loadAll;
 
 loadStatus();
-loadLeaders();
-loadTape();
-analyzeToken();
+loadAll();
 </script>
 </body>
 </html>

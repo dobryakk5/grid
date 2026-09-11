@@ -7,8 +7,12 @@ the one pair this bot happens to trade. Cost does not grow with the number of
 wallets -- a topic position accepts a set of values, so the whole roster is
 two calls per block range.
 
-Two jobs share one cadence:
+Three jobs share one loop:
 
+0. **Discovery** -- once an hour, look at the watched market and add wallets
+   that have started trading since the roster was last built. Without this
+   the tape only ever sees wallets someone added by hand, and goes stale the
+   moment a new trader shows up.
 1. **Backfill** -- for every ``fomo_traders`` row with
    ``backfilled_from_block IS NULL``, scan that wallet's last
    ``settings.fomo_new_wallet_backfill_blocks`` *before* the global cursor
@@ -29,6 +33,7 @@ the transaction.
 
 import asyncio
 import logging
+import time
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -42,13 +47,15 @@ from app.chain.tape import (
     is_batch_too_large_error,
     price_swap,
 )
+from app.chain.discovery import discover_wallets
 from app.chain.tokens import resolve_token_meta
 from app.core.config import settings
 from app.db.init import init_db
 from app.db.models import ChainScanCursor, ChainSwap, ChainTransaction, FomoTrader
 from app.db.session import SessionLocal
 from app.dex.chain import ChainClient
-from app.dex.tokens import DexConfigError, resolve_token
+from app.dex.tokens import DexConfigError, DexPair, resolve_pair, resolve_token
+from app.workers.dex_sampler import watched_symbols
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -75,6 +82,18 @@ def quote_assets() -> dict[str, str]:
 async def _tracked_wallets(session) -> set[str]:
     result = await session.execute(select(FomoTrader.evm_address).where(FomoTrader.evm_address.is_not(None)))
     return {row for row in result.scalars() if row}
+
+
+async def _resolve_pairs(symbols: list[str]) -> list[DexPair]:
+    """Markets discovery looks at. The tape itself is wallet-filtered and
+    needs no pair -- this is only about where to go looking for new traders."""
+    pairs = []
+    for symbol in symbols:
+        try:
+            pairs.append(resolve_pair(symbol))
+        except DexConfigError as exc:
+            logger.warning("%s skipped: %s", symbol, exc)
+    return pairs
 
 
 async def _store(session, grouped: dict[str, list[dict]], rows: list[ChainSwapRow], *, chain_id: int) -> None:
@@ -154,6 +173,62 @@ async def _fetch_chunked(client, wallets: list[str], from_block: int, to_block: 
         out.extend(await fetch_wallet_transfers(client, wallets, start, end))
         start = end + 1
     return out
+
+
+# ---- discovery ---------------------------------------------------------
+
+
+async def run_discovery_pass(client: ChainClient, *, chain_id: int) -> int:
+    """Add wallets that have started trading since the roster was last built.
+
+    New rows land with ``backfilled_from_block`` NULL, which is the backfill
+    queue -- so a wallet discovered here has its recent history scanned on
+    the same tick, and the trade that surfaced it is not the one trade that
+    goes missing.
+    """
+    pairs = await _resolve_pairs(await watched_symbols())
+    if not pairs:
+        return 0
+
+    candidates: list = []
+    for pair in pairs:
+        candidates.extend(await discover_wallets(
+            client, pair,
+            blocks=settings.wallet_discovery_blocks,
+            top=settings.wallet_discovery_top,
+            chain_id=chain_id,
+        ))
+
+    async with SessionLocal() as session:
+        known = {wallet.lower() for wallet in await _tracked_wallets(session)}
+        fresh = []
+        for candidate in candidates:
+            key = candidate.address.lower()
+            if key in known:
+                continue
+            known.add(key)  # a wallet can rank in two pairs at once
+            fresh.append(candidate)
+
+        for candidate in fresh:
+            statement = insert(FomoTrader).values(
+                # Keyed by address, like the seed file's synthetic ids, so a
+                # wallet later named by hand or by FOMO updates this row
+                # instead of becoming a second identity for one address.
+                fomo_user_id=f"chain:{candidate.address.lower()}",
+                evm_address=candidate.address,
+                source="discovered",
+            )
+            await session.execute(
+                statement.on_conflict_do_nothing(index_elements=[FomoTrader.fomo_user_id])
+            )
+        await session.commit()
+
+    if fresh:
+        logger.info(
+            "discovery: %s new wallet(s), top volume $%s",
+            len(fresh), f"{max(c.volume_usd for c in fresh):,.0f}",
+        )
+    return len(fresh)
 
 
 # ---- backfill ---------------------------------------------------------
@@ -262,10 +337,24 @@ async def main() -> None:
         minimum=settings.chain_tape_block_batch_min,
         maximum=settings.chain_tape_block_batch_max,
     )
-    logger.info("chain tape worker started (every %ss)", settings.chain_tape_poll_seconds)
+    logger.info(
+        "chain tape worker started (every %ss, discovery every %ss)",
+        settings.chain_tape_poll_seconds,
+        settings.wallet_discovery_interval_seconds if settings.wallet_discovery_enabled else "off",
+    )
+    # Run discovery on the first tick so a restart picks up whoever started
+    # trading while the worker was down.
+    last_discovery = 0.0
     try:
         while True:
             try:
+                now = time.monotonic()
+                if settings.wallet_discovery_enabled and (
+                    now - last_discovery >= settings.wallet_discovery_interval_seconds
+                ):
+                    last_discovery = now
+                    await run_discovery_pass(client, chain_id=chain_id)
+
                 backfilled = await run_backfill_pass(client, chain_id=chain_id)
                 if backfilled:
                     logger.info("backfilled %s newly discovered wallets", backfilled)

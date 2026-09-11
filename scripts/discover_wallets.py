@@ -1,34 +1,28 @@
-"""Pick wallets worth tracking, from the chain itself -- no FOMO needed.
+"""Rebuild the wallet seed file from current chain activity, by hand.
 
-Scans a recent block window of the configured market, classifies every swap
-it finds (for *all* addresses, not just tracked ones), ranks wallets by
-traded volume, and writes the top N into the seed file.
-
-This is the honest answer to "which traders should we watch": the ones
-actually moving size in the market we care about. FOMO's leaderboard is a
-nicer label for the same question, but it is not a prerequisite -- and once a
-wallet is tracked, ``app.workers.chain_tape`` records everything it trades,
-not only the pair it was discovered in.
+``app.workers.chain_tape`` now does this automatically every
+``WALLET_DISCOVERY_INTERVAL_SECONDS`` and writes straight to the registry, so
+this script is for the manual case: seeing the ranking before committing to
+it, or regenerating ``config/fomo_wallets.json`` so the chosen wallets are
+checked in rather than only living in the database.
 
 Usage::
 
-    .venv/bin/python scripts/discover_wallets.py --blocks 1000 --top 20
+    .venv/bin/python scripts/discover_wallets.py --blocks 900 --top 20 [--dry-run]
 """
 
 import argparse
 import asyncio
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from web3 import AsyncWeb3  # noqa: E402
-
-from app.chain.tape import classify, fetch_transfers, group_by_tx, is_batch_too_large_error  # noqa: E402
+from app.chain.discovery import discover_wallets  # noqa: E402
+from app.chain.tape import is_batch_too_large_error  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.dex.chain import ChainClient  # noqa: E402
 from app.dex.tokens import DexConfigError, resolve_pair  # noqa: E402
@@ -46,93 +40,49 @@ async def main(blocks: int, top: int, symbol: str, out: Path, write: bool) -> in
     client = ChainClient()
     try:
         await client.ensure_ready()
-        head = await client.w3.eth.block_number
-        from_block = max(head - blocks, 0)
-        print(f"scanning {symbol} over blocks {from_block}..{head}", flush=True)
-
+        print(f"scanning {symbol} over the last {blocks} blocks", flush=True)
         try:
-            transfers = await fetch_transfers(
-                client, [pair.base.address, pair.quote.address], from_block, head
+            ranked = await discover_wallets(
+                client, pair, blocks=blocks, top=top, chain_id=settings.rh_chain_id
             )
         except Exception as exc:
             if is_batch_too_large_error(exc):
                 print(f"RPC refused a {blocks}-block range; retry with a smaller --blocks", file=sys.stderr)
                 return 1
             raise
-        print(f"{len(transfers)} transfer logs", flush=True)
 
-        grouped = group_by_tx(transfers)
-        everyone = {
-            address
-            for tx in grouped.values()
-            for item in tx
-            for address in (item["from_address"], item["to_address"])
-        }
-
-        stats = defaultdict(lambda: {"buys": 0, "sells": 0, "bought": 0.0, "sold": 0.0})
-        for tx_transfers in grouped.values():
-            for row in classify(tx_transfers, everyone, pair, chain_id=settings.rh_chain_id):
-                entry = stats[row.wallet_address]
-                usd = float(row.value_usd or 0)
-                if row.side == "BUY":
-                    entry["buys"] += 1
-                    entry["bought"] += usd
-                else:
-                    entry["sells"] += 1
-                    entry["sold"] += usd
-
-        # Keep only externally-owned accounts. Net-delta classification
-        # happily reports a router, an aggregator or a market-maker contract
-        # as a "trader" -- they do move tokens in and out -- but they are not
-        # someone whose positioning means anything, and scanning one of them
-        # for every token it touches is thousands of transfers per block
-        # range. A wallet with no code is a person.
-        by_volume = sorted(stats.items(), key=lambda kv: -(kv[1]["bought"] + kv[1]["sold"]))
-        ranked = []
-        skipped_contracts = 0
-        for address, entry in by_volume:
-            if len(ranked) >= top:
-                break
-            code = await client.w3.eth.get_code(AsyncWeb3.to_checksum_address(address))
-            if len(bytes(code)) > 0:
-                skipped_contracts += 1
-                continue
-            ranked.append((address, entry))
-        if skipped_contracts:
-            print(f"skipped {skipped_contracts} contract address(es) -- routers/pools, not traders\n")
         if not ranked:
-            print("no swaps classified in this window", file=sys.stderr)
+            print("no wallets classified in this window", file=sys.stderr)
             return 1
 
         print(f"\ntop {len(ranked)} wallets by traded volume:\n")
-        for index, (address, entry) in enumerate(ranked, start=1):
-            volume = entry["bought"] + entry["sold"]
-            print(f"{index:>3}. {address}  vol ${volume:>12,.2f}  "
-                  f"buys {entry['buys']:<3} sells {entry['sells']:<3} "
-                  f"(bought ${entry['bought']:,.0f} / sold ${entry['sold']:,.0f})")
+        for index, candidate in enumerate(ranked, start=1):
+            print(f"{index:>3}. {candidate.address}  vol ${float(candidate.volume_usd):>12,.2f}  "
+                  f"buys {candidate.buys:<3} sells {candidate.sells:<3} "
+                  f"(bought ${float(candidate.bought_usd):,.0f} / sold ${float(candidate.sold_usd):,.0f})")
 
         if write:
             payload = {
                 "_comment": [
                     "Wallets the chain tape watches -- no FOMO session required.",
-                    f"Generated by scripts/discover_wallets.py from {symbol} activity",
-                    f"over blocks {from_block}..{head}, ranked by traded volume.",
-                    "Once tracked, the tape records every token these wallets trade,",
-                    "not only the pair they were discovered in.",
+                    f"Generated by scripts/discover_wallets.py from {symbol} activity,",
+                    "ranked by traded volume, contracts excluded.",
+                    "The worker also discovers wallets on its own schedule; this file",
+                    "is the checked-in roster, useful for seeding a fresh database.",
                     "Add 'handle'/'display_name' by hand when you know who a wallet is.",
                 ],
                 "wallets": [
                     {
-                        "address": address,
-                        "note": f"{symbol}: vol ${entry['bought'] + entry['sold']:,.0f}, "
-                                f"{entry['buys']}B/{entry['sells']}S in discovery window",
+                        "address": candidate.address,
+                        "note": f"{symbol}: vol ${float(candidate.volume_usd):,.0f}, "
+                                f"{candidate.buys}B/{candidate.sells}S in discovery window",
                     }
-                    for address, entry in ranked
+                    for candidate in ranked
                 ],
             }
             out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
             print(f"\nwrote {len(ranked)} wallets to {out.relative_to(ROOT)}")
-            print("next: make fomo-seed && make chain-tape")
+            print("next: make fomo-seed")
         return 0
     finally:
         await client.close()
@@ -140,11 +90,15 @@ async def main(blocks: int, top: int, symbol: str, out: Path, write: bool) -> in
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--blocks", type=int, default=1000)
-    parser.add_argument("--top", type=int, default=20)
+    parser.add_argument("--blocks", type=int, default=None)
+    parser.add_argument("--top", type=int, default=None)
     parser.add_argument("--symbol", default=None, help="defaults to the first DEX_WATCH_SYMBOLS entry")
     parser.add_argument("--out", type=Path, default=DEFAULT_FILE)
     parser.add_argument("--dry-run", action="store_true", help="print the ranking without writing the seed file")
     args = parser.parse_args()
     chosen = args.symbol or (settings.dex_watch_symbols or "PONSUSDG").split(",")[0].strip()
-    raise SystemExit(asyncio.run(main(args.blocks, args.top, chosen, args.out, not args.dry_run)))
+    raise SystemExit(asyncio.run(main(
+        args.blocks if args.blocks is not None else settings.wallet_discovery_blocks,
+        args.top if args.top is not None else settings.wallet_discovery_top,
+        chosen, args.out, not args.dry_run,
+    )))
