@@ -29,9 +29,10 @@ def test_native_eth_pair_needs_no_extra_configuration():
 
 
 def test_unconfigured_token_names_the_env_override():
+    # CASHCAT has no address baked in, so the pair must not resolve to one.
     with pytest.raises(DexConfigError) as exc:
-        resolve_pair("PONSUSDG")
-    assert "USDG" in str(exc.value)
+        resolve_pair("CASHCATUSDG")
+    assert "CASHCAT" in str(exc.value)
     assert "DEX_TOKENS" in str(exc.value)
 
 
@@ -39,18 +40,18 @@ def test_override_supplies_address_and_decimals(monkeypatch):
     monkeypatch.setattr(
         settings,
         "dex_tokens",
-        '{"USDG": {"address": "0x' + "ab" * 20 + '", "decimals": 6}}',
+        '{"CASHCAT": {"address": "0x' + "ab" * 20 + '", "decimals": 8}}',
     )
-    pair = resolve_pair("PONSUSDG")
-    assert pair.quote.address == "0x" + "ab" * 20
-    assert pair.quote.decimals == 6
-    assert pair.quote.unit == Decimal("0.000001")
+    pair = resolve_pair("CASHCATUSDG")
+    assert pair.base.address == "0x" + "ab" * 20
+    assert pair.base.decimals == 8
+    assert pair.base.unit == Decimal("0.00000001")
 
 
 def test_override_rejects_a_non_address(monkeypatch):
-    monkeypatch.setattr(settings, "dex_tokens", '{"USDG": {"address": "0xnope"}}')
+    monkeypatch.setattr(settings, "dex_tokens", '{"CASHCAT": {"address": "0xnope"}}')
     with pytest.raises(DexConfigError):
-        resolve_token("USDG")
+        resolve_token("CASHCAT")
 
 
 def test_override_rejects_broken_json(monkeypatch):
@@ -70,3 +71,23 @@ def test_wei_conversion_roundtrips_at_full_precision():
     token = resolve_token("PONS")
     assert token.to_wei(Decimal("1.5")) == 1_500_000_000_000_000_000
     assert token.from_wei(1_500_000_000_000_000_000) == Decimal("1.5")
+
+
+def test_the_robinhood_chain_stable_pair_resolves_without_any_override():
+    pair = resolve_pair("PONSUSDG")
+
+    assert pair.quote.address == "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+    assert pair.quote.decimals == 6
+    assert pair.base.address == "0x39dbed3a2bd333467115de45665cc57f813c4571"
+
+
+def test_usdc_is_not_a_pair_on_this_chain():
+    # USDC is how capital bridges in; inside Robinhood Chain it is held as USDG.
+    with pytest.raises(DexConfigError):
+        resolve_pair("PONSUSDC")
+
+
+def test_eth_quoted_pools_match_by_address_now_that_weth_is_known():
+    from app.dex.tokens import native_alias_addresses
+
+    assert "0x0bd7d308f8e1639fab988df18a8011f41eacad73" in native_alias_addresses()

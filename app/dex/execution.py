@@ -485,6 +485,7 @@ async def _build_transaction(
         if repository is not None
         else chain_nonce
     )
+    _check_router(swap["to"])
     tx: dict = {
         "chainId": chain.chain_id,
         "nonce": nonce,
@@ -511,6 +512,16 @@ async def _build_transaction(
     else:
         tx.update(await chain.fee_fields())
     return tx
+
+
+def _check_router(target: str) -> None:
+    """Refuse calldata aimed at anything but the router we expect."""
+    expected = (settings.rh_universal_router_address or "").strip()
+    if expected and target.strip().lower() != expected.lower():
+        raise UniswapError(
+            f"swap targets {target}, not the configured Universal Router "
+            f"{expected}; refusing to sign it"
+        )
 
 
 async def _fail(session: AsyncSession, intent: DexIntent, reason: str) -> None:

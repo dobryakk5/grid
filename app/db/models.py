@@ -328,7 +328,9 @@ class DexPriceObservation(Base):
     price_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
     volume_h24_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
-    pair_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Wide enough for a v4 pool id (32 bytes, 66 chars as 0x-hex), not just a
+    # 20-byte pool address -- the main PONS/USDG market is a v4 pool.
+    pair_address: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

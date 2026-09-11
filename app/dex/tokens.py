@@ -91,14 +91,25 @@ class DexPair:
 # decimals for tokens we have not read on chain yet default to 18 (the ERC-20
 # norm). Stage 2 verifies each against the contract's own ``decimals()`` before
 # the first signed transaction.
+# Addresses below are Robinhood Chain (4663) deployments, from Robinhood's own
+# contract list. They are not valid on any other chain: point DEX_CHAIN_SLUG
+# somewhere else and every one of them must be overridden through DEX_TOKENS.
 _BUILTIN_TOKENS: dict[str, Token] = {
     "ETH": Token(symbol="ETH", address=NATIVE_ADDRESS, decimals=18, native=True),
-    # Wrapped ETH on Robinhood Chain -- needed to recognise ETH-quoted pools.
-    "WETH": Token(symbol="WETH", address="", decimals=18),
-    "USDG": Token(symbol="USDG", address="", decimals=6),
-    # Addresses are per chain: USDC on Ethereum is not USDC on Robinhood Chain,
-    # so this one is configured rather than baked in.
-    "USDC": Token(symbol="USDC", address="", decimals=6),
+    # Pools hold WETH, never native ETH, so ETH-quoted pairs match through this.
+    "WETH": Token(
+        symbol="WETH",
+        address="0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+        decimals=18,
+    ),
+    # The stablecoin Robinhood Chain actually publishes. USDC is a bridge-in
+    # transport on other chains, not the capital we hold here, so it is
+    # deliberately not a pair.
+    "USDG": Token(
+        symbol="USDG",
+        address="0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+        decimals=6,
+    ),
     # Official PONS contract (same address on CoinGecko and the main PONS market).
     "PONS": Token(
         symbol="PONS",
@@ -112,7 +123,6 @@ _BUILTIN_PAIRS: dict[str, tuple[str, str, Decimal]] = {
     # symbol -> (base, quote, tick_size)
     "PONSETH": ("PONS", "ETH", Decimal("0.0000000001")),
     "PONSUSDG": ("PONS", "USDG", Decimal("0.0001")),
-    "PONSUSDC": ("PONS", "USDC", Decimal("0.0001")),
     "CASHCATETH": ("CASHCAT", "ETH", Decimal("0.0000000001")),
     "CASHCATUSDG": ("CASHCAT", "USDG", Decimal("0.000001")),
 }

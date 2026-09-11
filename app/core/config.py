@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # Robinhood Chain only ever deployed Universal Router 2.1.1; asking for 2.0
     # is an error there, so the version is pinned rather than left to a default.
     rh_universal_router_version: str = "2.1.1"
+    # The only Universal Router deployed on Robinhood Chain. Swap calldata is
+    # refused if it points anywhere else -- we are about to sign it, and a
+    # transaction to an unexpected contract is not something to find out about
+    # afterwards. Blank disables the check.
+    rh_universal_router_address: str = "0x8876789976decbfcbbbe364623c63652db8c0904"
 
     dex_chain_slug: str = "robinhood"
     dexscreener_base_url: str = "https://api.dexscreener.com"
@@ -93,7 +98,7 @@ class Settings(BaseSettings):
     # Price sampler cadence; samples aggregate into 1m candles.
     dex_sample_seconds: float = 15.0
     # Pairs the sampler watches on top of any profile using exchange=robinhood.
-    dex_watch_symbols: str = "PONSETH"
+    dex_watch_symbols: str = "PONSUSDG"
 
 
 settings = Settings()

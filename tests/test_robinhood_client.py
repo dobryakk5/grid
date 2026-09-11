@@ -146,12 +146,13 @@ async def test_wallet_balance_reports_per_coin_errors_instead_of_failing(monkeyp
         market=DexScreenerClient(http=FakeHttpClient([POOL])), chain=FakeChain()
     )
 
-    result = (await exchange.wallet_balance("ETH,USDG"))["result"]
+    result = (await exchange.wallet_balance("ETH,USDG,CASHCAT"))["result"]
 
     by_coin = {row["coin"]: row for row in result["balances"]}
     assert by_coin["ETH"]["walletBalance"] == "0.008"
-    # USDG has no address configured; that is reported, not raised.
-    assert "DEX_TOKENS" in by_coin["USDG"]["error"]
+    assert by_coin["USDG"]["walletBalance"] == "1250"
+    # CASHCAT has no address configured; that is reported, not raised.
+    assert "DEX_TOKENS" in by_coin["CASHCAT"]["error"]
 
 
 class FakeIntent:

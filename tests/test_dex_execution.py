@@ -7,7 +7,7 @@ from app.dex.dexscreener import MarketSnapshot
 from app.dex.execution import execute_buy
 from app.dex.intents import IntentStatus
 from app.dex.tokens import resolve_pair
-from app.dex.uniswap import QuoteResult
+from app.dex.uniswap import QuoteResult, UniswapError
 
 
 WALLET = "0x" + "99" * 20
@@ -295,3 +295,18 @@ async def test_a_sell_approves_the_token_it_spends_not_the_one_it_receives():
 
     assert "allowance:PONS" in chain.calls
     assert "would first approve PONS" in outcome.reason
+
+
+async def test_calldata_aimed_at_an_unknown_contract_is_not_signed(monkeypatch):
+    from app.dex.execution import _check_router
+
+    monkeypatch.setattr(
+        settings, "rh_universal_router_address",
+        "0x8876789976decbfcbbbe364623c63652db8c0904",
+    )
+    # The router itself, in any casing, is fine.
+    _check_router("0x8876789976DECBFCBBBE364623C63652DB8C0904")
+
+    with pytest.raises(UniswapError) as exc:
+        _check_router("0x" + "ee" * 20)
+    assert "refusing to sign" in str(exc.value)
