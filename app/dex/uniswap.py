@@ -60,12 +60,19 @@ class QuoteResult:
     def needs_permit(self) -> bool:
         return bool(self.permit_data)
 
-    def price(self, pair: DexPair) -> Decimal:
+    def price(self, pair: DexPair, side: str = "Buy") -> Decimal:
         """Executable price of one base token, in quote terms.
 
         Derived from the quoted amounts rather than from any price field, so it
-        already carries routing and price impact for this size.
+        already carries routing and price impact for this size. Both directions
+        return quote-per-base, so a limit compares the same way regardless of
+        which token is being spent.
         """
+        if side.strip().lower() == "sell":
+            base_in = pair.base.from_wei(self.amount_in)
+            if base_in <= 0:
+                raise UniswapError("quote has no input amount")
+            return pair.quote.from_wei(self.amount_out) / base_in
         base_out = pair.base.from_wei(self.amount_out)
         if base_out <= 0:
             raise UniswapError("quote returned no output amount")

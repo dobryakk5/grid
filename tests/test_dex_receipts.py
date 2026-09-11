@@ -145,3 +145,25 @@ def test_non_transfer_logs_are_ignored():
         transfer(PONS, POOL_A, WALLET, 5),
     ]
     assert wallet_deltas(logs, WALLET) == {PONS.address.lower(): 5}
+
+
+def test_a_native_output_cannot_be_read_from_logs_alone():
+    # Selling into ETH: the ETH arriving emits no event at all.
+    logs = [transfer(PONS, WALLET, POOL_A, 100_000_000_000_000_000_000)]
+    with pytest.raises(ReceiptError) as exc:
+        parse_swap_fill(receipt(logs), wallet=WALLET, token_in=PONS, token_out=ETH)
+    assert "measured separately" in str(exc.value)
+
+
+def test_a_native_output_measured_by_the_caller_completes_the_fill():
+    logs = [transfer(PONS, WALLET, POOL_A, 100_000_000_000_000_000_000)]
+    fill = parse_swap_fill(
+        receipt(logs),
+        wallet=WALLET,
+        token_in=PONS,
+        token_out=ETH,
+        native_out_wei=23_000_000_000_000_000,
+    )
+
+    assert fill.amount_in(PONS) == Decimal("100")
+    assert fill.amount_out(ETH) == Decimal("0.023")

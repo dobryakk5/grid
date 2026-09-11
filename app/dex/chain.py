@@ -287,6 +287,31 @@ class ChainClient:
             raise ChainError(f"broadcast failed: {exc}") from None
         return "0x" + sent.hex().removeprefix("0x")
 
+    async def native_received(
+        self,
+        *,
+        block_number: int,
+        gas_wei: int,
+        value_sent_wei: int = 0,
+        address: str | None = None,
+    ) -> int:
+        """How much native coin the wallet gained in ``block_number``.
+
+        Receiving ETH emits no log, so the only honest measure is the balance
+        either side of the block, with what we spent ourselves added back:
+
+            received = after - before + value_sent + gas_paid
+
+        This assumes the wallet had no other transaction in that same block,
+        which holds for a bot wallet sending one swap at a time. A second
+        concurrent sender on the same key would make this wrong, which is one
+        more reason the trading wallet is its own account.
+        """
+        target = AsyncWeb3.to_checksum_address(address or self.wallet_address)
+        after = await self.w3.eth.get_balance(target, block_identifier=block_number)
+        before = await self.w3.eth.get_balance(target, block_identifier=block_number - 1)
+        return int(after) - int(before) + int(value_sent_wei) + int(gas_wei)
+
     async def receipt(self, tx_hash: str) -> dict | None:
         """One poll. ``None`` means still pending, not missing."""
         try:

@@ -86,3 +86,21 @@ async def test_native_balance_scales_out_of_wei():
     chain.w3.eth = FakeEth()
 
     assert await chain.native_balance() == Decimal("0.008")
+
+
+async def test_native_received_adds_back_what_we_spent_ourselves():
+    chain = client(private_key=KEY)
+    balances = {41: 1_000_000_000_000_000_000, 42: 1_022_600_000_000_000_000}
+
+    class FakeEth:
+        async def get_balance(self, address, block_identifier=None):
+            return balances[block_identifier]
+
+    chain.w3.eth = FakeEth()
+
+    # Balance rose 0.0226 ETH while 0.0004 went to gas: 0.023 actually arrived.
+    received = await chain.native_received(
+        block_number=42, gas_wei=400_000_000_000_000, value_sent_wei=0
+    )
+
+    assert received == 23_000_000_000_000_000

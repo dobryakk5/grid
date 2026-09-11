@@ -113,13 +113,18 @@ def parse_swap_fill(
     token_in: Token,
     token_out: Token,
     sent_value_wei: int = 0,
+    native_out_wei: int | None = None,
 ) -> FillReport:
     """Read the realised amounts of one swap.
 
-    ``sent_value_wei`` is the transaction's ``value`` and is how a native-coin
-    input is measured: ETH movements produce no ``Transfer`` log. The router
-    refunds unspent ETH by plain transfer, which is likewise invisible here, so
-    for an exact-input swap treat this as the amount committed.
+    Native-coin movements never appear in logs, so each direction needs a number
+    from outside them:
+
+    * as input, ``sent_value_wei`` -- the transaction's own ``value``. The
+      router refunds unspent ETH by plain transfer, equally invisible here, so
+      for an exact-input swap this is the amount committed.
+    * as output, ``native_out_wei`` -- measured by the caller from the wallet's
+      balance across the block (see ``ChainClient.native_received``).
     """
     if int(receipt.get("status", 0)) != 1:
         raise ReceiptError(
@@ -128,9 +133,15 @@ def parse_swap_fill(
 
     deltas = wallet_deltas(receipt.get("logs"), wallet)
 
-    amount_out = deltas.get(token_out.address.lower(), 0)
     if token_out.native:
-        raise ReceiptError("native-coin output is not supported yet")
+        if native_out_wei is None:
+            raise ReceiptError(
+                f"{token_out.symbol} is the native coin; its received amount "
+                "cannot be read from logs and must be measured separately"
+            )
+        amount_out = int(native_out_wei)
+    else:
+        amount_out = deltas.get(token_out.address.lower(), 0)
     if amount_out <= 0:
         raise ReceiptError(
             f"receipt shows no {token_out.symbol} arriving at {wallet}"

@@ -8,8 +8,12 @@ The signed payload's hash is known before it reaches a node, so persisting it
 under the reserved nonce *before* broadcasting is what makes a crash survivable:
 a restarted process finds a row saying "SUBMITTING, hash 0x…, nonce 137" and can
 ask the chain what happened, or re-broadcast that same payload. It never gets to
-decide to buy again. Anything that dies before the commit never spent a nonce
+decide to trade again. Anything that dies before the commit never spent a nonce
 and never sent anything.
+
+Both directions go through one function. A buy spends the quote token to receive
+base, a sell does the reverse, but the limit always compares quote-per-base, so
+"fill at my price or better" means the same thing either way.
 
 ``DEX_DRY_RUN`` defaults to true, and every path stops before signing while it
 is on.
@@ -28,15 +32,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import DexIntent
 from app.dex.approvals import ensure_allowance, sign_permit
+from app.dex.accounting import execution_values, realised_price
 from app.dex.chain import ChainClient, ChainError, to_int
-from app.dex.dexscreener import DexScreenerClient
+from app.dex.dexscreener import DexScreenerClient, MarketSnapshot
 from app.dex.intents import IntentStatus, assert_transition
+from app.dex.pricing import GasCost, PricingError, convert_gas
 from app.dex.receipts import FillReport, ReceiptError, parse_swap_fill
 from app.dex.risk import evaluate
-from app.dex.tokens import resolve_pair
+from app.dex.tokens import DexPair, Token, resolve_pair
 from app.dex.uniswap import UniswapClient, UniswapError
 
-__all__ = ["SwapOutcome", "execute_buy"]
+__all__ = ["SwapOutcome", "execute_buy", "execute_sell", "execute_swap"]
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +57,7 @@ class SwapOutcome:
 
     status: str
     symbol: str
+    side: str = "Buy"
     reason: str = ""
     market_price: Decimal | None = None
     quoted_price: Decimal | None = None
@@ -58,9 +65,11 @@ class SwapOutcome:
     amount_in: Decimal | None = None
     amount_out: Decimal | None = None
     gas_native: Decimal | None = None
+    gas_quote: Decimal | None = None
     tx_hash: str | None = None
     approval_tx_hash: str | None = None
     intent_id: int | None = None
+    execution_values: dict | None = None
 
     @property
     def traded(self) -> bool:
@@ -71,10 +80,33 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def execute_buy(
+def _is_sell(side: str) -> bool:
+    normalized = side.strip().lower()
+    if normalized not in {"buy", "sell"}:
+        raise UniswapError(f"unknown side {side!r}")
+    return normalized == "sell"
+
+
+def _direction(pair: DexPair, side: str) -> tuple[Token, Token]:
+    """``(spent, received)`` for this direction."""
+    return (pair.base, pair.quote) if _is_sell(side) else (pair.quote, pair.base)
+
+
+def _within_trigger_band(price: Decimal, limit: Decimal, *, selling: bool) -> bool:
+    """Is the pool price close enough to the level to be worth a quote?"""
+    band = settings.dex_quote_trigger_band_pct / 100
+    return price >= limit * (1 - band) if selling else price <= limit * (1 + band)
+
+
+def _meets_limit(executable: Decimal, limit: Decimal, *, selling: bool) -> bool:
+    return executable >= limit if selling else executable <= limit
+
+
+async def execute_swap(
     session: AsyncSession | None,
     *,
     symbol: str,
+    side: str,
     amount_in: Decimal,
     limit_price: Decimal,
     chain: ChainClient,
@@ -84,13 +116,16 @@ async def execute_buy(
     profile_id: int | None = None,
     order_link_id: str | None = None,
 ) -> SwapOutcome:
-    """Buy the pair's base token with ``amount_in`` of its quote token.
+    """Trade ``amount_in`` of the spent token, at ``limit_price`` or better.
 
-    ``limit_price`` is a ceiling on the *executable* price, not on the pool mid:
-    a quote worse than it is declined, which is what keeps a synthetic limit
-    order from degenerating into a market order.
+    ``limit_price`` is always quote-per-base and always a bound on the
+    *executable* price for this size, never on the pool mid: a buy declines a
+    quote above it, a sell declines one below. That is what keeps a synthetic
+    limit order from degenerating into a market order.
     """
     pair = resolve_pair(symbol)
+    selling = _is_sell(side)
+    token_in, token_out = _direction(pair, side)
     dry = settings.dex_dry_run if dry_run is None else dry_run
 
     snapshot = await market.snapshot(pair)
@@ -99,17 +134,21 @@ async def execute_buy(
         return SwapOutcome(
             status=IntentStatus.BLOCKED,
             symbol=pair.symbol,
+            side=side,
             reason="; ".join(verdict.reasons),
             market_price=snapshot.price_quote,
         )
 
     # The cheap watcher decides whether a quote is worth spending at all.
-    band = limit_price * (1 + settings.dex_quote_trigger_band_pct / 100)
-    if snapshot.price_quote > band:
+    if not _within_trigger_band(snapshot.price_quote, limit_price, selling=selling):
         return SwapOutcome(
             status=IntentStatus.WAITING,
             symbol=pair.symbol,
-            reason=f"pool price {snapshot.price_quote} is outside the trigger band {band}",
+            side=side,
+            reason=(
+                f"pool price {snapshot.price_quote} is outside the trigger band "
+                f"around {limit_price}"
+            ),
             market_price=snapshot.price_quote,
         )
 
@@ -117,17 +156,18 @@ async def execute_buy(
     # A wrong decimals value rescales every amount silently; check before money.
     await chain.verify_token(pair.base)
 
-    amount_in_wei = pair.quote.to_wei(amount_in)
+    amount_in_wei = token_in.to_wei(amount_in)
     balance = (
         await chain.native_balance()
-        if pair.quote.native
-        else await chain.token_balance(pair.quote)
+        if token_in.native
+        else await chain.token_balance(token_in)
     )
     if balance < amount_in:
         return SwapOutcome(
             status=IntentStatus.BLOCKED,
             symbol=pair.symbol,
-            reason=f"wallet holds {balance} {pair.quote_coin}, needs {amount_in}",
+            side=side,
+            reason=f"wallet holds {balance} {token_in.symbol}, needs {amount_in}",
             market_price=snapshot.price_quote,
         )
 
@@ -135,22 +175,23 @@ async def execute_buy(
     # move it; native ETH needs none. A live approval is waited out here, so the
     # swap that follows signs against an allowance that is already on chain.
     approval = None
-    if not pair.quote.native:
+    if not token_in.native:
         approval = await ensure_allowance(
-            chain, pair.quote, amount_wei=amount_in_wei, dry_run=dry
+            chain, token_in, amount_wei=amount_in_wei, dry_run=dry
         )
 
     quote = await uniswap.quote_exact_in(
         pair=pair,
-        side="Buy",
+        side=side,
         amount_in_wei=amount_in_wei,
         swapper=chain.wallet_address,
     )
-    executable = quote.price(pair)
-    if executable > limit_price:
+    executable = quote.price(pair, side)
+    if not _meets_limit(executable, limit_price, selling=selling):
         return SwapOutcome(
             status=IntentStatus.WAITING,
             symbol=pair.symbol,
+            side=side,
             reason=(
                 f"executable price {executable} is worse than the limit "
                 f"{limit_price} for this size"
@@ -159,7 +200,7 @@ async def execute_buy(
             quoted_price=executable,
         )
 
-    expected_out = pair.base.from_wei(quote.amount_out)
+    expected_out = token_out.from_wei(quote.amount_out)
     if dry:
         notes = ["DEX_DRY_RUN is on; nothing was signed or sent"]
         if approval is not None and not approval.sufficient:
@@ -171,6 +212,7 @@ async def execute_buy(
         return SwapOutcome(
             status="DRY_RUN",
             symbol=pair.symbol,
+            side=side,
             reason="; ".join(notes),
             market_price=snapshot.price_quote,
             quoted_price=executable,
@@ -182,8 +224,8 @@ async def execute_buy(
 
     signature = sign_permit(chain, quote.permit_data) if quote.needs_permit else None
     swap = await uniswap.build_swap(quote, signature=signature)
-    tx = await _build_transaction(chain, swap, pair_is_native_in=pair.quote.native)
-    if pair.quote.native and int(tx["value"]) != amount_in_wei:
+    tx = await _build_transaction(chain, swap, native_input=token_in.native)
+    if token_in.native and int(tx["value"]) != amount_in_wei:
         # The router built something other than what we asked to spend.
         raise UniswapError(
             f"swap value {tx['value']} does not match the quoted input {amount_in_wei}"
@@ -196,11 +238,11 @@ async def execute_buy(
         profile_id=profile_id,
         order_link_id=order_link_id or uuid.uuid4().hex,
         symbol=pair.symbol,
-        side="Buy",
+        side="Sell" if selling else "Buy",
         status=IntentStatus.SUBMITTING,
         limit_price=limit_price,
         amount_in=amount_in,
-        amount_in_coin=pair.quote_coin,
+        amount_in_coin=token_in.symbol,
         min_amount_out=expected_out,
         baseline_liquidity_usd=snapshot.token_liquidity_usd,
         baseline_volume_h24_usd=snapshot.token_volume_h24,
@@ -221,6 +263,7 @@ async def execute_buy(
         return SwapOutcome(
             status=IntentStatus.FAILED,
             symbol=pair.symbol,
+            side=side,
             reason=str(exc),
             tx_hash=signed.tx_hash,
             approval_tx_hash=intent.approval_tx_hash,
@@ -234,11 +277,12 @@ async def execute_buy(
 
     try:
         receipt = await chain.wait_for_receipt(signed.tx_hash)
-        fill = parse_swap_fill(
+        fill = await _read_fill(
+            chain,
             receipt,
             wallet=signed.wallet_address,
-            token_in=pair.quote,
-            token_out=pair.base,
+            token_in=token_in,
+            token_out=token_out,
             sent_value_wei=int(tx["value"]),
         )
     except (ChainError, ReceiptError) as exc:
@@ -248,25 +292,83 @@ async def execute_buy(
             await _fail(session, intent, str(exc))
             status = IntentStatus.FAILED
         else:
-            intent.last_error = str(exc)
+            intent.last_error = str(exc)[:500]
             await session.commit()
             status = IntentStatus.PENDING
         return SwapOutcome(
             status=status,
             symbol=pair.symbol,
+            side=side,
             reason=str(exc),
             tx_hash=signed.tx_hash,
             approval_tx_hash=intent.approval_tx_hash,
             intent_id=intent.id,
         )
 
+    gas = await _price_gas(market, pair, snapshot, fill)
     return await _record_fill(
-        session, intent, pair=pair, fill=fill, quoted_price=executable
+        session, intent, pair=pair, side=side, fill=fill, gas=gas,
+        quoted_price=executable,
     )
 
 
+async def execute_buy(session: AsyncSession | None, **kwargs) -> SwapOutcome:
+    return await execute_swap(session, side="Buy", **kwargs)
+
+
+async def execute_sell(session: AsyncSession | None, **kwargs) -> SwapOutcome:
+    return await execute_swap(session, side="Sell", **kwargs)
+
+
+async def _read_fill(
+    chain: ChainClient,
+    receipt: dict,
+    *,
+    wallet: str,
+    token_in: Token,
+    token_out: Token,
+    sent_value_wei: int,
+) -> FillReport:
+    """Parse the receipt, measuring a native output from balances if needed."""
+    native_out_wei = None
+    if token_out.native:
+        gas_wei = int(receipt.get("gasUsed") or 0) * int(
+            receipt.get("effectiveGasPrice") or 0
+        )
+        native_out_wei = await chain.native_received(
+            block_number=int(receipt["blockNumber"]),
+            gas_wei=gas_wei,
+            value_sent_wei=sent_value_wei,
+            address=wallet,
+        )
+    return parse_swap_fill(
+        receipt,
+        wallet=wallet,
+        token_in=token_in,
+        token_out=token_out,
+        sent_value_wei=sent_value_wei,
+        native_out_wei=native_out_wei,
+    )
+
+
+async def _price_gas(
+    market: DexScreenerClient,
+    pair: DexPair,
+    snapshot: MarketSnapshot,
+    fill: FillReport,
+) -> GasCost | None:
+    """Value the gas in quote terms; a missing rate must not lose the fill."""
+    try:
+        return await convert_gas(market, pair, snapshot, fill.gas_native)
+    except PricingError as exc:
+        logger.warning(
+            "%s gas stays unconverted (%s ETH): %s", pair.symbol, fill.gas_native, exc
+        )
+        return None
+
+
 async def _build_transaction(
-    chain: ChainClient, swap: dict, *, pair_is_native_in: bool
+    chain: ChainClient, swap: dict, *, native_input: bool
 ) -> dict:
     tx: dict = {
         "chainId": chain.chain_id,
@@ -275,7 +377,7 @@ async def _build_transaction(
         "data": swap["data"],
         "value": to_int(swap.get("value")) or 0,
     }
-    if not pair_is_native_in and tx["value"]:
+    if not native_input and tx["value"]:
         raise UniswapError("ERC-20 input must not carry a native value")
 
     gas_limit = to_int(swap.get("gasLimit")) or to_int(swap.get("gas"))
@@ -307,13 +409,16 @@ async def _record_fill(
     session: AsyncSession,
     intent: DexIntent,
     *,
-    pair,
+    pair: DexPair,
+    side: str,
     fill: FillReport,
+    gas: GasCost | None,
     quoted_price: Decimal,
 ) -> SwapOutcome:
-    amount_in = fill.amount_in(pair.quote)
-    amount_out = fill.amount_out(pair.base)
-    price = fill.price(token_in=pair.quote, token_out=pair.base)
+    token_in, token_out = _direction(pair, side)
+    amount_in = fill.amount_in(token_in)
+    amount_out = fill.amount_out(token_out)
+    price = realised_price(fill, pair, side)
 
     assert_transition(intent.status, IntentStatus.FILLED)
     intent.status = IntentStatus.FILLED
@@ -321,6 +426,9 @@ async def _record_fill(
     intent.filled_amount_out = amount_out
     intent.fill_price = price
     intent.gas_native = fill.gas_native
+    intent.gas_quote = gas.quote if gas is not None else None
+    intent.gas_quote_coin = gas.quote_coin if gas is not None else None
+    intent.native_quote_rate = gas.rate if gas is not None else None
     intent.confirmed_block = fill.block_number
     intent.block_hash = fill.block_hash
     # The payload only exists to make a re-broadcast possible; it is confirmed.
@@ -328,19 +436,28 @@ async def _record_fill(
     await session.commit()
 
     logger.info(
-        "%s filled: %s %s -> %s %s at %s (gas %s ETH, tx %s)",
-        intent.symbol, amount_in, pair.quote_coin, amount_out, pair.base_coin,
-        price, fill.gas_native, fill.tx_hash,
+        "%s %s filled: %s %s -> %s %s at %s (gas %s ETH%s, tx %s)",
+        intent.symbol, intent.side, amount_in, token_in.symbol,
+        amount_out, token_out.symbol, price, fill.gas_native,
+        f" = {gas.quote} {gas.quote_coin}" if gas is not None else " unconverted",
+        fill.tx_hash,
     )
     return SwapOutcome(
         status=IntentStatus.FILLED,
         symbol=intent.symbol,
+        side=intent.side,
         quoted_price=quoted_price,
         fill_price=price,
         amount_in=amount_in,
         amount_out=amount_out,
         gas_native=fill.gas_native,
+        gas_quote=gas.quote if gas is not None else None,
         tx_hash=fill.tx_hash,
         approval_tx_hash=intent.approval_tx_hash,
         intent_id=intent.id,
+        execution_values=execution_values(
+            pair=pair, side=side, fill=fill, gas=gas,
+            exec_time_ms=int(intent.submitted_at.timestamp() * 1000)
+            if intent.submitted_at else None,
+        ),
     )

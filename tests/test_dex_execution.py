@@ -243,3 +243,55 @@ async def test_a_permit_requiring_quote_is_announced_in_a_dry_run(monkeypatch):
     outcome = await buy_usdg(uniswap=uniswap)
 
     assert "Permit2 signature" in outcome.reason
+
+
+async def sell(*, chain=None, uniswap=None, market=None, limit="0.00022",
+               amount="100", dry_run=None):
+    from app.dex.execution import execute_sell
+
+    return await execute_sell(
+        None,
+        symbol="PONSETH",
+        amount_in=Decimal(amount),
+        limit_price=Decimal(limit),
+        chain=chain or FakeChain(balance="1000"),
+        # 100 PONS for 0.023 ETH is 0.00023 -- better than the 0.00022 floor.
+        uniswap=uniswap or FakeUniswap(amount_out="23000000000000000"),
+        market=market or FakeMarket(price="0.00023"),
+        dry_run=dry_run,
+    )
+
+
+async def test_a_sell_quotes_when_the_price_rises_to_the_level():
+    outcome = await sell()
+
+    assert outcome.status == "DRY_RUN"
+    assert outcome.side == "Sell"
+    assert outcome.quoted_price == Decimal("0.00023")
+    # Spent in PONS, received in ETH.
+    assert outcome.amount_in == Decimal("100")
+    assert outcome.amount_out == Decimal("0.023")
+
+
+async def test_a_sell_below_its_floor_does_not_spend_a_quote():
+    uniswap = FakeUniswap()
+    outcome = await sell(uniswap=uniswap, market=FakeMarket(price="0.0001"))
+
+    assert outcome.status == IntentStatus.WAITING
+    assert uniswap.calls == []
+
+
+async def test_a_sell_quote_below_the_floor_is_declined():
+    # 100 PONS for 0.021 ETH is 0.00021, under the 0.00022 floor.
+    outcome = await sell(uniswap=FakeUniswap(amount_out="21000000000000000"))
+
+    assert outcome.status == IntentStatus.WAITING
+    assert "worse than the limit" in outcome.reason
+
+
+async def test_a_sell_approves_the_token_it_spends_not_the_one_it_receives():
+    chain = FakeChain(balance="1000", allowance=0)
+    outcome = await sell(chain=chain)
+
+    assert "allowance:PONS" in chain.calls
+    assert "would first approve PONS" in outcome.reason

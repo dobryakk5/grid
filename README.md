@@ -76,7 +76,22 @@ curl -s "http://127.0.0.1:8000/api/dex/PONSETH/snapshot" | python3 -m json.tool
 - `app/dex/receipts.py` — фактический fill считается как **дельта баланса
   кошелька** по каждому токену, а не поиском одного `Transfer`: маршрут
   `USDG → WETH → PONS` пишет цепочку логов, большая часть которых между пулами.
-  Нативный вход измеряется по `value` транзакции (у ETH нет `Transfer`);
+  Нативная сторона считается вне логов: вход — по `value` транзакции, выход — по
+  балансу кошелька вокруг блока (`received = after - before + value + gas`), так
+  как приходящий ETH тоже не пишет события. Это предполагает, что в том же блоке
+  у кошелька не было других транзакций — ещё одна причина держать торговый
+  кошелёк отдельным;
+- `app/dex/pricing.py` — газ платится в ETH, который не является ни базой, ни
+  котировкой пары PONS/USDG. Без конверсии он попадает в `unconverted_fees`
+  ([pnl.py:56](app/trading/pnl.py:56)) и тихо исчезает из PnL. Курс берётся из
+  пулов, которые мы и так читаем: DexScreener отдаёт базовый токен и в USD, и в
+  котировке, поэтому `price_usd / price_quote` — это цена котируемого токена в
+  долларах, а тот же расчёт по ETH-пулу даёт цену газа. Если пара уже
+  котируется в ETH, курс равен 1 и запрос не делается;
+- `app/dex/accounting.py` — перевод подтверждённого swap'а в поля
+  `GridExecution`: `exec_fee` в котировке (её суммирует PnL), а исходные
+  `fee_native_amount` / `fee_native_coin` остаются рядом. Хеш транзакции
+  выступает `exec_id`. Чистая функция — считается без цепочки и без БД;
 - `app/dex/execution.py` — порядок, ради которого всё это и делалось:
 
 ```text
@@ -104,11 +119,16 @@ quote → проверка лимита → build → sign → PERSIST → broad
 
 `DEX_DRY_RUN=true` по умолчанию: без явного выключения ничего не подписывается.
 
+Обе стороны идут через одну функцию: покупка тратит котировку и получает базу,
+продажа наоборот, но лимит всегда в «котировка за базу» — покупка исполняется по
+нему или ниже, продажа по нему или выше.
+
 Ручной end-to-end прогон:
 
 ```bash
-scripts/dex_buy.py --symbol PONSETH --amount 0.001 --limit 0.00022
-scripts/dex_buy.py --symbol PONSETH --amount 0.001 --limit 0.00022 --execute
+scripts/dex_swap.py --symbol PONSETH --side buy  --amount 0.001 --limit 0.00022
+scripts/dex_swap.py --symbol PONSETH --side sell --amount 100   --limit 0.00025
+scripts/dex_swap.py --symbol PONSETH --side buy  --amount 0.001 --limit 0.00022 --execute
 ```
 
 `--execute` дополнительно требует `DEX_DRY_RUN=false` в `.env` — одного флага
@@ -123,9 +143,14 @@ scripts/dex_allowance.py --token USDG --revoke
 Лимит проверяется по **исполнимой** цене из котировки на реальный размер, а не
 по mid пула: котировка хуже лимита → `WAITING`, а не «купим по рынку».
 
-Что ещё не сделано (по этапам): продажи и учёт газа в quote для PnL →
-synthetic limits в воркере (nonce manager, retry, gas bump) → подключение к
-гриду → hardening (reorg, kill switch, spend cap).
+Что ещё не сделано (по этапам): synthetic limits в воркере (nonce manager,
+retry, gas bump) → подключение к гриду → hardening (reorg, kill switch,
+spend cap).
+
+Известное место под этап 6: [grid.py:1267](app/trading/grid.py:1267) считает
+quote-комиссией только `USDT`/`USDC`, а [grid.py:1235](app/trading/grid.py:1235)
+не умеет отрезать `USDG` от символа. `accounting.py` уже отдаёт готовые поля, но
+движок их пока не принимает.
 
 ## Что изменилось в v0.8
 

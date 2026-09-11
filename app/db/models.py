@@ -392,6 +392,11 @@ class DexIntent(Base):
     fill_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     gas_native: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     gas_native_coin: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # Gas valued in the pair's quote currency, with the rate it was valued at,
+    # so PnL can sum it without the original figure being lost.
+    gas_quote: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    gas_quote_coin: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    native_quote_rate: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
 
     execution_id: Mapped[int | None] = mapped_column(
         ForeignKey("grid_executions.id", ondelete="SET NULL"), nullable=True, unique=True

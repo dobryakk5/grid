@@ -25,6 +25,7 @@ __all__ = [
     "Token",
     "DexPair",
     "list_pairs",
+    "native_pair_for",
     "resolve_pair",
     "resolve_token",
 ]
@@ -173,6 +174,22 @@ def is_native_symbol(symbol: str) -> bool:
 
 def list_pairs() -> tuple[str, ...]:
     return tuple(sorted(_BUILTIN_PAIRS))
+
+
+def native_pair_for(pair: DexPair) -> DexPair:
+    """The same base token priced in the gas coin.
+
+    Used to value gas in the pair's quote currency: DexScreener knows the base
+    token's USD price, and its ETH-quoted pool turns that into an ETH price.
+    """
+    return DexPair(
+        symbol=f"{pair.base.symbol}ETH",
+        base=pair.base,
+        quote=resolve_token("ETH"),
+        chain=pair.chain,
+        tick_size=pair.tick_size,
+        min_order_quote=pair.min_order_quote,
+    )
 
 
 def resolve_pair(symbol: str) -> DexPair:
