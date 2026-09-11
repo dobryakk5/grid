@@ -104,10 +104,57 @@ async def test_api_key_info_reports_config_without_key_material():
         lambda c: c.cancel_order(order_id="1", symbol="PONSETH"),
         lambda c: c.get_order(order_id="1", symbol="PONSETH"),
         lambda c: c.get_executions(order_id="1", symbol="PONSETH"),
-        lambda c: c.available_balance("ETH"),
     ],
 )
 async def test_fund_moving_calls_refuse_loudly_and_name_their_stage(call):
     with pytest.raises(DexNotImplementedError) as exc:
         await call(client())
     assert "stage" in str(exc.value)
+
+
+class FakeChain:
+    def __init__(self):
+        self.wallet_address = "0x" + "99" * 20
+
+    async def native_balance(self, address=None):
+        return Decimal("0.008")
+
+    async def token_balance(self, token, address=None):
+        return Decimal("1250")
+
+    async def close(self):
+        pass
+
+
+async def test_balances_need_an_rpc_and_say_so(monkeypatch):
+    monkeypatch.setattr(settings, "rh_rpc_url", "")
+
+    with pytest.raises(RobinhoodError) as exc:
+        await client().available_balance("ETH")
+    assert "RH_RPC_URL" in str(exc.value)
+
+
+async def test_native_and_token_balances_come_from_the_chain(monkeypatch):
+    monkeypatch.setattr(
+        settings, "dex_tokens", '{"USDG": {"address": "0x' + "ab" * 20 + '", "decimals": 6}}'
+    )
+    exchange = RobinhoodClient(
+        market=DexScreenerClient(http=FakeHttpClient([POOL])), chain=FakeChain()
+    )
+
+    assert await exchange.available_balance("ETH") == Decimal("0.008")
+    assert await exchange.available_balance("USDG") == Decimal("1250")
+
+
+async def test_wallet_balance_reports_per_coin_errors_instead_of_failing(monkeypatch):
+    monkeypatch.setattr(settings, "dex_tokens", "")
+    exchange = RobinhoodClient(
+        market=DexScreenerClient(http=FakeHttpClient([POOL])), chain=FakeChain()
+    )
+
+    result = (await exchange.wallet_balance("ETH,USDG"))["result"]
+
+    by_coin = {row["coin"]: row for row in result["balances"]}
+    assert by_coin["ETH"]["walletBalance"] == "0.008"
+    # USDG has no address configured; that is reported, not raised.
+    assert "DEX_TOKENS" in by_coin["USDG"]["error"]

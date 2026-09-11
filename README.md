@@ -20,7 +20,7 @@
   отдельно — если MEXC отклоняет `POST /api/v3/order`, это видно в логах worker
   на каждом тике.
 
-## Robinhood Chain / Uniswap (on-chain venue, этап read-only)
+## Robinhood Chain / Uniswap (on-chain venue)
 
 Третья площадка (`exchange=robinhood`) добавляется тем же способом, что и MEXC —
 через `ExchangeClient`, поэтому `grid.py` не должен знать, что под ним DEX. Но на
@@ -28,8 +28,7 @@ DEX нет лимитных ордеров, поэтому `place_limit_order` �
 **synthetic limit order** (`dex_intents`) в Postgres, а исполнять его будет
 отдельный DEX-worker.
 
-Сейчас реализован только read-only слой — ключи не читаются нигде, ни одна
-функция не подписывает транзакции:
+Read-only слой (цена, свечи, риск-гейты):
 
 - `app/dex/tokens.py` — реестр `symbol -> (адрес, decimals)`. Адрес PONS зашит,
   остальные (USDG, WETH, CASHCAT) задаются через `DEX_TOKENS` в `.env`; пока не
@@ -64,10 +63,50 @@ curl -s "http://127.0.0.1:8000/api/dex/PONSETH/snapshot" | python3 -m json.tool
 «уровень достигнут» на следующих этапах принимает Uniswap quote на реальный
 размер.
 
-Что ещё не сделано (по этапам): AsyncWeb3 + RPC и покупка за нативный ETH →
-approval + Permit2 и покупка за USDG → продажи, парсер receipt и учёт газа в
-quote → synthetic limits в воркере → подключение к гриду → hardening
-(gas bump, reorg, kill switch, spend cap).
+### Исполнение (покупка за нативный ETH)
+
+- `app/dex/chain.py` — AsyncWeb3: проверка `chainId`, балансы, nonce, подпись,
+  broadcast, receipt. Ожидание разделено: `receipt()` — один неблокирующий
+  опрос для тика воркера, `wait_for_receipt()` — для ручного скрипта. Приватный
+  ключ читается лениво, не логируется и никуда не сохраняется;
+- `app/dex/uniswap.py` — `/quote` и `/swap` с `x-api-key` и закреплённым
+  `x-universal-router-version: 2.1.1`. Маршрутизация ограничена V2/V3/V4, чтобы
+  ответ был подписываемым `CLASSIC`; котировка с `permitData` отклоняется, а не
+  отправляется без подписи; котировка старше `DEX_MAX_QUOTE_AGE_SECONDS` — тоже;
+- `app/dex/receipts.py` — фактический fill считается как **дельта баланса
+  кошелька** по каждому токену, а не поиском одного `Transfer`: маршрут
+  `USDG → WETH → PONS` пишет цепочку логов, большая часть которых между пулами.
+  Нативный вход измеряется по `value` транзакции (у ETH нет `Transfer`);
+- `app/dex/execution.py` — порядок, ради которого всё это и делалось:
+
+```text
+quote → проверка лимита → build → sign → PERSIST → broadcast → receipt
+```
+
+  Хеш подписанной транзакции известен **до** broadcast, поэтому строка
+  `SUBMITTING + nonce + tx_hash` коммитится до отправки. Упавший процесс находит
+  её и либо спрашивает сеть, либо пере-broadcast'ит ту же транзакцию — но
+  никогда не решает купить заново. Всё, что упало до коммита, не потратило
+  nonce и ничего не отправило.
+
+`DEX_DRY_RUN=true` по умолчанию: без явного выключения ничего не подписывается.
+
+Ручной end-to-end прогон:
+
+```bash
+scripts/dex_buy.py --symbol PONSETH --amount 0.001 --limit 0.00022
+scripts/dex_buy.py --symbol PONSETH --amount 0.001 --limit 0.00022 --execute
+```
+
+`--execute` дополнительно требует `DEX_DRY_RUN=false` в `.env` — одного флага
+недостаточно.
+
+Лимит проверяется по **исполнимой** цене из котировки на реальный размер, а не
+по mid пула: котировка хуже лимита → `WAITING`, а не «купим по рынку».
+
+Что ещё не сделано (по этапам): approval + Permit2 и покупка за USDG → продажи
+и учёт газа в quote для PnL → synthetic limits в воркере (nonce manager, retry,
+gas bump) → подключение к гриду → hardening (reorg, kill switch, spend cap).
 
 ## Что изменилось в v0.8
 

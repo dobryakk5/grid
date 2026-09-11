@@ -384,6 +384,13 @@ class DexIntent(Base):
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # Realised fill, read back from the receipt rather than from the quote.
+    filled_amount_in: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    filled_amount_out: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    fill_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    gas_native: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    gas_native_coin: Mapped[str | None] = mapped_column(String(24), nullable=True)
+
     execution_id: Mapped[int | None] = mapped_column(
         ForeignKey("grid_executions.id", ondelete="SET NULL"), nullable=True, unique=True
     )

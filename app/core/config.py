@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Read-only for now: no private key is read anywhere until execution lands.
     rh_chain_id: int = 4663
     rh_rpc_url: str = ""
+    # Trading wallet key -- a dedicated bot account, never the main wallet's
+    # seed. Read lazily by app/dex/chain.py and never logged or persisted.
+    rh_private_key: str = ""
     # Robinhood Chain only ever deployed Universal Router 2.1.1; asking for 2.0
     # is an error there, so the version is pinned rather than left to a default.
     rh_universal_router_version: str = "2.1.1"
@@ -51,6 +54,14 @@ class Settings(BaseSettings):
     # spend a Uniswap quote on it.
     dex_quote_trigger_band_pct: Decimal = Decimal("1")
     dex_max_slippage_pct: Decimal = Decimal("0.5")
+
+    uniswap_api_key: str = ""
+    uniswap_api_base: str = "https://trade-api.gateway.uniswap.org/v1"
+    # Uniswap advises refreshing a quote older than roughly half a minute.
+    dex_max_quote_age_seconds: float = 30.0
+    dex_receipt_timeout_seconds: float = 180.0
+    # Nothing is broadcast while this is true; it is the default on purpose.
+    dex_dry_run: bool = True
 
     # Price sampler cadence; samples aggregate into 1m candles.
     dex_sample_seconds: float = 15.0

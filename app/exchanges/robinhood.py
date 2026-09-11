@@ -23,9 +23,10 @@ from decimal import Decimal
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.dex.candles import DEX_INTERVALS, load_candles
+from app.dex.chain import ChainClient, ChainError
 from app.dex.dexscreener import DexScreenerClient, MarketSnapshot
 from app.dex.risk import RiskVerdict, evaluate
-from app.dex.tokens import DexConfigError, list_pairs, resolve_pair
+from app.dex.tokens import DexConfigError, list_pairs, resolve_pair, resolve_token
 from app.exchanges.base import ExchangeError, InstrumentInfo
 
 __all__ = ["RobinhoodClient", "RobinhoodError", "DexNotImplementedError"]
@@ -49,15 +50,34 @@ def _pending(capability: str, stage: str) -> DexNotImplementedError:
 class RobinhoodClient:
     name = "robinhood"
 
-    def __init__(self, *, market: DexScreenerClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        market: DexScreenerClient | None = None,
+        chain: ChainClient | None = None,
+    ) -> None:
         self.chain_id = settings.rh_chain_id
         self.chain = settings.dex_chain_slug
         self.market = market or DexScreenerClient()
         self._owns_market = market is None
+        # The RPC client is built on first use: price and candle reads must keep
+        # working on a host that has no RPC configured at all.
+        self._chain = chain
+        self._owns_chain = chain is None
 
     async def close(self) -> None:
         if self._owns_market:
             await self.market.close()
+        if self._chain is not None and self._owns_chain:
+            await self._chain.close()
+
+    def _rpc(self) -> ChainClient:
+        if self._chain is None:
+            try:
+                self._chain = ChainClient()
+            except ChainError as exc:
+                raise RobinhoodError(str(exc)) from None
+        return self._chain
 
     # ---- market data -----------------------------------------------------
 
@@ -118,15 +138,43 @@ class RobinhoodClient:
                 "rpcConfigured": bool(settings.rh_rpc_url),
                 "universalRouterVersion": settings.rh_universal_router_version,
                 "pairs": list(list_pairs()),
-                "note": "read-only stage: quoting and signing are not wired up",
+                "walletConfigured": bool(settings.rh_private_key),
+                "dryRun": settings.dex_dry_run,
+                "note": "swaps run through scripts/dex_buy.py; the engine path "
+                        "is not wired up yet",
             }
         }
 
-    async def wallet_balance(self, coins: str = "USDT,BTC") -> dict:
-        raise _pending("wallet balance", "2 (AsyncWeb3 RPC)")
+    async def wallet_balance(self, coins: str = "ETH") -> dict:
+        """Balances for the named coins, in the Bybit-ish shape callers expect."""
+        balances = []
+        for symbol in (item.strip().upper() for item in coins.split(",") if item.strip()):
+            try:
+                amount = await self.available_balance(symbol)
+            except RobinhoodError as exc:
+                balances.append({"coin": symbol, "error": str(exc)})
+                continue
+            balances.append({"coin": symbol, "walletBalance": str(amount)})
+        return {
+            "result": {
+                "wallet": self._rpc().wallet_address,
+                "chainId": self.chain_id,
+                "balances": balances,
+            }
+        }
 
     async def available_balance(self, coin: str) -> Decimal:
-        raise _pending("wallet balance", "2 (AsyncWeb3 RPC)")
+        try:
+            token = resolve_token(coin)
+        except DexConfigError as exc:
+            raise RobinhoodError(str(exc)) from None
+        chain = self._rpc()
+        try:
+            if token.native:
+                return await chain.native_balance()
+            return await chain.token_balance(token)
+        except ChainError as exc:
+            raise RobinhoodError(str(exc)) from None
 
     # ---- orders ----------------------------------------------------------
 
@@ -140,7 +188,9 @@ class RobinhoodClient:
         self, *, symbol: str, side: str, qty: Decimal, order_link_id: str,
         market_unit: str = "baseCoin",
     ) -> dict:
-        raise _pending("swaps", "2 (native ETH buy)")
+        # Swapping itself works (app/dex/execution.py, scripts/dex_buy.py); what
+        # is missing is the worker that owns the intent a swap belongs to.
+        raise _pending("engine-driven swaps", "5 (DexIntent worker)")
 
     async def get_order(self, *, order_id: str, symbol: str) -> dict | None:
         raise _pending("order lookup", "5 (DexIntent worker)")
@@ -151,9 +201,9 @@ class RobinhoodClient:
         raise _pending("order lookup", "5 (DexIntent worker)")
 
     async def get_executions(self, *, order_id: str, symbol: str) -> list[dict]:
-        # Fills are recorded from the receipt by the DEX worker, not scanned
-        # back out of the chain on demand.
-        raise _pending("execution lookup", "4 (receipt parser)")
+        # Fills are parsed from the receipt when a swap confirms and written to
+        # Postgres there; nothing scans the chain back on demand.
+        raise _pending("execution lookup", "5 (DexIntent worker)")
 
     async def cancel_order(self, *, order_id: str, symbol: str) -> None:
         raise _pending("cancellation", "5 (DexIntent worker)")

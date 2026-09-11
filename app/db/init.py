@@ -225,6 +225,12 @@ async def init_db() -> None:
             "ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'exchange'",
             "ALTER TABLE market_candles ALTER COLUMN volume DROP NOT NULL",
             "ALTER TABLE market_candles ALTER COLUMN turnover DROP NOT NULL",
+            # Realised swap fills, added after dex_intents first shipped.
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS filled_amount_in NUMERIC(38, 18)",
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS filled_amount_out NUMERIC(38, 18)",
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS fill_price NUMERIC(38, 18)",
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS gas_native NUMERIC(38, 18)",
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS gas_native_coin VARCHAR(24)",
             "CREATE INDEX IF NOT EXISTS ix_grid_profiles_current_range_id ON grid_profiles(current_range_id)",
             "CREATE INDEX IF NOT EXISTS ix_grid_orders_profile_range ON grid_orders(profile_id, range_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_grid_ranges_one_active_per_profile ON grid_ranges(profile_id) WHERE status = 'ACTIVE'",
