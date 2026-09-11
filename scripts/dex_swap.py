@@ -37,7 +37,7 @@ from app.db.session import SessionLocal  # noqa: E402
 from app.dex.chain import ChainClient  # noqa: E402
 from app.exchanges.base import decimal_str  # noqa: E402
 from app.dex.dexscreener import DexScreenerClient  # noqa: E402
-from app.dex.execution import execute_swap  # noqa: E402
+from app.dex.execution import StorageUnavailable, execute_swap  # noqa: E402
 from app.dex.tokens import resolve_pair  # noqa: E402
 from app.dex.uniswap import UniswapClient  # noqa: E402
 
@@ -128,6 +128,12 @@ async def main() -> int:
                     dry_run=False,
                     slippage_pct=args.slippage,
                 )
+    except StorageUnavailable as exc:
+        print()
+        print(f"Not sent: {exc}")
+        print("Nothing was signed or broadcast. Fix DATABASE_URL and re-run;")
+        print("an approval already on chain is reused, not repeated.")
+        return 3
     finally:
         await chain.close()
         await uniswap.close()

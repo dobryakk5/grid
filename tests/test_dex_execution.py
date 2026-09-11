@@ -92,6 +92,20 @@ class FakeUniswap:
         return {"to": "0xrouter", "data": "0xdead", "value": "0x0"}
 
 
+class LiveSession:
+    """Answers the storage preflight; never written to.
+
+    The live-run tests here all stop before any row would be written -- they
+    only need the preflight to pass so the decision behind it is reachable.
+    """
+
+    async def execute(self, *args, **kwargs):
+        return None
+
+    async def commit(self):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def settings_defaults(monkeypatch):
     monkeypatch.setattr(settings, "dex_tokens", "")
@@ -105,9 +119,9 @@ def settings_defaults(monkeypatch):
 
 
 async def buy(*, chain=None, uniswap=None, market=None, limit="0.00025", amount="0.001",
-              dry_run=None):
+              dry_run=None, session=None):
     return await execute_buy(
-        None,
+        session or (LiveSession() if dry_run is False else None),
         symbol="PONSETH",
         amount_in=Decimal(amount),
         limit_price=Decimal(limit),
@@ -189,20 +203,58 @@ async def test_token_decimals_are_verified_before_any_amount_is_computed():
     assert "verify:PONS" in chain.calls
 
 
-async def test_a_live_swap_without_a_session_is_refused():
-    from app.dex.chain import ChainError
+async def test_a_live_swap_without_somewhere_to_record_it_is_refused():
+    from app.dex.execution import StorageUnavailable
 
-    with pytest.raises(ChainError):
-        await buy(dry_run=False)
+    with pytest.raises(StorageUnavailable):
+        await execute_buy(
+            None,
+            symbol="PONSETH",
+            amount_in=Decimal("0.001"),
+            limit_price=Decimal("0.00025"),
+            chain=FakeChain(),
+            uniswap=FakeUniswap(),
+            market=FakeMarket(),
+            dry_run=False,
+        )
+
+
+async def test_the_storage_check_runs_before_anything_irreversible():
+    # The database went down mid-run once, and the failure surfaced only after
+    # an approval had been sent and a transaction signed.
+    from app.dex.execution import StorageUnavailable
+
+    class DeadSession:
+        async def execute(self, *args, **kwargs):
+            raise OSError("Connect call failed")
+
+    chain, uniswap = FakeChain(), FakeUniswap()
+    with pytest.raises(StorageUnavailable) as exc:
+        await execute_swap(
+            DeadSession(),
+            symbol="PONSETH",
+            side="Buy",
+            amount_in=Decimal("0.001"),
+            limit_price=Decimal("0.00025"),
+            chain=chain,
+            uniswap=uniswap,
+            market=FakeMarket(),
+            dry_run=False,
+        )
+
+    assert "not reachable" in str(exc.value)
+    # No quote, no approval, no signature.
+    assert uniswap.calls == []
+    assert chain.calls == []
 
 
 USDG_TOKENS = '{"USDG": {"address": "0x' + "ab" * 20 + '", "decimals": 6}}'
 
 
 async def buy_usdg(*, chain=None, uniswap=None, market=None, limit="0.55",
-                   amount="250", dry_run=None):
+                   amount="250", dry_run=None, session=None):
     return await execute_buy(
-        None,
+        session or (LiveSession() if dry_run is False else None),
         symbol="PONSUSDG",
         amount_in=Decimal(amount),
         limit_price=Decimal(limit),
@@ -252,11 +304,11 @@ async def test_a_permit_requiring_quote_is_announced_in_a_dry_run(monkeypatch):
 
 
 async def sell(*, chain=None, uniswap=None, market=None, limit="0.00022",
-               amount="100", dry_run=None):
+               amount="100", dry_run=None, session=None):
     from app.dex.execution import execute_sell
 
     return await execute_sell(
-        None,
+        session or (LiveSession() if dry_run is False else None),
         symbol="PONSETH",
         amount_in=Decimal(amount),
         limit_price=Decimal(limit),

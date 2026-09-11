@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -44,6 +45,7 @@ from app.dex.tokens import DexPair, Token, resolve_pair
 from app.dex.uniswap import UniswapClient, UniswapError
 
 __all__ = [
+    "StorageUnavailable",
     "SwapOutcome",
     "execute_buy",
     "execute_sell",
@@ -58,6 +60,10 @@ logger = logging.getLogger(__name__)
 # Gas headroom over the router's own estimate; a swap that runs out of gas still
 # pays for the attempt.
 _GAS_BUFFER = Decimal("1.15")
+
+
+class StorageUnavailable(RuntimeError):
+    """A live swap cannot be recorded, so it must not be sent."""
 
 
 @dataclass(frozen=True)
@@ -182,6 +188,13 @@ async def execute_swap(
     selling = _is_sell(side)
     token_in, token_out = _direction(pair, side)
     dry = settings.dex_dry_run if dry_run is None else dry_run
+
+    # Prove we can record the swap before anything irreversible happens. The
+    # recording is what makes a crash survivable, so discovering it is
+    # impossible *after* an approval has been sent and a transaction signed is
+    # the worst possible moment -- and the most expensive one.
+    if not dry:
+        await _require_storage(session)
 
     progress = _Progress(repository, intent)
 
@@ -309,9 +322,6 @@ async def execute_swap(
             funding_note=underfunded,
             **_gas_estimate(quote),
         )
-    if session is None:
-        raise ChainError("a live swap needs a database session to record intent")
-
     await progress.to(IntentStatus.SIGNING)
     signature = sign_permit(chain, quote.permit_data) if quote.needs_permit else None
     swap = await uniswap.build_swap(quote, signature=signature)
@@ -545,6 +555,18 @@ async def _build_transaction(
     else:
         tx.update(await chain.fee_fields())
     return tx
+
+
+async def _require_storage(session: AsyncSession | None) -> None:
+    if session is None:
+        raise StorageUnavailable("a live swap needs a database session")
+    try:
+        await session.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise StorageUnavailable(
+            "a live swap has to be recorded before it is broadcast, and the "
+            f"database is not reachable: {exc}"
+        ) from None
 
 
 def _gas_estimate(quote) -> dict:

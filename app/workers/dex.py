@@ -16,7 +16,7 @@ from app.db.init import init_db
 from app.db.session import SessionLocal
 from app.dex.chain import ChainClient, ChainError
 from app.dex.dexscreener import DexScreenerClient, DexScreenerError
-from app.dex.execution import execute_swap
+from app.dex.execution import StorageUnavailable, execute_swap
 from app.dex.intents import SIGNED_STATUSES, IntentStatus
 from app.dex.recovery import rebroadcast, replace_stuck, settle
 from app.dex.repository import DexIntentRepository
@@ -54,7 +54,9 @@ class DexWorker:
             action = plan_intent(IntentView.of(intent))
             try:
                 await self._apply(session, repository, intent, action)
-            except (ChainError, DexScreenerError, DexConfigError) as exc:
+            except (
+                ChainError, DexScreenerError, DexConfigError, StorageUnavailable,
+            ) as exc:
                 logger.warning("intent %s (%s): %s", intent.id, action, exc)
                 await session.rollback()
             except Exception:
