@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.dex.chain import ChainClient  # noqa: E402
+from app.exchanges.base import decimal_str  # noqa: E402
 from app.dex.dexscreener import DexScreenerClient  # noqa: E402
 from app.dex.execution import execute_swap  # noqa: E402
 from app.dex.tokens import resolve_pair  # noqa: E402
@@ -60,6 +61,14 @@ async def main() -> int:
         help="intend to trade for real; still previews unless --confirm-live",
     )
     parser.add_argument(
+        "--slippage", type=Decimal, default=None,
+        help=(
+            "slippage tolerance in percent (default DEX_MAX_SLIPPAGE_PCT). "
+            "Lower tightens the worst-case fill a limit is judged on, at a "
+            "higher chance the swap reverts"
+        ),
+    )
+    parser.add_argument(
         "--confirm-live", action="store_true",
         help="actually sign and broadcast, after reading the preview",
     )
@@ -80,7 +89,7 @@ async def main() -> int:
     try:
         await chain.ensure_ready()
         print(f"Wallet:  {chain.wallet_address}")
-        print(f"Balance: {await chain.native_balance()} ETH")
+        print(f"Balance: {decimal_str(await chain.native_balance())} ETH")
         print(
             f"{args.side.title()}:  {args.amount} {spent} -> {received} "
             f"at {'>=' if selling else '<='} {args.limit}"
@@ -100,6 +109,7 @@ async def main() -> int:
                 uniswap=uniswap,
                 market=market,
                 dry_run=True,
+                slippage_pct=args.slippage,
             )
             if args.execute and outcome.status == "DRY_RUN":
                 _preview(chain, pair, args, outcome, selling=selling)
@@ -116,6 +126,7 @@ async def main() -> int:
                     uniswap=uniswap,
                     market=market,
                     dry_run=False,
+                    slippage_pct=args.slippage,
                 )
     finally:
         await chain.close()
@@ -126,6 +137,8 @@ async def main() -> int:
     print(f"Status: {outcome.status}")
     if outcome.reason:
         print(f"Reason: {outcome.reason}")
+    if outcome.funding_note:
+        print(f"Funding: {outcome.funding_note}")
     for label, value in (
         ("Pool price", outcome.market_price),
         ("Executable", outcome.quoted_price),

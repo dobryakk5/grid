@@ -4,7 +4,7 @@ import pytest
 
 from app.core.config import settings
 from app.dex.dexscreener import MarketSnapshot
-from app.dex.execution import execute_buy
+from app.dex.execution import execute_buy, execute_swap
 from app.dex.intents import IntentStatus
 from app.dex.tokens import resolve_pair
 from app.dex.uniswap import QuoteResult, UniswapError
@@ -359,3 +359,40 @@ async def test_a_quote_whose_worst_case_still_meets_the_limit_proceeds():
     outcome = await buy(uniswap=uniswap, limit="0.00023")
 
     assert outcome.status == "DRY_RUN"
+
+
+async def test_an_unfunded_wallet_is_reported_even_when_the_limit_declines():
+    # Otherwise the funding problem is only discovered after retuning the limit
+    # and running again.
+    outcome = await buy(
+        chain=FakeChain(balance="0"),
+        uniswap=FakeUniswap(amount_out="4000000000000000000"),
+        limit="0.00022",
+    )
+
+    assert outcome.status == IntentStatus.WAITING
+    assert outcome.funding_note is not None
+    assert "needs" in outcome.funding_note
+
+
+async def test_slippage_can_be_set_per_trade():
+    class RecordingUniswap(FakeUniswap):
+        async def quote_exact_in(self, **kwargs):
+            self.slippage = kwargs.get("slippage_pct")
+            return await super().quote_exact_in(**kwargs)
+
+    uniswap = RecordingUniswap()
+    await execute_swap(
+        None,
+        symbol="PONSETH",
+        side="Buy",
+        amount_in=Decimal("0.001"),
+        limit_price=Decimal("0.00025"),
+        chain=FakeChain(),
+        uniswap=uniswap,
+        market=FakeMarket(),
+        dry_run=True,
+        slippage_pct=Decimal("0.1"),
+    )
+
+    assert uniswap.slippage == Decimal("0.1")

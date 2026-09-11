@@ -83,6 +83,9 @@ class SwapOutcome:
     tx_hash: str | None = None
     approval_tx_hash: str | None = None
     intent_id: int | None = None
+    # Set whenever the wallet could not pay for this trade, whatever else
+    # happened: finding that out only after retuning the limit wastes a run.
+    funding_note: str | None = None
     execution_values: dict | None = None
 
     @property
@@ -162,6 +165,7 @@ async def execute_swap(
     uniswap: UniswapClient,
     market: DexScreenerClient,
     dry_run: bool | None = None,
+    slippage_pct: Decimal | None = None,
     profile_id: int | None = None,
     order_link_id: str | None = None,
     repository: DexIntentRepository | None = None,
@@ -250,6 +254,7 @@ async def execute_swap(
         side=side,
         amount_in_wei=amount_in_wei,
         swapper=chain.wallet_address,
+        slippage_pct=slippage_pct,
     )
     await progress.to(IntentStatus.QUOTED)
     executable = quote.price(pair, side)
@@ -273,6 +278,7 @@ async def execute_swap(
             worst_amount_out=token_out.from_wei(
                 quote.min_amount_out or quote.amount_out
             ),
+            funding_note=underfunded,
             **_gas_estimate(quote),
         )
 
@@ -300,6 +306,7 @@ async def execute_swap(
             worst_amount_out=guaranteed_out,
             amount_in=amount_in,
             amount_out=expected_out,
+            funding_note=underfunded,
             **_gas_estimate(quote),
         )
     if session is None:
