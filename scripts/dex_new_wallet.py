@@ -10,10 +10,15 @@ screen-shared, or any file that syncs to a cloud is spent: the only fix is a new
 wallet, because the old one can be emptied by anyone who ever saw it.
 
     scripts/dex_new_wallet.py            # create and store
+    scripts/dex_new_wallet.py --import   # store a key you already have
     scripts/dex_new_wallet.py --force    # replace the key already in .env
+
+``--import`` prompts for the key instead of taking it as an argument, so it
+never reaches the shell history, the process list, or the screen.
 """
 
 import argparse
+import getpass
 import os
 import re
 import stat
@@ -50,24 +55,47 @@ def store(private_key: str, *, force: bool) -> None:
     os.chmod(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
 
 
+def prompt_for_key() -> Account:
+    """Read an existing key without echoing it or putting it in an argument."""
+    entered = getpass.getpass("Private key (input hidden): ").strip()
+    if not entered:
+        raise SystemExit("Nothing entered.")
+    try:
+        account = Account.from_key(entered)
+    except Exception:
+        raise SystemExit(
+            "That is not a valid private key: expected 64 hex characters, "
+            "with or without a leading 0x."
+        ) from None
+    return account
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--import", dest="import_key", action="store_true",
+        help="store a key you already have, entered at a hidden prompt",
+    )
     parser.add_argument(
         "--force", action="store_true",
         help="replace an RH_PRIVATE_KEY that is already in .env",
     )
     args = parser.parse_args()
 
-    account = Account.create()
+    account = prompt_for_key() if args.import_key else Account.create()
     store(account.key.hex(), force=args.force)
     # account.key goes out of scope here and is never printed or logged.
 
-    print("New trading wallet created.")
+    print()
+    print("Trading wallet imported." if args.import_key else "New trading wallet created.")
     print()
     print(f"  Address: {account.address}")
     print(f"  Key:     stored in {ENV_PATH} (0600), not shown")
     print()
-    print("Fund this address on Robinhood Chain with only what it may lose.")
+    if args.import_key:
+        print("Check that address is the one you meant before funding it.")
+    else:
+        print("Fund this address on Robinhood Chain with only what it may lose.")
     print("The key is on this machine so a worker can sign unattended -- that is")
     print("exactly why it must never be your main wallet's key.")
     return 0
