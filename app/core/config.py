@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     chain_tape_confirmations: int = 3
     # 0 means "start from the current head" on a brand-new cursor.
     chain_tape_start_block: int = 0
+    # Wallets backfilled per pass. They share one scan (a topic position takes
+    # a set of values), so this is about how long one pass may hold up the
+    # realtime cursor, not about RPC cost per wallet.
+    chain_tape_backfill_wallets: int = 50
 
 
 settings = Settings()

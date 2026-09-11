@@ -14,6 +14,7 @@ import logging
 from app.core.config import settings
 from app.db.init import init_db
 from app.db.session import SessionLocal
+from app.dex.dynamic_tokens import load_dynamic_tokens
 from app.dex.chain import ChainClient, ChainError
 from app.dex.dexscreener import DexScreenerClient, DexScreenerError
 from app.dex.execution import StorageUnavailable, execute_swap
@@ -155,6 +156,10 @@ async def main() -> None:
     try:
         while True:
             try:
+                # A level may name a token the tape verified on chain rather
+                # than one pinned in the registry. Without this it would
+                # resolve when armed and fail when it came time to execute.
+                await load_dynamic_tokens(SessionLocal)
                 async with SessionLocal() as session:
                     await worker.tick(session)
             except Exception:

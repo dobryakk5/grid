@@ -248,31 +248,39 @@ async def run_backfill_pass(client: ChainClient, *, chain_id: int) -> int:
 
     current_block = await client.w3.eth.block_number
     from_block = max(current_block - settings.fomo_new_wallet_backfill_blocks, 0)
-    done = 0
 
-    for trader in pending:
-        wallet = trader.evm_address
-        try:
-            transfers = await _fetch_chunked(client, [wallet], from_block, current_block)
-        except Exception:
-            logger.exception("backfill failed for wallet %s; will retry next pass", wallet)
-            continue
+    # Backfill the queue in groups, not one wallet at a time. A topic
+    # position accepts a set of values, so scanning fifty wallets over the
+    # window costs exactly what scanning one costs -- and the per-wallet
+    # version starved the realtime cursor for hours the first time a name
+    # import queued three hundred wallets at once.
+    batch = pending[: max(1, settings.chain_tape_backfill_wallets)]
+    wallets = [trader.evm_address for trader in batch]
 
-        # Classify against every tracked wallet, not just this one: the scan
-        # is wallet-filtered, so if another tracked wallet was the
-        # counterparty its legs are already in hand and its row is free.
-        rows = await _rows_from(client, transfers, all_wallets, chain_id=chain_id)
-        async with SessionLocal() as session:
-            await _store(session, group_by_tx(transfers), rows, chain_id=chain_id)
-            await session.execute(
-                update(FomoTrader)
-                .where(FomoTrader.fomo_user_id == trader.fomo_user_id)
-                .values(backfilled_from_block=from_block)
-            )
-            await session.commit()
-        done += 1
-        logger.info("backfilled %s: %s transfers, %s swaps", wallet, len(transfers), len(rows))
-    return done
+    try:
+        transfers = await _fetch_chunked(client, wallets, from_block, current_block)
+    except Exception:
+        logger.exception("backfill failed for %s wallet(s); will retry next pass", len(wallets))
+        return 0
+
+    # Classify against every tracked wallet, not just this batch: the scan
+    # returns whole transactions, so a counterparty we already track gets its
+    # row for free.
+    rows = await _rows_from(client, transfers, all_wallets, chain_id=chain_id)
+    async with SessionLocal() as session:
+        await _store(session, group_by_tx(transfers), rows, chain_id=chain_id)
+        await session.execute(
+            update(FomoTrader)
+            .where(FomoTrader.fomo_user_id.in_([trader.fomo_user_id for trader in batch]))
+            .values(backfilled_from_block=from_block)
+        )
+        await session.commit()
+
+    logger.info(
+        "backfilled %s wallet(s), %s left in queue: %s transfers, %s swaps",
+        len(batch), len(pending) - len(batch), len(transfers), len(rows),
+    )
+    return len(batch)
 
 
 # ---- realtime -----------------------------------------------------------

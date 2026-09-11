@@ -21,6 +21,10 @@ from app.core.config import settings
 
 __all__ = [
     "DexConfigError",
+    "dynamic_key",
+    "dynamic_token_by_address",
+    "dynamic_tokens",
+    "register_dynamic_token",
     "NATIVE_ADDRESS",
     "Token",
     "DexPair",
@@ -206,10 +210,93 @@ def native_pair_for(pair: DexPair) -> DexPair:
     )
 
 
+# Tokens learned from the chain rather than pinned here by hand. The registry
+# above exists because a wrong `decimals` misprices a real order -- but a value
+# read from the token's own `decimals()` is not a guess, so a token verified
+# that way is just as safe to trade as one typed in. `app.dex.dynamic_tokens`
+# fills this from the `chain_tokens` cache.
+_DYNAMIC_TOKENS: dict[str, Token] = {}
+
+# Quote assets a dynamic pair may be denominated in, longest suffix first so
+# "USDG" wins over a hypothetical "G".
+_DYNAMIC_QUOTES: tuple[str, ...] = ("USDG", "WETH", "ETH")
+
+
+def dynamic_key(symbol: str, address: str) -> str:
+    """Name a discovered token by symbol *and* address.
+
+    Symbols are not identities on a permissionless chain: this one carries
+    four different DOGGO contracts and three calling themselves USDG. Keying
+    a tradable pair on the bare symbol means a limit order can resolve to
+    whichever contract registered last, which is precisely how you buy a
+    copy of the thing you meant to buy. The address suffix makes the pair
+    name unambiguous while still reading like the token.
+    """
+    clean = "".join(ch for ch in symbol.strip().upper() if ch.isalnum())[:12] or "TOKEN"
+    # Upper-cased on purpose: resolve_pair() upper-cases the symbol it is
+    # given, so a lower-case hex suffix here would never match its own key.
+    return f"{clean}-{address.upper().removeprefix('0X')[:8]}"
+
+
+def register_dynamic_token(symbol: str, address: str, decimals: int) -> str | None:
+    """Make a chain-verified token tradable without editing this file.
+
+    Returns the key it was registered under, or ``None`` if the address was
+    unusable. Refuses to shadow a builtin symbol with a different address:
+    a token is free to call itself PONS, and resolving that name to someone
+    else's contract is how a limit order buys the wrong thing.
+    """
+    plain = symbol.strip().upper()
+    if not plain or not _ADDRESS_RE.match(address):
+        return None
+    builtin = _BUILTIN_TOKENS.get(plain)
+    if builtin is not None and builtin.address.lower() != address.lower():
+        raise DexConfigError(
+            f"refusing to register {plain} at {address}: the registry already "
+            f"pins {plain} to {builtin.address}"
+        )
+    key = dynamic_key(plain, address)
+    _DYNAMIC_TOKENS[key] = Token(symbol=key, address=address.lower(), decimals=int(decimals))
+    return key
+
+
+def dynamic_tokens() -> tuple[str, ...]:
+    return tuple(sorted(_DYNAMIC_TOKENS))
+
+
+def dynamic_token_by_address(address: str) -> Token | None:
+    wanted = address.lower()
+    for token in _DYNAMIC_TOKENS.values():
+        if token.address == wanted:
+            return token
+    return None
+
+
+def _split_dynamic(key: str) -> tuple[str, str] | None:
+    for quote in _DYNAMIC_QUOTES:
+        if key.endswith(quote) and len(key) > len(quote):
+            return key[: -len(quote)], quote
+    return None
+
+
 def resolve_pair(symbol: str) -> DexPair:
     key = symbol.strip().upper()
     spec = _BUILTIN_PAIRS.get(key)
     if spec is None:
+        dynamic = _split_dynamic(key)
+        base = _DYNAMIC_TOKENS.get(dynamic[0]) if dynamic else None
+        if base is not None:
+            return DexPair(
+                symbol=key,
+                base=base,
+                quote=resolve_token(dynamic[1]),
+                chain=settings.dex_chain_slug,
+                # A hand-registered pair carries a tick size chosen for its
+                # price range; a discovered one has no such knowledge, so it
+                # gets the finest granularity rather than a made-up rounding.
+                tick_size=Decimal(1).scaleb(-18),
+                min_order_quote=settings.dex_min_order_quote,
+            )
         raise DexConfigError(
             f"unknown DEX pair {key!r}; known pairs: {', '.join(list_pairs())}"
         )

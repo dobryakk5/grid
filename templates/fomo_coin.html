@@ -37,6 +37,10 @@
     .badge{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
     .empty{padding:20px 8px;text-align:center;color:var(--muted)}
     .addr{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+    .field{display:flex;flex-direction:column;gap:4px}
+    .field label{font-size:11px;color:var(--muted)}
+    input[type=text],select{border:1px solid var(--line);background:#0e131d;color:var(--text);padding:9px 11px;border-radius:9px;min-width:150px}
+    h3{font-size:14px}
     .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
     @media(max-width:860px){.cols{grid-template-columns:1fr}}
   </style>
@@ -61,6 +65,56 @@
 
   <section class="panel">
     <div class="tiles" id="summary"></div>
+  </section>
+
+  <section class="panel" id="tradePanel" style="display:none">
+    <div class="row" style="justify-content:space-between">
+      <h2>Лимитная покупка</h2>
+      <span id="dryRunBadge" class="badge"></span>
+    </div>
+    <p class="muted" style="font-size:13px;max-width:820px;margin-top:6px">
+      Создаёт уровень (<span class="addr">dex_intents</span>) — тот же механизм,
+      что у грид-профилей. В сеть сейчас ничего не уходит: цену сторожит
+      DEX-воркер и он же исполняет уровень, под теми же риск-гейтами и лимитом
+      проскальзывания.
+    </p>
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div class="field">
+        <label for="tradeSymbol">Пара</label>
+        <select id="tradeSymbol"></select>
+      </div>
+      <div class="field">
+        <label for="tradeSide">Сторона</label>
+        <select id="tradeSide">
+          <option value="Buy">Купить</option>
+          <option value="Sell">Продать</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="tradePrice">Цена лимита</label>
+        <input id="tradePrice" type="text" inputmode="decimal" placeholder="0.55">
+      </div>
+      <div class="field">
+        <label for="tradeAmount">Сумма <span id="quoteCoin" class="muted"></span></label>
+        <input id="tradeAmount" type="text" inputmode="decimal" placeholder="25">
+      </div>
+      <button id="armBtn" class="primary">Взвести уровень</button>
+      <span id="tradeHint" class="muted" style="font-size:12px"></span>
+    </div>
+    <div id="gateStatus" style="margin-top:10px;font-size:13px"></div>
+    <div id="tradeResult" style="margin-top:10px"></div>
+    <div id="levelsWrap"></div>
+  </section>
+
+  <section class="panel" id="notTradablePanel" style="display:none">
+    <h2>Лимитная покупка</h2>
+    <p class="muted" style="font-size:13px;max-width:820px;margin-top:6px">
+      Эта монета видна в ленте, но <b>не зарегистрирована для торговли</b>:
+      в <span class="addr">app/dex/tokens.py</span> для неё нет пары с адресами и
+      decimals. Исполнение требует их заданными вручную — неверный decimals
+      промахнётся на порядки в реальном ордере, поэтому кнопка тут не
+      показывается, вместо того чтобы падать при отправке.
+    </p>
   </section>
 
   <div class="cols">
@@ -142,6 +196,7 @@ async function load() {
       `<div class="tile"><div class="label">${esc(label)}</div><div class="value">${typeof value === 'string' ? esc(value) : value}</div></div>`
     ).join('');
 
+    renderTrading(data);
     renderSide('buyersWrap', data.buyers, 'buy');
     renderSide('sellersWrap', data.sellers, 'sell');
   } catch (e) {
@@ -151,6 +206,120 @@ async function load() {
   }
 }
 
+function renderLevels(levels) {
+  if (!levels.length) { $('levelsWrap').innerHTML = ''; return; }
+  const rows = levels.map(l => `
+    <tr>
+      <td>${esc(l.symbol)}</td>
+      <td class="${l.side === 'Buy' ? 'side-buy' : 'side-sell'}">${esc(l.side)}</td>
+      <td>${fmt(l.limit_price, 8)}</td>
+      <td>${fmt(l.amount_in)} ${esc(l.amount_in_coin)}</td>
+      <td>${esc(l.status)}${l.blocked_reason ? ` <span class="badge">${esc(l.blocked_reason)}</span>` : ''}</td>
+      <td>${['WAITING', 'BLOCKED'].includes(l.status)
+            ? `<button data-cancel="${l.intent_id}">Отменить</button>`
+            : '<span class="muted">—</span>'}</td>
+    </tr>`).join('');
+  $('levelsWrap').innerHTML = `
+    <h3 style="margin-top:18px">Взведённые уровни</h3>
+    <table>
+      <thead><tr><th>Пара</th><th>Сторона</th><th>Цена</th><th>Сумма</th><th>Статус</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  for (const b of $('levelsWrap').querySelectorAll('[data-cancel]')) {
+    b.onclick = async () => {
+      if (!confirm('Отменить уровень?')) return;
+      try { await api(`/api/fomo/limit-order/${b.dataset.cancel}/cancel`, {method: 'POST'}); await load(); }
+      catch (e) { alert('Ошибка: ' + e.message); }
+    };
+  }
+}
+
+let PAIR_HEALTH = {};
+
+function renderGate() {
+  const h = PAIR_HEALTH[$('tradeSymbol').value];
+  if (!h) { $('gateStatus').innerHTML = ''; return; }
+  if (h.ok) {
+    $('gateStatus').innerHTML =
+      `<span class="good">✓ риск-гейты проходит</span> <span class="muted">— ликвидность ${fmtUsd(h.liquidity_usd)}, `
+      + `объём 24ч ${fmtUsd(h.volume_h24_usd)}, цена ${fmt(h.price_quote, 8)}</span>`;
+    return;
+  }
+  // Not a refusal to place the order: a level on a failing pair is armed and
+  // simply waits in BLOCKED, re-checked every DEX_BLOCKED_RETRY_SECONDS.
+  const detail = h.tradable
+    ? `<span class="muted">ликвидность ${fmtUsd(h.liquidity_usd)} (порог ${fmtUsd(h.min_liquidity_usd)}), `
+      + `объём 24ч ${fmtUsd(h.volume_h24_usd)} (порог ${fmtUsd(h.min_volume_h24_usd)})</span>`
+    : '';
+  $('gateStatus').innerHTML =
+    `<span class="bad">✗ не проходит: ${h.reasons.map(esc).join('; ')}</span><br>${detail}`
+    + `<br><span class="muted">Уровень поставить можно — он встанет в BLOCKED и будет перепроверяться, пока монета не дорастёт.</span>`;
+}
+
+function updateQuoteLabel() {
+  const symbol = $('tradeSymbol').value || '';
+  const quote = (symbol.match(/(USDG|ETH)$/) || [])[1] || '';
+  const base = quote ? symbol.slice(0, -quote.length) : symbol;
+  // A buy hands over quote, a sell hands over base -- the label has to say
+  // which, or the number means two different things on the same form.
+  const side = $('tradeSide').value;
+  $('quoteCoin').textContent = side === 'Buy' ? `(${quote})` : `(${base})`;
+  $('armBtn').textContent = side === 'Buy' ? 'Взвести покупку' : 'Взвести продажу';
+  $('armBtn').className = side === 'Buy' ? 'primary' : '';
+}
+
+function renderTrading(data) {
+  const t = data.trading || {symbols: []};
+  if (!t.symbols.length) {
+    $('tradePanel').style.display = 'none';
+    $('notTradablePanel').style.display = '';
+    return;
+  }
+  $('notTradablePanel').style.display = 'none';
+  $('tradePanel').style.display = '';
+  // Prefer the dollar-quoted pair: it is the one whose amount reads as money.
+  const ordered = [...t.symbols].sort((a, b) => (b.endsWith('USDG') ? 1 : 0) - (a.endsWith('USDG') ? 1 : 0));
+  $('tradeSymbol').innerHTML = ordered.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  $('dryRunBadge').textContent = t.dry_run ? 'DEX_DRY_RUN=true — ничего не подписывается' : 'DEX_DRY_RUN=false — БОЕВОЙ режим';
+  $('dryRunBadge').className = 'badge ' + (t.dry_run ? 'muted' : 'bad');
+  $('tradeHint').textContent = `минимум ${t.min_order_quote}`;
+  PAIR_HEALTH = Object.fromEntries((t.pairs || []).map(p => [p.symbol, p]));
+  updateQuoteLabel();
+  renderGate();
+  renderLevels(t.open_levels || []);
+}
+
+async function armLevel() {
+  const symbol = $('tradeSymbol').value;
+  const side = $('tradeSide').value;
+  const limit_price = $('tradePrice').value.trim().replace(',', '.');
+  const amount_quote = $('tradeAmount').value.trim().replace(',', '.');
+  if (!limit_price || !amount_quote) { $('tradeResult').innerHTML = '<span class="bad">Заполните цену и сумму</span>'; return; }
+  const live = !$('dryRunBadge').textContent.includes('true');
+  const warning = live
+    ? `\n\nDEX_DRY_RUN ВЫКЛЮЧЕН — при достижении цены воркер подпишет и отправит реальную транзакцию.`
+    : '';
+  const word = side === 'Buy' ? 'покупку' : 'продажу';
+  const gate = PAIR_HEALTH[symbol];
+  const blocked = gate && !gate.ok
+    ? `\n\nПара не проходит риск-гейты (${gate.reasons.join('; ')}).\nУровень встанет в BLOCKED и не исполнится, пока это не изменится.`
+    : '';
+  if (!confirm(`Взвести ${word} ${symbol}\nпо цене ${limit_price}\nна ${amount_quote} ${$('quoteCoin').textContent}?${blocked}${warning}`)) return;
+  try {
+    const r = await api('/api/fomo/limit-order', {
+      method: 'POST', body: JSON.stringify({symbol, side, limit_price, amount: amount_quote}),
+    });
+    $('tradeResult').innerHTML = `<span class="good">Уровень #${r.intent_id} взведён (${esc(r.status)}).</span> <span class="muted">${esc(r.note)}</span>`;
+    $('tradePrice').value = ''; $('tradeAmount').value = '';
+    await load();
+  } catch (e) {
+    $('tradeResult').innerHTML = `<span class="bad">Ошибка: ${esc(e.message)}</span>`;
+  }
+}
+
+$('armBtn').onclick = armLevel;
+$('tradeSymbol').onchange = () => { updateQuoteLabel(); renderGate(); };
+$('tradeSide').onchange = updateQuoteLabel;
 $('hours').onchange = load;
 load();
 </script>

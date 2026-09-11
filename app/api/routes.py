@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 from decimal import Decimal
 import logging
 from typing import Literal
@@ -10,6 +11,7 @@ from sqlalchemy import case, func, select, update as sa_update
 from app.core.config import settings
 from app.db.models import (
     ChainScanCursor,
+    DexIntent,
     ChainSwap,
     FomoTrader,
     FomoTraderRank,
@@ -30,9 +32,18 @@ from app.exchanges import (
     make_exchange,
     split_symbol,
 )
-from app.dex.dexscreener import DexScreenerError
-from app.dex.tokens import DexConfigError, list_pairs, resolve_pair, resolve_token
+from app.dex.dexscreener import DexScreenerClient, DexScreenerError
+from app.dex.risk import RiskLimits, evaluate
+from app.dex.tokens import (
+    DexConfigError,
+    dynamic_token_by_address,
+    list_pairs,
+    resolve_pair,
+    resolve_token,
+)
 from app.exchanges.robinhood import RobinhoodClient
+from app.dex.dynamic_tokens import load_dynamic_tokens
+from app.dex.repository import DexIntentRepository
 from app.fomo.client import FomoAuthError, FomoClient, FomoError, FomoRateLimited
 from app.fomo.session import (
     clear_session as clear_fomo_session,
@@ -1543,6 +1554,25 @@ async def fomo_coin_detail(token_address: str, hours: int = 24) -> dict:
             sellers.append(entry)
             sold_total += Decimal(row.usd or 0)
 
+    # Chain-verified tokens count as tradable, so the registry has to be
+    # loaded before asking what pairs exist for this coin.
+    await load_dynamic_tokens(SessionLocal)
+    if symbol is None:
+        # No trades recorded yet is not the same as an unknown coin: the tape
+        # read its name off the contract the first time it saw it.
+        meta = dynamic_token_by_address(address)
+        if meta is not None:
+            symbol = meta.symbol.split("-")[0]
+    tradable = _tradable_symbols(address)
+    async with SessionLocal() as session:
+        levels = list((await session.execute(
+            select(DexIntent)
+            .where(DexIntent.symbol.in_(tradable), DexIntent.profile_id.is_(None))
+            .where(DexIntent.status.notin_(("FILLED", "CANCELLED", "EXPIRED", "FAILED")))
+            .order_by(DexIntent.id.desc())
+            .limit(20)
+        )).scalars()) if tradable else []
+
     return {
         "token_address": address,
         "symbol": symbol,
@@ -1553,7 +1583,216 @@ async def fomo_coin_detail(token_address: str, hours: int = 24) -> dict:
         "net_flow_usd": str(bought_total - sold_total),
         "buyers": buyers,
         "sellers": sellers,
+        "trading": {
+            # Empty when the coin is observed but has no market we can price.
+            "symbols": tradable,
+            # Gate verdicts up front: an armed level on a pair that fails
+            # these sits BLOCKED instead of filling, and that is worth
+            # knowing before placing it, not after.
+            "pairs": await _pair_health(tradable),
+            "dry_run": settings.dex_dry_run,
+            "min_order_quote": str(settings.dex_min_order_quote),
+            "open_levels": [
+                {
+                    "intent_id": level.id,
+                    "symbol": level.symbol,
+                    "side": level.side,
+                    "status": level.status,
+                    "limit_price": str(level.limit_price),
+                    "amount_in": str(level.amount_in),
+                    "amount_in_coin": level.amount_in_coin,
+                    "blocked_reason": level.blocked_reason,
+                }
+                for level in levels
+            ],
+        },
     }
+
+
+def _dynamic_candidates(token_address: str) -> list[str]:
+    """Pair names for a discovered token, keyed by its address.
+
+    Looked up by address rather than by symbol: this chain has several
+    contracts per popular name, so a name alone does not say which one.
+    """
+    meta = dynamic_token_by_address(token_address)
+    if meta is None:
+        return []
+    return [f"{meta.symbol}{quote}" for quote in ("USDG", "ETH")]
+
+
+async def _pair_health(symbols: list[str]) -> list[dict]:
+    """Risk verdict per pair, evaluated now rather than at execution.
+
+    The gates are what decide whether an armed level ever fills, so finding
+    out after placing one is finding out too late. One DexScreener client is
+    shared across the symbols: its TTL cache is keyed by token address, so
+    the USDG and ETH pairs of the same coin cost a single upstream call.
+    """
+    if not symbols:
+        return []
+    market = DexScreenerClient()
+    limits = RiskLimits.from_settings()
+    health = []
+    try:
+        for symbol in symbols:
+            entry = {
+                "symbol": symbol,
+                "min_liquidity_usd": str(limits.min_liquidity_usd),
+                "min_volume_h24_usd": str(limits.min_volume_h24_usd),
+            }
+            try:
+                snapshot = await market.snapshot(resolve_pair(symbol))
+            except (DexConfigError, DexScreenerError) as exc:
+                # No pool for this quote, or the token is unknown upstream --
+                # not a risk verdict, an absence of a market.
+                health.append({**entry, "ok": False, "reasons": [str(exc)], "tradable": False})
+                continue
+            verdict = evaluate(snapshot, limits=limits)
+            health.append({
+                **entry,
+                "tradable": True,
+                "ok": verdict.ok,
+                "reasons": list(verdict.reasons),
+                "price_quote": str(snapshot.price_quote),
+                "price_usd": str(snapshot.price_usd),
+                "liquidity_usd": str(snapshot.token_liquidity_usd),
+                "volume_h24_usd": str(snapshot.token_volume_h24),
+                "pool_liquidity_usd": str(snapshot.pair_liquidity_usd),
+                "pools_considered": snapshot.pools_considered,
+            })
+    finally:
+        await market.close()
+    return health
+
+
+def _tradable_symbols(token_address: str) -> list[str]:
+    """Pairs whose base token is this coin, hand-pinned or chain-verified.
+
+    A coin only needs its ``decimals`` known for certain; the registry in
+    ``app.dex.tokens`` pins some by hand, and the tape verifies the rest by
+    calling the token's own ``decimals()``. Both are safe to price an order
+    with -- so both are offered. Whether a trade can actually route and pass
+    the risk gates is decided at execution, not hidden behind a whitelist.
+    """
+    wanted = token_address.lower()
+    symbols: list[str] = []
+    for symbol in list_pairs():
+        try:
+            pair = resolve_pair(symbol)
+        except DexConfigError:
+            continue
+        if pair.base.address.lower() == wanted and symbol not in symbols:
+            symbols.append(symbol)
+    # A hand-pinned pair wins: same token, but with a tick size chosen for its
+    # price range instead of the generic one a discovered pair gets.
+    if symbols:
+        return symbols
+    for symbol in _dynamic_candidates(wanted):
+        try:
+            pair = resolve_pair(symbol)
+        except DexConfigError:
+            continue
+        if pair.base.address.lower() == wanted and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+class LimitOrderPayload(BaseModel):
+    symbol: str
+    side: Literal["Buy", "Sell"] = "Buy"
+    limit_price: Decimal = Field(gt=0)
+    # What you hand over: quote coin for a buy, base coin for a sell. Naming
+    # it "amount" rather than "amount_quote" keeps that honest.
+    amount: Decimal = Field(gt=0)
+
+
+@router.post("/fomo/limit-order")
+async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
+    """Arm a limit buy for a coin, as a synthetic level the DEX worker runs.
+
+    This does not touch the chain: it writes a ``dex_intents`` row in
+    ``WAITING``, exactly like a grid level, and ``app.workers.dex`` is what
+    watches the price and executes it -- under the same risk gates, the same
+    slippage cap and the same ``DEX_DRY_RUN`` switch. The row carries no
+    ``profile_id``, which is what distinguishes a hand-placed level from one
+    a grid produced.
+    """
+    symbol = payload.symbol.strip().upper()
+    # Tokens the tape verified on chain are tradable too, not just the ones
+    # pinned in app/dex/tokens.py.
+    await load_dynamic_tokens(SessionLocal)
+    try:
+        pair = resolve_pair(symbol)
+    except DexConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # A sell hands over base tokens, a buy hands over quote. The floor is a
+    # quote-denominated notional either way, so a sell is measured at its own
+    # limit price rather than waved through.
+    if payload.side == "Buy":
+        amount_in_coin, notional = pair.quote_coin, payload.amount
+    else:
+        amount_in_coin, notional = pair.base_coin, payload.amount * payload.limit_price
+    if notional < settings.dex_min_order_quote:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"minimum order is {settings.dex_min_order_quote} {pair.quote_coin}; "
+                f"this is worth about {notional} {pair.quote_coin}"
+            ),
+        )
+
+    async with SessionLocal() as session:
+        repository = DexIntentRepository(session)
+        intent = await repository.create_level(
+            symbol=symbol,
+            side=payload.side,
+            limit_price=payload.limit_price,
+            amount_in=payload.amount,
+            amount_in_coin=amount_in_coin,
+            order_link_id=str(uuid4()),
+        )
+        await session.commit()
+        intent_id, link_id = intent.id, intent.order_link_id
+
+    logger.info(
+        "manual limit %s armed: %s %s %s at %s (intent %s)",
+        payload.side, payload.amount, amount_in_coin, symbol, payload.limit_price, intent_id,
+    )
+    return {
+        "intent_id": intent_id,
+        "order_link_id": link_id,
+        "symbol": symbol,
+        "side": payload.side,
+        "limit_price": str(payload.limit_price),
+        "amount_in": str(payload.amount),
+        "amount_in_coin": amount_in_coin,
+        "status": "WAITING",
+        "dry_run": settings.dex_dry_run,
+        "note": (
+            "DEX_DRY_RUN is on: the level is watched and quoted but nothing is signed"
+            if settings.dex_dry_run
+            else "DEX_DRY_RUN is off: the DEX worker will sign and broadcast when the price is met"
+        ),
+    }
+
+
+@router.post("/fomo/limit-order/{intent_id}/cancel")
+async def fomo_limit_order_cancel(intent_id: int) -> dict:
+    async with SessionLocal() as session:
+        intent = await session.get(DexIntent, intent_id)
+        if intent is None:
+            raise HTTPException(status_code=404, detail="level not found")
+        if intent.profile_id is not None:
+            raise HTTPException(status_code=409, detail="this level belongs to a grid profile")
+        if intent.status not in ("WAITING", "BLOCKED"):
+            # Past WAITING a nonce may be reserved or a transaction signed;
+            # cancelling there is the DEX worker's business, not a button's.
+            raise HTTPException(status_code=409, detail=f"level is {intent.status}, too late to cancel")
+        intent.status = "CANCELLED"
+        await session.commit()
+    return {"intent_id": intent_id, "status": "CANCELLED"}
 
 
 @router.get("/fomo/leaders")
