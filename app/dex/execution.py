@@ -213,15 +213,21 @@ async def execute_swap(
         if token_in.native
         else await chain.token_balance(token_in)
     )
-    if balance < amount_in:
-        await progress.block(
-            f"wallet holds {balance} {token_in.symbol}, needs {amount_in}"
-        )
+    underfunded = (
+        f"wallet holds {balance} {token_in.symbol}, needs {amount_in}"
+        if balance < amount_in
+        else None
+    )
+    # A dry run is asking what would happen, so an empty wallet must not hide
+    # the quote behind it -- it is reported and the pipeline runs on. A live run
+    # stops here rather than quoting something it cannot pay for.
+    if underfunded and not dry:
+        await progress.block(underfunded)
         return SwapOutcome(
             status=IntentStatus.BLOCKED,
             symbol=pair.symbol,
             side=side,
-            reason=f"wallet holds {balance} {token_in.symbol}, needs {amount_in}",
+            reason=underfunded,
             market_price=snapshot.price_quote,
         )
 
@@ -229,7 +235,7 @@ async def execute_swap(
     # move it; native ETH needs none. A live approval is waited out here, so the
     # swap that follows signs against an allowance that is already on chain.
     approval = None
-    if not token_in.native:
+    if not token_in.native and not underfunded:
         approval = await ensure_allowance(
             chain, token_in, amount_wei=amount_in_wei, dry_run=dry
         )
@@ -260,6 +266,8 @@ async def execute_swap(
     if dry:
         await progress.stand_down()
         notes = ["DEX_DRY_RUN is on; nothing was signed or sent"]
+        if underfunded:
+            notes.append(f"{underfunded} -- fund it before a live run")
         if approval is not None and not approval.sufficient:
             notes.append(
                 f"would first approve {approval.token} for Permit2 {approval.spender}"

@@ -167,9 +167,11 @@ async def test_a_quote_worse_than_the_limit_does_not_become_a_market_order():
     assert uniswap.calls == ["quote"]
 
 
-async def test_an_underfunded_wallet_blocks_before_quoting():
+async def test_an_underfunded_wallet_blocks_a_live_swap_before_quoting():
     uniswap = FakeUniswap()
-    outcome = await buy(chain=FakeChain(balance="0.0001"), uniswap=uniswap)
+    outcome = await buy(
+        chain=FakeChain(balance="0.0001"), uniswap=uniswap, dry_run=False
+    )
 
     assert outcome.status == IntentStatus.BLOCKED
     assert "wallet holds" in outcome.reason
@@ -310,3 +312,23 @@ async def test_calldata_aimed_at_an_unknown_contract_is_not_signed(monkeypatch):
     with pytest.raises(UniswapError) as exc:
         _check_router("0x" + "ee" * 20)
     assert "refusing to sign" in str(exc.value)
+
+
+async def test_a_dry_run_quotes_even_when_the_wallet_is_empty():
+    # Reporting what the swap would cost is the whole point of a dry run;
+    # an unfunded wallet is a note on the result, not a reason to hide it.
+    uniswap = FakeUniswap()
+    outcome = await buy(chain=FakeChain(balance="0"), uniswap=uniswap)
+
+    assert outcome.status == "DRY_RUN"
+    assert uniswap.calls == ["quote"]
+    assert "fund it before a live run" in outcome.reason
+    assert outcome.quoted_price is not None
+
+
+async def test_a_live_swap_still_stops_at_an_empty_wallet():
+    uniswap = FakeUniswap()
+    outcome = await buy(chain=FakeChain(balance="0"), uniswap=uniswap, dry_run=False)
+
+    assert outcome.status == IntentStatus.BLOCKED
+    assert uniswap.calls == []
