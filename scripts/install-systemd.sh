@@ -60,13 +60,18 @@ render() {
 Description=$description
 After=network-online.target postgresql.service$after_extra
 Wants=network-online.target
+# A missing setting is not something a restart fixes: without this a
+# misconfigured service restarts every RestartSec forever, burning CPU and
+# burying the one useful line in thousands of identical tracebacks.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=$type
 User=$RUN_USER
 Group=$RUN_GROUP
 WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$INSTALL_DIR/.env
+EnvironmentFile=-$INSTALL_DIR/.env
 ExecStart=$exec_line
 UNIT
     [ -n "$restart" ] && printf 'Restart=%s\nRestartSec=%s\n' "$restart" "$restart_sec"
