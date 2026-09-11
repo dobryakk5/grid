@@ -558,11 +558,29 @@ async def _build_transaction(
 
 
 async def _require_storage(session: AsyncSession | None) -> None:
+    """Prove the intent can be written, not merely that a server answers.
+
+    The probe reads from the table the swap will be recorded in: a reachable
+    database with no schema in it fails just as late and just as expensively as
+    an unreachable one.
+    """
     if session is None:
         raise StorageUnavailable("a live swap needs a database session")
     try:
-        await session.execute(text("SELECT 1"))
+        await session.execute(text("SELECT 1 FROM dex_intents LIMIT 0"))
     except Exception as exc:
+        # The session is left in a failed transaction; the worker reuses it.
+        try:
+            await session.rollback()
+        except Exception:  # pragma: no cover - the connection is already gone
+            pass
+        detail = str(exc)
+        if "does not exist" in detail or "UndefinedTable" in detail:
+            raise StorageUnavailable(
+                "the database has no dex_intents table, so a live swap could "
+                "not be recorded before it is broadcast; create the schema "
+                "with `make db-init`"
+            ) from None
         raise StorageUnavailable(
             "a live swap has to be recorded before it is broadcast, and the "
             f"database is not reachable: {exc}"

@@ -448,3 +448,29 @@ async def test_slippage_can_be_set_per_trade():
     )
 
     assert uniswap.slippage == Decimal("0.1")
+
+
+async def test_a_database_without_the_schema_fails_the_preflight_too():
+    # A reachable server with no tables in it fails just as late and just as
+    # expensively as an unreachable one, so the probe reads the actual table.
+    from app.dex.execution import StorageUnavailable
+
+    class EmptySchemaSession:
+        def __init__(self):
+            self.rolled_back = False
+
+        async def execute(self, *args, **kwargs):
+            raise RuntimeError('relation "dex_intents" does not exist')
+
+        async def rollback(self):
+            self.rolled_back = True
+
+    session = EmptySchemaSession()
+    chain, uniswap = FakeChain(), FakeUniswap()
+    with pytest.raises(StorageUnavailable) as exc:
+        await buy(session=session, chain=chain, uniswap=uniswap, dry_run=False)
+
+    assert "make db-init" in str(exc.value)
+    assert session.rolled_back
+    assert uniswap.calls == []
+    assert chain.calls == []

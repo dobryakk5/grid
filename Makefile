@@ -1,4 +1,4 @@
-.PHONY: install test api worker market-data dex-sampler dex-worker bybit-status health
+.PHONY: install test db-init api worker market-data dex-sampler dex-worker bybit-status health
 
 install:
 	python3 -m venv .venv
@@ -7,6 +7,9 @@ install:
 
 test:
 	.venv/bin/pytest
+
+db-init:
+	.venv/bin/python scripts/init_db.py
 
 api:
 	./scripts/run-api.sh
