@@ -526,6 +526,14 @@ sudo INSTALL_DIR=/var/py/grid RUN_USER=gridbot ./scripts/install-systemd.sh
 ./scripts/install-systemd.sh --print
 ```
 
+Порт API скрипт **берёт из уже установленного юнита**, а не навязывает свой:
+перед ним обычно стоит nginx, и молча переехавший порт превращается в 502,
+который с этим скриптом никто не свяжет. Задать явно:
+
+```bash
+sudo API_PORT=8001 ./scripts/install-systemd.sh
+```
+
 Скрипт пишет семь юнитов (`api`, `worker`, `dex-worker`, `dex-sampler`,
 `fomo-registry`, `chain-tape`, `market-data`) плюс таймер и делает
 `daemon-reload`. Включать нужное — вручную:
