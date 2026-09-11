@@ -45,6 +45,10 @@ class QuoteResult:
     routing: str
     amount_in: int
     amount_out: int
+    # The floor the swap itself enforces: below this the transaction reverts.
+    # It is the only amount the chain actually guarantees, which makes it the
+    # one a limit has to be judged against.
+    min_amount_out: int
     permit_data: dict | None
     received_at: float = field(default_factory=time.monotonic)
 
@@ -68,21 +72,35 @@ class QuoteResult:
         return quote-per-base, so a limit compares the same way regardless of
         which token is being spent.
         """
+        return self._price_for(pair, side, self.amount_out)
+
+    def worst_price(self, pair: DexPair, side: str = "Buy") -> Decimal:
+        """The worst price this swap can produce without reverting.
+
+        ``price`` is what the route is expected to give; slippage tolerance
+        means the fill may land anywhere down to ``min_amount_out``. A limit
+        promises "this price or better", and only this figure can keep that
+        promise -- checking the expected price would let a fill breach the limit
+        by up to the slippage tolerance.
+        """
+        return self._price_for(pair, side, self.min_amount_out or self.amount_out)
+
+    def _price_for(self, pair: DexPair, side: str, amount_out: int) -> Decimal:
         if side.strip().lower() == "sell":
             base_in = pair.base.from_wei(self.amount_in)
             if base_in <= 0:
                 raise UniswapError("quote has no input amount")
-            return pair.quote.from_wei(self.amount_out) / base_in
-        base_out = pair.base.from_wei(self.amount_out)
+            return pair.quote.from_wei(amount_out) / base_in
+        base_out = pair.base.from_wei(amount_out)
         if base_out <= 0:
             raise UniswapError("quote returned no output amount")
         return pair.quote.from_wei(self.amount_in) / base_out
 
 
-def _amount_of(side: dict | None) -> int:
+def _amount_of(side: dict | None, *, key: str = "amount") -> int:
     if not isinstance(side, dict):
         return 0
-    return to_int(side.get("amount")) or 0
+    return to_int(side.get(key)) or 0
 
 
 class UniswapClient:
@@ -177,6 +195,7 @@ class UniswapClient:
             routing=routing,
             amount_in=_amount_of(quote.get("input")) or amount_in_wei,
             amount_out=_amount_of(quote.get("output")),
+            min_amount_out=_amount_of(quote.get("output"), key="minimumAmount"),
             permit_data=data.get("permitData") or quote.get("permitData"),
         )
         if result.amount_out <= 0:

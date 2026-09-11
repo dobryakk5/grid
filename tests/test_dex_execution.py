@@ -68,8 +68,11 @@ class FakeChain:
 
 
 class FakeUniswap:
-    def __init__(self, *, amount_out="4500000000000000000"):
+    def __init__(self, *, amount_out="4500000000000000000", min_amount_out=None):
         self.amount_out = int(amount_out)
+        # Default to no slippage, so tests that do not care about it read the
+        # expected amount as the guaranteed one.
+        self.min_amount_out = int(min_amount_out or amount_out)
         self.calls = []
 
     async def quote_exact_in(self, *, pair, side, amount_in_wei, swapper, **kwargs):
@@ -80,6 +83,7 @@ class FakeUniswap:
             routing="CLASSIC",
             amount_in=amount_in_wei,
             amount_out=self.amount_out,
+            min_amount_out=self.min_amount_out,
             permit_data=getattr(self, "permit_data", None),
         )
 
@@ -332,3 +336,26 @@ async def test_a_live_swap_still_stops_at_an_empty_wallet():
 
     assert outcome.status == IntentStatus.BLOCKED
     assert uniswap.calls == []
+
+
+async def test_the_limit_is_judged_on_the_worst_fill_not_the_expected_one():
+    # Expected 4.5 PONS for 0.001 ETH is 0.000222, inside a 0.000225 limit; but
+    # slippage allows as little as 4.4 PONS, which is 0.000227 -- a breach.
+    uniswap = FakeUniswap(
+        amount_out="4500000000000000000", min_amount_out="4400000000000000000"
+    )
+    outcome = await buy(uniswap=uniswap, limit="0.000225")
+
+    assert outcome.status == IntentStatus.WAITING
+    assert "worst-case fill" in outcome.reason
+    # The expected price is still reported, so the log shows both.
+    assert outcome.quoted_price == Decimal("0.001") / Decimal("4.5")
+
+
+async def test_a_quote_whose_worst_case_still_meets_the_limit_proceeds():
+    uniswap = FakeUniswap(
+        amount_out="4500000000000000000", min_amount_out="4400000000000000000"
+    )
+    outcome = await buy(uniswap=uniswap, limit="0.00023")
+
+    assert outcome.status == "DRY_RUN"

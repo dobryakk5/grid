@@ -248,21 +248,26 @@ async def execute_swap(
     )
     await progress.to(IntentStatus.QUOTED)
     executable = quote.price(pair, side)
-    if not _meets_limit(executable, limit_price, selling=selling):
+    # The limit is judged on the worst fill the transaction can produce, not the
+    # expected one: slippage tolerance is the difference between a promise and a
+    # hope, and a synthetic limit order has to make a promise.
+    guaranteed = quote.worst_price(pair, side)
+    if not _meets_limit(guaranteed, limit_price, selling=selling):
         await progress.stand_down()
         return SwapOutcome(
             status=IntentStatus.WAITING,
             symbol=pair.symbol,
             side=side,
             reason=(
-                f"executable price {executable} is worse than the limit "
-                f"{limit_price} for this size"
+                f"worst-case fill {guaranteed} is worse than the limit "
+                f"{limit_price} for this size (expected {executable})"
             ),
             market_price=snapshot.price_quote,
             quoted_price=executable,
         )
 
     expected_out = token_out.from_wei(quote.amount_out)
+    guaranteed_out = token_out.from_wei(quote.min_amount_out or quote.amount_out)
     if dry:
         await progress.stand_down()
         notes = ["DEX_DRY_RUN is on; nothing was signed or sent"]
@@ -305,7 +310,7 @@ async def execute_swap(
     if progress.active:
         await progress.to(
             IntentStatus.SUBMITTING,
-            min_amount_out=expected_out,
+            min_amount_out=guaranteed_out,
             baseline_liquidity_usd=snapshot.token_liquidity_usd,
             baseline_volume_h24_usd=snapshot.token_volume_h24,
             wallet_address=signed.wallet_address,
@@ -330,7 +335,7 @@ async def execute_swap(
         limit_price=limit_price,
         amount_in=amount_in,
         amount_in_coin=token_in.symbol,
-        min_amount_out=expected_out,
+        min_amount_out=guaranteed_out,
         baseline_liquidity_usd=snapshot.token_liquidity_usd,
         baseline_volume_h24_usd=snapshot.token_volume_h24,
         wallet_address=signed.wallet_address,
