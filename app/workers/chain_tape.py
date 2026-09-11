@@ -1,24 +1,30 @@
-"""On-chain trade tape for tracked FOMO wallets.
+"""On-chain trade tape for tracked wallets -- every token they touch.
+
+Scanning is wallet-centric, not token-centric: ``eth_getLogs`` is filtered by
+the tracked wallets in the indexed ``from``/``to`` topics and **not** by token
+address, so a wallet's whole trading activity is captured rather than only
+the one pair this bot happens to trade. Cost does not grow with the number of
+wallets -- a topic position accepts a set of values, so the whole roster is
+two calls per block range.
 
 Two jobs share one cadence:
 
 1. **Backfill** -- for every ``fomo_traders`` row with
-   ``backfilled_from_block IS NULL``, scan that one wallet's last
-   ``settings.fomo_new_wallet_backfill_blocks`` for trades *before* the
-   global cursor is allowed to move any further. Without this, a wallet
-   discovered because it just bought something is exactly the wallet whose
-   first purchase would never be recorded: the registry only learns about it
-   after the fact, by which point the realtime cursor has already moved past
-   that block.
+   ``backfilled_from_block IS NULL``, scan that wallet's last
+   ``settings.fomo_new_wallet_backfill_blocks`` *before* the global cursor
+   moves any further. Without this, a wallet discovered because it just
+   bought something is exactly the wallet whose first purchase would never be
+   recorded: it is noticed after the fact, by which point the realtime cursor
+   has already passed that block.
 2. **Realtime** -- advance the shared cursor forward from the chain head,
-   staying ``chain_tape_confirmations`` blocks behind it, filtered by token
-   address (see ``app.chain.tape`` for why token-filtered rather than
-   wallet-filtered is the right axis here).
+   staying ``chain_tape_confirmations`` blocks behind it.
 
-``ChainTransaction`` rows (raw ``Transfer`` legs) and ``ChainSwap`` rows
-(reconstructed fills) are written in the same database transaction as the
-cursor move / backfill marker -- a crash between them must not lose data
-silently.
+``ChainTransaction`` rows and ``ChainSwap`` rows are written in the same
+database transaction as the cursor move / backfill marker, so a crash between
+them cannot silently lose data. Note that ``ChainTransaction.transfers``
+holds the legs involving *tracked wallets*, which is everything
+``classify_any`` needs to re-derive a fill -- not necessarily every leg of
+the transaction.
 """
 
 import asyncio
@@ -30,41 +36,40 @@ from sqlalchemy.dialects.postgresql import insert
 from app.chain.tape import (
     AdaptiveBatchSize,
     ChainSwapRow,
-    classify,
-    discover_wallet_tx_hashes,
-    fetch_transaction_transfers,
-    fetch_transfers,
+    classify_any,
+    fetch_wallet_transfers,
     group_by_tx,
     is_batch_too_large_error,
     price_swap,
 )
+from app.chain.tokens import resolve_token_meta
 from app.core.config import settings
 from app.db.init import init_db
 from app.db.models import ChainScanCursor, ChainSwap, ChainTransaction, FomoTrader
 from app.db.session import SessionLocal
 from app.dex.chain import ChainClient
-from app.dex.tokens import DexConfigError, DexPair, resolve_pair
-from app.workers.dex_sampler import watched_symbols
+from app.dex.tokens import DexConfigError, resolve_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 SCOPE_REALTIME = "realtime"
 
+# Assets that count as the money side of a swap. Everything else a wallet
+# trades against these is treated as the instrument being bought or sold.
+_QUOTE_SYMBOLS = ("USDG", "WETH")
 
-async def _resolve_pairs(symbols: list[str]) -> list[DexPair]:
-    pairs = []
-    for symbol in symbols:
+
+def quote_assets() -> dict[str, str]:
+    assets: dict[str, str] = {}
+    for symbol in _QUOTE_SYMBOLS:
         try:
-            pairs.append(resolve_pair(symbol))
-        except DexConfigError as exc:
-            logger.warning("%s skipped: %s", symbol, exc)
-    return pairs
-
-
-def _token_addresses(pairs: list[DexPair]) -> list[str]:
-    addresses = {pair.base.address for pair in pairs} | {pair.quote.address for pair in pairs}
-    return sorted(addresses)
+            token = resolve_token(symbol)
+        except DexConfigError:
+            continue
+        if token.address:
+            assets[token.address.lower()] = token.symbol
+    return assets
 
 
 async def _tracked_wallets(session) -> set[str]:
@@ -108,16 +113,53 @@ async def _store(session, grouped: dict[str, list[dict]], rows: list[ChainSwapRo
             pricing_source=priced.pricing_source,
         )
         statement = statement.on_conflict_do_update(
-            index_elements=[ChainSwap.tx_hash, ChainSwap.wallet_address],
+            index_elements=[ChainSwap.tx_hash, ChainSwap.wallet_address, ChainSwap.token_address],
             set_={"value_usd": statement.excluded.value_usd, "pricing_source": statement.excluded.pricing_source},
         )
         await session.execute(statement)
 
 
+async def _rows_from(client, transfers: list[dict], wallets: set[str], *, chain_id: int) -> list[ChainSwapRow]:
+    """Resolve token metadata for whatever was seen, then classify.
+
+    Metadata resolution owns its own short sessions, so the RPC calls it may
+    need happen before the write transaction is opened -- never inside it.
+    """
+    if not transfers:
+        return []
+    token_meta = await resolve_token_meta(
+        client, SessionLocal, [item["token_address"] for item in transfers], chain_id=chain_id
+    )
+    assets = quote_assets()
+    rows: list[ChainSwapRow] = []
+    for tx_transfers in group_by_tx(transfers).values():
+        rows.extend(classify_any(
+            tx_transfers, wallets, token_meta=token_meta, quote_assets=assets, chain_id=chain_id
+        ))
+    return rows
+
+
+async def _fetch_chunked(client, wallets: list[str], from_block: int, to_block: int) -> list[dict]:
+    """Walk a wide range in RPC-sized pieces.
+
+    A backfill window is an hour of a 15-blocks-per-second chain, which no
+    node will serve as a single ``eth_getLogs``; the realtime batch size is
+    the honest unit to ask for.
+    """
+    chunk = max(settings.chain_tape_block_batch_min, settings.chain_tape_block_batch_max)
+    out: list[dict] = []
+    start = from_block
+    while start <= to_block:
+        end = min(start + chunk - 1, to_block)
+        out.extend(await fetch_wallet_transfers(client, wallets, start, end))
+        start = end + 1
+    return out
+
+
 # ---- backfill ---------------------------------------------------------
 
 
-async def run_backfill_pass(client: ChainClient, pairs: list[DexPair], token_addresses: list[str], *, chain_id: int) -> int:
+async def run_backfill_pass(client: ChainClient, *, chain_id: int) -> int:
     async with SessionLocal() as session:
         pending = list((await session.execute(
             select(FomoTrader).where(
@@ -125,47 +167,28 @@ async def run_backfill_pass(client: ChainClient, pairs: list[DexPair], token_add
                 FomoTrader.evm_address.is_not(None),
             )
         )).scalars())
+        all_wallets = await _tracked_wallets(session)
     if not pending:
         return 0
 
     current_block = await client.w3.eth.block_number
     from_block = max(current_block - settings.fomo_new_wallet_backfill_blocks, 0)
     done = 0
-    # Shared across every wallet in this pass: trades cluster in the same
-    # blocks, and each repeat lookup is a round trip we do not need.
-    block_times: dict[int, int] = {}
-
-    async with SessionLocal() as session:
-        all_wallets = await _tracked_wallets(session)
 
     for trader in pending:
         wallet = trader.evm_address
         try:
-            tx_hashes = await discover_wallet_tx_hashes(client, wallet, token_addresses, from_block, current_block)
-            grouped: dict[str, list[dict]] = {}
-            rows: list[ChainSwapRow] = []
-            for tx_hash in tx_hashes:
-                transfers = await fetch_transaction_transfers(
-                    client, tx_hash, token_addresses, block_time_cache=block_times
-                )
-                if not transfers:
-                    continue
-                grouped[tx_hash] = transfers
-                for pair in pairs:
-                    # Classify against *every* tracked wallet, not just the one
-                    # being backfilled: we fetched the whole receipt, so if this
-                    # transaction also moved another tracked wallet's tokens,
-                    # that row is free to record here. Scoping to one wallet
-                    # would leave it to that wallet's own backfill window, which
-                    # may not reach back this far. The composite PK makes the
-                    # overlap idempotent.
-                    rows.extend(classify(transfers, all_wallets, pair, chain_id=chain_id))
+            transfers = await _fetch_chunked(client, [wallet], from_block, current_block)
         except Exception:
             logger.exception("backfill failed for wallet %s; will retry next pass", wallet)
             continue
 
+        # Classify against every tracked wallet, not just this one: the scan
+        # is wallet-filtered, so if another tracked wallet was the
+        # counterparty its legs are already in hand and its row is free.
+        rows = await _rows_from(client, transfers, all_wallets, chain_id=chain_id)
         async with SessionLocal() as session:
-            await _store(session, grouped, rows, chain_id=chain_id)
+            await _store(session, group_by_tx(transfers), rows, chain_id=chain_id)
             await session.execute(
                 update(FomoTrader)
                 .where(FomoTrader.fomo_user_id == trader.fomo_user_id)
@@ -173,18 +196,19 @@ async def run_backfill_pass(client: ChainClient, pairs: list[DexPair], token_add
             )
             await session.commit()
         done += 1
-        logger.info("backfilled %s: %s tx scanned, %s swaps found", wallet, len(tx_hashes), len(rows))
+        logger.info("backfilled %s: %s transfers, %s swaps", wallet, len(transfers), len(rows))
     return done
 
 
 # ---- realtime -----------------------------------------------------------
 
 
-async def run_realtime_pass(
-    client: ChainClient, pairs: list[DexPair], token_addresses: list[str], batch: AdaptiveBatchSize, *, chain_id: int
-) -> int:
+async def run_realtime_pass(client: ChainClient, batch: AdaptiveBatchSize, *, chain_id: int) -> int:
     async with SessionLocal() as session:
         cursor = await session.get(ChainScanCursor, (chain_id, SCOPE_REALTIME))
+        wallets = await _tracked_wallets(session)
+    if not wallets:
+        return 0
 
     head = await client.w3.eth.block_number
     safe_head = head - settings.chain_tape_confirmations
@@ -207,7 +231,7 @@ async def run_realtime_pass(
     to_block = min(from_block + batch.current - 1, safe_head)
 
     try:
-        transfers = await fetch_transfers(client, token_addresses, from_block, to_block)
+        transfers = await fetch_wallet_transfers(client, sorted(wallets), from_block, to_block)
     except Exception as exc:
         if is_batch_too_large_error(exc):
             new_size = batch.shrink()
@@ -216,15 +240,9 @@ async def run_realtime_pass(
         raise
     batch.record_success()
 
-    grouped = group_by_tx(transfers)
-
+    rows = await _rows_from(client, transfers, wallets, chain_id=chain_id)
     async with SessionLocal() as session:
-        wallets = await _tracked_wallets(session)
-        rows: list[ChainSwapRow] = []
-        for tx_transfers in grouped.values():
-            for pair in pairs:
-                rows.extend(classify(tx_transfers, wallets, pair, chain_id=chain_id))
-        await _store(session, grouped, rows, chain_id=chain_id)
+        await _store(session, group_by_tx(transfers), rows, chain_id=chain_id)
         await session.execute(
             update(ChainScanCursor)
             .where(ChainScanCursor.chain_id == chain_id, ChainScanCursor.scope == SCOPE_REALTIME)
@@ -248,18 +266,12 @@ async def main() -> None:
     try:
         while True:
             try:
-                symbols = await watched_symbols()
-                pairs = await _resolve_pairs(symbols)
-                if not pairs:
-                    logger.info("no DEX pairs to watch; set DEX_WATCH_SYMBOLS")
-                else:
-                    token_addresses = _token_addresses(pairs)
-                    backfilled = await run_backfill_pass(client, pairs, token_addresses, chain_id=chain_id)
-                    if backfilled:
-                        logger.info("backfilled %s newly discovered wallets", backfilled)
-                    written = await run_realtime_pass(client, pairs, token_addresses, batch, chain_id=chain_id)
-                    if written:
-                        logger.info("recorded %s swap rows", written)
+                backfilled = await run_backfill_pass(client, chain_id=chain_id)
+                if backfilled:
+                    logger.info("backfilled %s newly discovered wallets", backfilled)
+                written = await run_realtime_pass(client, batch, chain_id=chain_id)
+                if written:
+                    logger.info("recorded %s swap rows", written)
             except Exception:
                 logger.exception("chain tape pass failed")
             await asyncio.sleep(settings.chain_tape_poll_seconds)

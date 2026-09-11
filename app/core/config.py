@@ -119,7 +119,10 @@ class Settings(BaseSettings):
     fomo_registry_poll_seconds: float = 900.0
     # How far back (in blocks) a newly discovered wallet is backfilled, so the
     # trade that got it noticed is not the one trade that goes missing.
-    fomo_new_wallet_backfill_blocks: int = 43_200  # ~24h at 2s/block
+    # Robinhood Chain produces roughly 15 blocks a second, so this is about an
+    # hour of chain time -- far enough back to catch the trade that surfaced a
+    # wallet, without asking the RPC for a day's worth of history.
+    fomo_new_wallet_backfill_blocks: int = 60_000
     # Raw-response inspection endpoint; off by default outside development.
     fomo_debug_api: bool = False
 

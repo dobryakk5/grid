@@ -592,10 +592,12 @@ class ChainSwap(Base):
 
     tx_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
     wallet_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    # Part of the key: a token-for-token swap changes two of a wallet's
+    # positions in one transaction, and both are real trades.
+    token_address: Mapped[str] = mapped_column(String(42), primary_key=True, index=True)
     chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     block_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    token_address: Mapped[str] = mapped_column(String(42), nullable=False, index=True)
     symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
     side: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY | SELL
     token_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
@@ -615,6 +617,25 @@ class ChainSwap(Base):
         Index("ix_chain_swaps_token_time", "token_address", "block_time_ms"),
         Index("ix_chain_swaps_wallet_time", "wallet_address", "block_time_ms"),
     )
+
+
+class ChainToken(Base):
+    """ERC-20 metadata for tokens met while scanning, not ones we trade.
+
+    Separate from the curated registry in ``app.dex.tokens`` on purpose: that
+    one is hand-pinned because a wrong ``decimals`` there misprices a real
+    order, while these are read from the contract at scan time so an
+    arbitrary token a tracked wallet touched can still be shown with the
+    right magnitude and name.
+    """
+
+    __tablename__ = "chain_tokens"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decimals: Mapped[int] = mapped_column(Integer, nullable=False, default=18)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ChainScanCursor(Base):

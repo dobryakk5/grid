@@ -53,6 +53,8 @@ __all__ = [
     "AdaptiveBatchSize",
     "ChainSwapRow",
     "classify",
+    "classify_any",
+    "fetch_wallet_transfers",
     "discover_wallet_tx_hashes",
     "fetch_transaction_transfers",
     "fetch_transfers",
@@ -276,6 +278,171 @@ async def fetch_transaction_transfers(
     for item in decoded:
         item["block_time_ms"] = cache[block_number]
     return decoded
+
+
+async def fetch_wallet_transfers(
+    client: ChainClient, wallets: list[str], from_block: int, to_block: int
+) -> list[dict]:
+    """Every ERC-20 ``Transfer`` touching any of ``wallets`` -- any token.
+
+    Deliberately *not* filtered by token address: the point is to see
+    everything these wallets bought and sold, not only the pair we happen to
+    trade ourselves.
+
+    Cost does not grow with the number of wallets, because ``eth_getLogs``
+    accepts a set of values per topic position: all wallets go into one
+    indexed-``from`` query and one indexed-``to`` query, so this is two calls
+    whether we track four wallets or four hundred.
+    """
+    if not wallets:
+        return []
+    padded = [_pad_topic(wallet) for wallet in wallets]
+
+    seen: set[tuple[str, int]] = set()
+    decoded: list[dict] = []
+    for topics in ([TRANSFER_TOPIC, padded, None], [TRANSFER_TOPIC, None, padded]):
+        logs = await client.w3.eth.get_logs({
+            "topics": topics,
+            "fromBlock": from_block,
+            "toBlock": to_block,
+        })
+        for log in logs:
+            item = _decode_log(log)
+            # A wallet-to-wallet transfer between two tracked wallets comes
+            # back from both queries; keep one copy.
+            key = (item["tx_hash"], item["log_index"])
+            if key in seen:
+                continue
+            seen.add(key)
+            decoded.append(item)
+
+    times = await _block_times(client, sorted({item["block_number"] for item in decoded}))
+    for item in decoded:
+        item["block_time_ms"] = times.get(item["block_number"])
+    return decoded
+
+
+def classify_any(
+    tx_transfers: list[dict],
+    tracked_wallets: set[str],
+    *,
+    token_meta: dict,
+    quote_assets: dict[str, str],
+    chain_id: int,
+    usd_quote_symbols: frozenset[str] | None = None,
+) -> list[ChainSwapRow]:
+    """Net-delta classification for arbitrary tokens, not a registered pair.
+
+    Same principle as :func:`classify` -- what did the wallet gain and lose
+    in this transaction -- generalised so any token can be the base, with
+    ``quote_assets`` (address -> symbol) naming the assets that count as the
+    money side.
+
+    Two shapes are reported: one non-quote token against one quote asset
+    (the ordinary case, priced off the money leg), and one token straight for
+    another with no quote asset involved, which yields two rows -- the sale
+    and the purchase -- both left UNPRICED, since nothing in the transaction
+    says what either was worth in dollars.
+
+    Anything busier (a swap landing in three tokens, an LP action) is skipped
+    rather than split by some invented rule: a missing row is honest, a
+    fabricated one is not.
+    """
+    if not tx_transfers:
+        return []
+
+    if usd_quote_symbols is None:
+        usd_quote_symbols = frozenset(
+            item.strip().upper() for item in (settings.usd_quote_symbols or "").split(",") if item.strip()
+        )
+
+    tracked_lower = {wallet.lower() for wallet in tracked_wallets}
+    quote_lower = {address.lower(): symbol for address, symbol in quote_assets.items()}
+
+    wallets_seen: set[str] = set()
+    for transfer in tx_transfers:
+        for side in ("from_address", "to_address"):
+            if transfer[side].lower() in tracked_lower:
+                wallets_seen.add(transfer[side].lower())
+
+    tx_hash = tx_transfers[0]["tx_hash"]
+    block_number = tx_transfers[0]["block_number"]
+    block_time_ms = tx_transfers[0]["block_time_ms"]
+
+    rows: list[ChainSwapRow] = []
+    for wallet in sorted(wallets_seen):
+        deltas: dict[str, Decimal] = {}
+        for transfer in tx_transfers:
+            token = transfer["token_address"].lower()
+            meta = token_meta.get(token)
+            if meta is None:
+                continue
+            if transfer["to_address"].lower() == wallet:
+                sign = Decimal(1)
+            elif transfer["from_address"].lower() == wallet:
+                sign = Decimal(-1)
+            else:
+                continue
+            deltas[token] = deltas.get(token, Decimal(0)) + sign * meta.from_wei(transfer["amount"])
+
+        moved = {token: delta for token, delta in deltas.items() if delta != 0}
+        quote_side = [token for token in moved if token in quote_lower]
+        base_side = [token for token in moved if token not in quote_lower]
+
+        pairs: list[tuple[str, str]] = []
+        if len(quote_side) == 1 and len(base_side) == 1:
+            pairs.append((base_side[0], quote_side[0]))
+        elif len(quote_side) == 0 and len(base_side) == 2:
+            # Token for token, with no money leg. Still two real trades --
+            # one position closed, another opened -- so both are recorded,
+            # each priced in the other and left UNPRICED in dollars rather
+            # than valued at some invented rate.
+            first, second = base_side
+            if (moved[first] > 0) == (moved[second] > 0):
+                continue
+            pairs.extend(((first, second), (second, first)))
+        else:
+            continue
+
+        for base_token, quote_token in pairs:
+            base_delta, quote_delta = moved[base_token], moved[quote_token]
+            if base_delta > 0 and quote_delta < 0:
+                side = "BUY"
+            elif base_delta < 0 and quote_delta > 0:
+                side = "SELL"
+            else:
+                continue
+
+            token_amount, quote_amount = abs(base_delta), abs(quote_delta)
+            if token_amount == 0 or quote_amount == 0:
+                continue
+
+            base_meta = token_meta[base_token]
+            quote_symbol = quote_lower.get(quote_token) or (
+                token_meta[quote_token].symbol if quote_token in token_meta else None
+            )
+            pricing_source, value_usd = "UNPRICED", None
+            if quote_symbol and quote_symbol.upper() in usd_quote_symbols:
+                pricing_source, value_usd = "QUOTE_LEG", quote_amount
+
+            rows.append(ChainSwapRow(
+                tx_hash=tx_hash,
+                wallet_address=AsyncWeb3.to_checksum_address(wallet),
+                chain_id=chain_id,
+                block_number=block_number,
+                block_time_ms=block_time_ms,
+                token_address=base_meta.address,
+                symbol=base_meta.symbol,
+                side=side,
+                token_amount=token_amount,
+                quote_address=quote_token,
+                quote_symbol=quote_symbol,
+                quote_amount=quote_amount,
+                price=quote_amount / token_amount,
+                value_usd=value_usd,
+                pricing_source=pricing_source,
+            ))
+    return rows
 
 
 def group_by_tx(transfers: list[dict]) -> dict[str, list[dict]]:

@@ -1426,6 +1426,124 @@ async def fomo_token_report(token: str, network_id: int | None = None, limit: in
     }
 
 
+@router.get("/fomo/leaders")
+async def fomo_leaders(hours: int = 24, limit: int = 50) -> dict:
+    """Per-trader aggregates over a window: what each wallet bought and sold.
+
+    The trader-centric counterpart to /fomo/token -- that one aggregates a
+    token across every wallet, this one aggregates a wallet across every
+    token, which is what "who is accumulating right now" actually asks.
+    """
+    hours = max(1, min(hours, 24 * 30))
+    limit = max(1, min(limit, 200))
+    since_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - hours * 3_600_000
+
+    bought = func.sum(case((ChainSwap.side == "BUY", ChainSwap.value_usd), else_=0))
+    sold = func.sum(case((ChainSwap.side == "SELL", ChainSwap.value_usd), else_=0))
+
+    async with SessionLocal() as session:
+        totals = (await session.execute(
+            select(
+                ChainSwap.wallet_address.label("wallet"),
+                bought.label("bought_usd"),
+                sold.label("sold_usd"),
+                func.count().filter(ChainSwap.side == "BUY").label("buys"),
+                func.count().filter(ChainSwap.side == "SELL").label("sells"),
+                func.max(ChainSwap.block_time_ms).label("last_trade_ms"),
+            )
+            .where(ChainSwap.block_time_ms >= since_ms)
+            .group_by(ChainSwap.wallet_address)
+            .order_by(bought.desc())
+            .limit(limit)
+        )).all()
+
+        if not totals:
+            return {"hours": hours, "since_ms": since_ms, "leaders": []}
+
+        wallets = [row.wallet for row in totals]
+        wallets_lower = {wallet.lower() for wallet in wallets}
+
+        # Per-token breakdown -- the "что купили" half of the answer.
+        per_token = (await session.execute(
+            select(
+                ChainSwap.wallet_address.label("wallet"),
+                ChainSwap.symbol,
+                ChainSwap.token_address,
+                func.sum(
+                    case((ChainSwap.side == "BUY", ChainSwap.token_amount), else_=-ChainSwap.token_amount)
+                ).label("net_qty"),
+                bought.label("bought_usd"),
+                sold.label("sold_usd"),
+                func.count().label("trades"),
+            )
+            .where(ChainSwap.block_time_ms >= since_ms, ChainSwap.wallet_address.in_(wallets))
+            .group_by(ChainSwap.wallet_address, ChainSwap.symbol, ChainSwap.token_address)
+            .order_by(bought.desc())
+        )).all()
+
+        latest_rank = (
+            select(FomoTraderRank.fomo_user_id, FomoTraderRank.rank)
+            .distinct(FomoTraderRank.fomo_user_id)
+            .order_by(FomoTraderRank.fomo_user_id, FomoTraderRank.captured_at.desc())
+            .subquery()
+        )
+        identities = (await session.execute(
+            select(
+                FomoTrader.fomo_user_id,
+                FomoTrader.evm_address,
+                FomoTrader.user_handle,
+                FomoTrader.display_name,
+                latest_rank.c.rank,
+            )
+            .outerjoin(latest_rank, latest_rank.c.fomo_user_id == FomoTrader.fomo_user_id)
+            .where(func.lower(FomoTrader.evm_address).in_(wallets_lower))
+        )).all()
+
+    by_wallet: dict[str, dict] = {}
+    for row in identities:
+        by_wallet[row.evm_address.lower()] = {
+            "fomo_user_id": row.fomo_user_id,
+            "handle": row.user_handle,
+            "display_name": row.display_name,
+            "rank": row.rank,
+        }
+
+    tokens_by_wallet: dict[str, list[dict]] = {}
+    for row in per_token:
+        tokens_by_wallet.setdefault(row.wallet.lower(), []).append({
+            "symbol": row.symbol,
+            "token_address": row.token_address,
+            "net_token_amount": str(row.net_qty),
+            "bought_usd": str(row.bought_usd or 0),
+            "sold_usd": str(row.sold_usd or 0),
+            "trades": row.trades,
+        })
+
+    leaders = []
+    for row in totals:
+        key = row.wallet.lower()
+        identity = by_wallet.get(key, {})
+        bought_usd = Decimal(row.bought_usd or 0)
+        sold_usd = Decimal(row.sold_usd or 0)
+        leaders.append({
+            "wallet_address": row.wallet,
+            "fomo_user_id": identity.get("fomo_user_id"),
+            "handle": identity.get("handle"),
+            "display_name": identity.get("display_name"),
+            "rank": identity.get("rank"),
+            "bought_usd": str(bought_usd),
+            "sold_usd": str(sold_usd),
+            "net_flow_usd": str(bought_usd - sold_usd),
+            "buy_count": row.buys,
+            "sell_count": row.sells,
+            "trade_count": row.buys + row.sells,
+            "last_trade_at_ms": row.last_trade_ms,
+            "tokens": tokens_by_wallet.get(key, []),
+        })
+
+    return {"hours": hours, "since_ms": since_ms, "leaders": leaders}
+
+
 @router.get("/fomo/tape")
 async def fomo_tape(limit: int = 100) -> dict:
     limit = max(1, min(limit, 500))

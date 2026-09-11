@@ -119,7 +119,9 @@ class ChainClient:
         if not url:
             raise ChainError("RH_RPC_URL is not configured")
         self.chain_id = settings.rh_chain_id
-        self.w3 = AsyncWeb3(AsyncHTTPProvider(url))
+        # Without an explicit timeout a rate-limited node can stall a request
+        # indefinitely, which strands any transaction opened around it.
+        self.w3 = AsyncWeb3(AsyncHTTPProvider(url, request_kwargs={"timeout": 30}))
         key = private_key if private_key is not None else settings.rh_private_key
         self._account = Account.from_key(key.strip()) if key and key.strip() else None
 

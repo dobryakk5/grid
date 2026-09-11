@@ -239,6 +239,20 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS ix_grid_profiles_current_range_id ON grid_profiles(current_range_id)",
             "CREATE INDEX IF NOT EXISTS ix_grid_orders_profile_range ON grid_orders(profile_id, range_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_grid_ranges_one_active_per_profile ON grid_ranges(profile_id) WHERE status = 'ACTIVE'",
+            # chain_swaps was first keyed (tx_hash, wallet_address), which
+            # cannot hold a token-for-token swap: one wallet, one tx, two
+            # positions changed. Widen the key to include the token.
+            """DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    WHERE t.relname = 'chain_swaps' AND c.contype = 'p'
+                      AND array_length(c.conkey, 1) = 2
+                ) THEN
+                    ALTER TABLE chain_swaps DROP CONSTRAINT chain_swaps_pkey;
+                    ALTER TABLE chain_swaps ADD PRIMARY KEY (tx_hash, wallet_address, token_address);
+                END IF;
+            END $$;""",
         ):
             await conn.execute(text(statement))
 

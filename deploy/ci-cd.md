@@ -1,0 +1,1 @@
+ssh ultra  'cd /var/py/grid/ && git pull && systemctl restart mini-grid-api mini-grid-worker'

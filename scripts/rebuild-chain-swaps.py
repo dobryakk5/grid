@@ -1,9 +1,11 @@
-"""Replay stored ``chain_transactions`` through the current classify() logic.
+"""Replay stored ``chain_transactions`` through the current classify logic.
 
-No RPC calls -- that is the entire point. If ``app.chain.tape.classify`` turns
-out to have mishandled some Universal Router path, fix it and re-run this
-script: ``chain_swaps`` is recomputed from raw data already on disk, not from
-a fresh read of the chain.
+No RPC calls -- that is the entire point. If ``app.chain.tape.classify_any``
+turns out to have mishandled some router path, fix it and re-run this script:
+``chain_swaps`` is recomputed from raw data already on disk, not from a fresh
+read of the chain. Token metadata comes from the ``chain_tokens`` cache for
+the same reason; a token that was never resolved is skipped rather than
+fetched.
 
 Usage::
 
@@ -22,22 +24,12 @@ if str(ROOT) not in sys.path:
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert  # noqa: E402
 
-from app.chain.tape import ChainSwapRow, classify, price_swap  # noqa: E402
+from app.chain.tape import ChainSwapRow, classify_any, price_swap  # noqa: E402
+from app.chain.tokens import TokenMeta  # noqa: E402
 from app.core.config import settings  # noqa: E402
-from app.db.models import ChainSwap, ChainTransaction, FomoTrader  # noqa: E402
+from app.db.models import ChainSwap, ChainToken, ChainTransaction, FomoTrader  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
-from app.dex.tokens import DexConfigError, resolve_pair  # noqa: E402
-from app.workers.dex_sampler import watched_symbols  # noqa: E402
-
-
-async def _pairs():
-    pairs = []
-    for symbol in await watched_symbols():
-        try:
-            pairs.append(resolve_pair(symbol))
-        except DexConfigError as exc:
-            print(f"{symbol} skipped: {exc}", file=sys.stderr)
-    return pairs
+from app.workers.chain_tape import quote_assets  # noqa: E402
 
 
 async def main(from_block: int | None) -> int:
@@ -49,10 +41,17 @@ async def main(from_block: int | None) -> int:
             )).scalars()
             if row
         }
-        pairs = await _pairs()
-        if not pairs:
-            print("no watched DEX pairs configured", file=sys.stderr)
+        if not wallets:
+            print("no tracked wallets in the registry; nothing to rebuild", file=sys.stderr)
             return 1
+
+        token_meta = {
+            row.address.lower(): TokenMeta(row.address, row.symbol, row.decimals)
+            for row in (await session.execute(
+                select(ChainToken).where(ChainToken.chain_id == chain_id)
+            )).scalars()
+        }
+        assets = quote_assets()
 
         query = select(ChainTransaction).where(ChainTransaction.chain_id == chain_id)
         if from_block is not None:
@@ -63,36 +62,39 @@ async def main(from_block: int | None) -> int:
 
         update_columns = [
             column.name for column in ChainSwap.__table__.columns
-            if column.name not in ("tx_hash", "wallet_address")
+            if column.name not in ("tx_hash", "wallet_address", "token_address")
         ]
         rewritten = 0
         for tx in transactions:
-            for pair in pairs:
-                for row in classify(tx.transfers, wallets, pair, chain_id=chain_id):
-                    priced: ChainSwapRow = await price_swap(row, session)
-                    statement = insert(ChainSwap).values(
-                        tx_hash=priced.tx_hash,
-                        wallet_address=priced.wallet_address,
-                        chain_id=priced.chain_id,
-                        block_number=priced.block_number,
-                        block_time_ms=priced.block_time_ms,
-                        token_address=priced.token_address,
-                        symbol=priced.symbol,
-                        side=priced.side,
-                        token_amount=priced.token_amount,
-                        quote_address=priced.quote_address,
-                        quote_symbol=priced.quote_symbol,
-                        quote_amount=priced.quote_amount,
-                        price=priced.price,
-                        value_usd=priced.value_usd,
-                        pricing_source=priced.pricing_source,
-                    )
-                    statement = statement.on_conflict_do_update(
-                        index_elements=[ChainSwap.tx_hash, ChainSwap.wallet_address],
-                        set_={name: getattr(statement.excluded, name) for name in update_columns},
-                    )
-                    await session.execute(statement)
-                    rewritten += 1
+            rows = classify_any(
+                tx.transfers, wallets,
+                token_meta=token_meta, quote_assets=assets, chain_id=chain_id,
+            )
+            for row in rows:
+                priced: ChainSwapRow = await price_swap(row, session)
+                statement = insert(ChainSwap).values(
+                    tx_hash=priced.tx_hash,
+                    wallet_address=priced.wallet_address,
+                    chain_id=priced.chain_id,
+                    block_number=priced.block_number,
+                    block_time_ms=priced.block_time_ms,
+                    token_address=priced.token_address,
+                    symbol=priced.symbol,
+                    side=priced.side,
+                    token_amount=priced.token_amount,
+                    quote_address=priced.quote_address,
+                    quote_symbol=priced.quote_symbol,
+                    quote_amount=priced.quote_amount,
+                    price=priced.price,
+                    value_usd=priced.value_usd,
+                    pricing_source=priced.pricing_source,
+                )
+                statement = statement.on_conflict_do_update(
+                    index_elements=[ChainSwap.tx_hash, ChainSwap.wallet_address, ChainSwap.token_address],
+                    set_={name: getattr(statement.excluded, name) for name in update_columns},
+                )
+                await session.execute(statement)
+                rewritten += 1
         await session.commit()
 
     print(f"replayed {len(transactions)} transactions, wrote {rewritten} swap rows")
