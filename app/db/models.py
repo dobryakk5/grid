@@ -579,6 +579,31 @@ class FomoActivityLeg(Base):
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
 
 
+class FomoToken(Base):
+    """Name for a token id seen in FOMO swaps, looked up once and kept.
+
+    FOMO's swap feed carries ``inTokenAddress``/``outTokenAddress`` and no
+    symbol at all, so every coin arrives as a bare address. Names come from
+    DexScreener instead; a row with ``symbol`` NULL means "asked and it did not
+    know", which is why ``checked_at`` exists -- without it every aggregate
+    would re-ask about the same unlisted token forever.
+
+    Not ``chain_tokens``: that one is EVM-only (42-char addresses read from a
+    contract's own ``symbol()``), and these are as often Solana mints.
+    """
+
+    __tablename__ = "fomo_tokens"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_address: Mapped[str] = mapped_column(String(128), primary_key=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    source: Mapped[str] = mapped_column(String(24), nullable=False, default="dexscreener")
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ChainTransaction(Base):
     """Raw ERC-20 ``Transfer`` legs for one transaction, kept independent of
     however ``classify()`` currently reads them.

@@ -1,14 +1,18 @@
 from datetime import datetime, timezone
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
-from app.db.models import FomoActivityLeg, FomoLeaderboardState
-from app.db.session import SessionLocal
+from app.db.models import (
+    ChainToken, FomoActivityLeg, FomoLeaderboardState, FomoToken, FomoTrader,
+)
+from app.db.session import SessionLocal, database_target
 from app.fomo.activity import aggregate_legs, normalize_swap
+from app.fomo.tokens import CHAIN_SLUGS, resolve as resolve_names
 
 router = APIRouter(prefix="/api/fomo/activity")
 
@@ -19,7 +23,9 @@ class TraderSwaps(BaseModel):
     display_name: str | None = Field(default=None, max_length=120)
     rank: int = Field(ge=1, le=500)
     has_more: bool | None = None
-    swaps: list[dict] = Field(default_factory=list, max_length=2000)
+    # A full history is ~600 swaps per trader today; the cap is a ceiling on
+    # one request body, and the collector stops at the same number.
+    swaps: list[dict] = Field(default_factory=list, max_length=5000)
 
 
 class ActivityImport(BaseModel):
@@ -59,6 +65,74 @@ def prepare_import(payload):
     }
 
 
+async def name_tokens(session, wanted) -> int:
+    """Name the coins we have not asked about yet; return how many got a name.
+
+    Two sources, because no single one covers the chains FOMO serves. Tokens on
+    Robinhood Chain come from ``chain_tokens``, read from each contract's own
+    ``symbol()`` by the tape scanner -- DexScreener does not index that chain at
+    all, which is why its busiest coins stayed bare addresses. Everything else
+    comes from DexScreener. The contract's own answer wins where both exist.
+
+    Called after the legs are committed, in its own transaction: naming is
+    cosmetic and talks to a third party, and an import that has just walked
+    FOMO's whole history must not be rolled back because DexScreener was slow.
+    """
+    if not wanted:
+        return 0
+    known = set((await session.execute(select(FomoToken.chain_id, FomoToken.token_address).where(
+        tuple_(FomoToken.chain_id, FomoToken.token_address).in_(wanted)
+    ))).all())
+    missing = wanted - known
+    if not missing:
+        return 0
+    found = {}
+    for token in (await session.execute(select(ChainToken).where(
+        tuple_(ChainToken.chain_id, ChainToken.address).in_(missing)
+    ))).scalars():
+        if token.symbol:
+            # chain_tokens carries a ticker and no long name; there is nothing
+            # to invent here, so the name stays empty.
+            found[(token.chain_id, token.address)] = (token.symbol[:64], None)
+    listed = {key for key in missing - set(found) if key[0] in CHAIN_SLUGS}
+    if listed:
+        async with httpx.AsyncClient(timeout=20) as http:
+            found.update(await resolve_names(http, listed))
+    rows = [{"chain_id": chain_id, "token_address": address,
+             "symbol": symbol, "name": name,
+             "source": "chain" if chain_id not in CHAIN_SLUGS else "dexscreener"}
+            for (chain_id, address), (symbol, name) in found.items()]
+    for start in range(0, len(rows), 500):
+        statement = insert(FomoToken).values(rows[start:start + 500])
+        await session.execute(statement.on_conflict_do_update(
+            index_elements=[FomoToken.chain_id, FomoToken.token_address],
+            set_={"symbol": statement.excluded.symbol, "name": statement.excluded.name,
+                  "source": statement.excluded.source, "checked_at": datetime.now(timezone.utc)},
+        ))
+    await session.commit()
+    return sum(1 for symbol, _ in found.values() if symbol)
+
+
+async def remember_traders(session, payload):
+    """Keep id -> name outside the cohort snapshot.
+
+    ``fomo_leaderboard_state`` holds only the latest top N, so as soon as the
+    leaderboard rotates, months of imported legs point at user ids nothing can
+    name. ``fomo_traders`` is the table that survives that rotation.
+    """
+    rows = [{"fomo_user_id": t.user_id, "user_handle": t.handle,
+             "display_name": t.display_name, "source": "leaderboard"}
+            for t in payload.traders]
+    statement = insert(FomoTrader).values(rows)
+    await session.execute(statement.on_conflict_do_update(
+        index_elements=[FomoTrader.fomo_user_id],
+        # Never blank a name we already have with a null from a thinner payload.
+        set_={"user_handle": func.coalesce(statement.excluded.user_handle, FomoTrader.user_handle),
+              "display_name": func.coalesce(statement.excluded.display_name, FomoTrader.display_name),
+              "last_seen_at": datetime.now(timezone.utc)},
+    ))
+
+
 @router.post("/import")
 async def import_activity(payload: ActivityImport):
     legs, coverage = prepare_import(payload)
@@ -87,27 +161,47 @@ async def import_activity(payload: ActivityImport):
             index_elements=[FomoLeaderboardState.period],
             set_={k: v for k, v in values.items() if k != "period"},
         ))
+        await remember_traders(session, payload)
         await session.commit()
-    return {"traders": len(payload.traders), "swap_legs": len(legs), "coverage": coverage}
+        named = await name_tokens(
+            session, {(leg["chain_id"], leg["token_address"]) for leg in legs})
+    return {"traders": len(payload.traders), "swap_legs": len(legs),
+            "coverage": coverage, "database": database_target(), "named_tokens": named}
 
 
 @router.get("")
 async def activity(period: Literal["24h", "7d", "30d"] = "30d",
-                   hours: int = Query(default=24, ge=1, le=24 * 30)):
+                   # The collector now walks a trader's whole history, which
+                   # reaches back further than the leaderboard's own window.
+                   hours: int = Query(default=24, ge=1, le=24 * 365)):
     async with SessionLocal() as session:
         cohort = await session.get(FomoLeaderboardState, period)
         if cohort is None:
-            return {"cohort": None, "coins": []}
+            return {"cohort": None, "coins": [], "database": database_target()}
         identities = {t["user_id"]: t for t in cohort.traders}
+        # The cohort snapshot can carry a null handle; fomo_traders is where a
+        # name learned on any earlier import still lives.
+        for trader in (await session.execute(select(FomoTrader).where(
+            FomoTrader.fomo_user_id.in_(identities)
+        ))).scalars():
+            identity = identities[trader.fomo_user_id]
+            identity["handle"] = identity.get("handle") or trader.user_handle
+            identity["display_name"] = identity.get("display_name") or trader.display_name
         cutoff = int(datetime.now(timezone.utc).timestamp() * 1000) - hours * 3600_000
         legs = list((await session.execute(select(FomoActivityLeg).where(
             FomoActivityLeg.period == period,
             FomoActivityLeg.user_id.in_(identities),
             FomoActivityLeg.occurred_at_ms >= cutoff,
         ))).scalars())
+        coins = {(leg.chain_id, leg.token_address) for leg in legs}
+        names = {(row.chain_id, row.token_address): (row.symbol, row.name)
+                 for row in (await session.execute(select(FomoToken).where(
+                     tuple_(FomoToken.chain_id, FomoToken.token_address).in_(coins)
+                 ))).scalars()} if coins else {}
         return {
+            "database": database_target(),
             "cohort": {"period": period, "requested_limit": cohort.requested_limit,
                        "traders": len(identities), "captured_at": cohort.captured_at,
                        "coverage": cohort.coverage},
-            "coins": aggregate_legs(legs, identities),
+            "coins": aggregate_legs(legs, identities, names),
         }

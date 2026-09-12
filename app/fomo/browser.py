@@ -17,6 +17,11 @@ from app.fomo.schema import normalize_leaderboard
 
 FOMO_ORIGIN = "https://fomo.family"
 API_ORIGIN = "https://prod-api.fomo.family"
+# Probed against the live endpoint: 101 and above answer HTTP 400.
+PAGE_LIMIT = 100
+# A stop, not a target. One trader's whole history is ~600 swaps today; this
+# bounds the POST body if an account turns out to have orders of magnitude more.
+MAX_SWAPS_PER_TRADER = 5000
 
 
 class BrowserSyncError(RuntimeError):
@@ -53,8 +58,11 @@ async def local_json(http, method: str, url: str, **kwargs):
         raise BrowserSyncError("Grid API вернул не JSON; проверьте порт и префикс /grid") from None
 
 
-async def check_api(http, base: str):
-    await local_json(http, "GET", base + "/api/fomo/activity")
+async def check_api(http, base: str) -> str:
+    """Confirm the Grid API answers, and report which database it writes to."""
+    status = await local_json(http, "GET", base + "/api/fomo/activity")
+    target = status.get("database") if isinstance(status, dict) else None
+    return target if isinstance(target, str) else "неизвестно"
 
 
 # Fetch remains in the FOMO origin, with its actual cookies and current bearer.
@@ -71,8 +79,14 @@ FETCH_JS = """async ({url, headers}) => {
 }"""
 
 
+def _log(message):
+    # A full history takes minutes per run; buffered progress that only appears
+    # at the end is the same as no progress at all when the output is a file.
+    print(message, flush=True)
+
+
 class BrowserCollector:
-    def __init__(self, page, *, log=print, sleep=asyncio.sleep):
+    def __init__(self, page, *, log=_log, sleep=asyncio.sleep):
         self.page = page
         self.log = log
         self.sleep = sleep
@@ -138,34 +152,64 @@ class BrowserCollector:
             await self.sleep(0.5)
             return unwrap(result["data"])
 
-    async def collect(self, *, period="30d", limit=30):
+    async def swaps(self, user_id: str, *, max_swaps=MAX_SWAPS_PER_TRADER):
+        """Every swap FOMO will hand out for one user, oldest page last.
+
+        The endpoint pages by the id of the last row already seen
+        (``lastSwapId``); ``page``/``offset``/``skip`` are silently ignored and
+        re-serve page one, which is how the old single-page collect looked like
+        a complete history while it was returning 25 of 625 rows. ``limit``
+        above 100 is rejected with HTTP 400. Both facts come from probing the
+        live endpoint, not from a guess: a cursor that stops producing new ids
+        is treated as "paging is not working" and ends the walk, so a future
+        rename degrades to the old behaviour instead of looping.
+        """
+        path = f"/v2/users/{quote(user_id, safe='')}/swaps"
+        collected, seen, cursor = [], set(), None
+        while True:
+            params = {"limit": PAGE_LIMIT} | ({"lastSwapId": cursor} if cursor else {})
+            try:
+                rows, more = swap_rows(await self.get(path, params))
+            except ValueError as exc:
+                raise BrowserSyncError(str(exc)) from None
+            fresh = [row for row in rows
+                     if isinstance(row, dict) and row.get("id") not in seen]
+            seen.update(row["id"] for row in fresh if isinstance(row.get("id"), str))
+            collected.extend(fresh)
+            if len(collected) >= max_swaps:
+                return collected[:max_swaps], True
+            if more is False:
+                return collected, False
+            last_id = fresh[-1].get("id") if fresh else None
+            if not fresh or not isinstance(last_id, str):
+                # The cursor stopped yielding new rows while the API still
+                # claims more (or stopped saying). Stop rather than loop, and
+                # pass the claim through so coverage stays honest.
+                return collected, more
+            cursor = last_id
+
+    async def collect(self, *, period="30d", limit=30, max_swaps=MAX_SWAPS_PER_TRADER):
         # /trades is a position summary, not an execution stream. Rank cohort
         # comes strictly from the selected leaderboard, never token holders.
         ranks = normalize_leaderboard(await self.get(f"/v2/leaderboard/{period}", {"limit": limit}))
         if not ranks:
             raise BrowserSyncError("Лидерборд пуст или формат изменился; прежний сбор сохранён")
         selected = sorted(ranks, key=lambda r: r.rank or 10**9)[:limit]
-        self.log(f"Лидерборд {period}: {len(selected)} из {limit}. Читаю swaps по всем сетям…")
+        self.log(f"Лидерборд {period}: {len(selected)} из {limit}. "
+                 f"Читаю полную историю swaps по всем сетям…")
         traders = []
         for index, row in enumerate(selected, 1):
-            payload = await self.get(f"/v2/users/{quote(row.user_id, safe='')}/swaps")
-            try:
-                swaps, more = swap_rows(payload)
-            except ValueError as exc:
-                raise BrowserSyncError(str(exc)) from None
-            if len(swaps) > 2000:
-                swaps, more = swaps[:2000], True
+            swaps, more = await self.swaps(row.user_id, max_swaps=max_swaps)
             # Whitelist public swap fields. Never serialize session headers or
-            # cookies, and never fabricate pagination parameters.
+            # cookies.
             traders.append({
                 "user_id": row.user_id, "handle": row.handle,
                 "display_name": row.display_name, "rank": row.rank or index,
                 "has_more": more,
-                "swaps": [{k: swap.get(k) for k in SWAP_FIELDS}
-                          if isinstance(swap, dict) else {} for swap in swaps],
+                "swaps": [{k: swap.get(k) for k in SWAP_FIELDS} for swap in swaps],
             })
             self.log(f"{index}/{len(selected)} @{row.handle or row.display_name or row.user_id}: "
-                     f"{len(swaps)} swaps" + (" (есть ещё история)" if more else ""))
+                     f"{len(swaps)} swaps" + (f" (упёрлись в предел {max_swaps})" if more else ""))
         return {"period": period, "requested_limit": limit, "traders": traders}
 
     async def close(self):
@@ -175,4 +219,9 @@ class BrowserCollector:
 
 
 async def import_activity(http, base: str, payload: dict):
-    return await local_json(http, "POST", base + "/api/fomo/activity/import", json=payload)
+    # A full history is megabytes of JSON, and the server names every new coin
+    # it meets before answering. The client's default timeout is sized for the
+    # health check, not for this; timing out here would throw away a collection
+    # that took a quarter of an hour to read.
+    return await local_json(http, "POST", base + "/api/fomo/activity/import",
+                            json=payload, timeout=900)

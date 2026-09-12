@@ -28,14 +28,17 @@ async def test_collects_only_selected_top_thirty_and_sends_no_credentials_to_gri
             {"id": "alice", "rank": 1, "userHandle": "alice"},
         ]}},
         {"status": 200, "data": {"swaps": [{"id": "s1", "secret": "must-not-export"}], "hasNextPage": True}},
-        {"status": 200, "data": {"swaps": [], "hasNextPage": False}},
+        {"status": 200, "data": {"swaps": [{"id": "s2"}], "hasNextPage": False}},
+        {"status": 200, "data": {"swaps": [{"id": "s3"}], "hasNextPage": False}},
     ])
     collector = BrowserCollector(page, sleep=AsyncMock(), log=lambda _: None)
     collector._headers = {"authorization": "Bearer keep-in-browser"}
     payload = await collector.collect()
     assert page.calls[0]["url"] == API_ORIGIN + "/v2/leaderboard/30d?limit=30"
-    assert page.calls[1]["url"].endswith("/v2/users/alice/swaps")
-    assert payload["traders"][0]["has_more"] is True
+    assert page.calls[1]["url"] == API_ORIGIN + "/v2/users/alice/swaps?limit=100"
+    assert page.calls[2]["url"] == API_ORIGIN + "/v2/users/alice/swaps?limit=100&lastSwapId=s1"
+    assert payload["traders"][0]["has_more"] is False
+    assert len(payload["traders"][0]["swaps"]) == 2
     assert [t["handle"] for t in payload["traders"]] == ["alice", "bob"]
     captured = []
 
@@ -96,3 +99,45 @@ def test_bad_destination_is_rejected(base):
 
 def test_remote_https_prefix_is_retained():
     assert validate_base("https://lebedeve.ru/grid/") == "https://lebedeve.ru/grid"
+
+
+async def test_walks_every_page_and_stops_when_the_cursor_stops_moving():
+    # Page two repeating page one is what `page=2` actually does upstream: the
+    # parameter is ignored, so a collector that trusted it would loop forever.
+    page = Page([
+        {"status": 200, "data": {"swaps": [{"id": "a"}, {"id": "b"}], "hasNextPage": True}},
+        {"status": 200, "data": {"swaps": [{"id": "c"}], "hasNextPage": True}},
+        {"status": 200, "data": {"swaps": [{"id": "c"}], "hasNextPage": True}},
+    ])
+    collector = BrowserCollector(page, sleep=AsyncMock(), log=lambda _: None)
+    swaps, more = await collector.swaps("alice")
+    assert [s["id"] for s in swaps] == ["a", "b", "c"]
+    assert page.calls[1]["url"].endswith("lastSwapId=b")
+    assert page.calls[2]["url"].endswith("lastSwapId=c")
+    # Still claimed, never delivered: coverage must not report this complete.
+    assert more is True
+
+
+async def test_history_cap_truncates_and_is_reported_as_incomplete():
+    page = Page([
+        {"status": 200, "data": {"swaps": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+                                 "hasNextPage": True}},
+    ])
+    collector = BrowserCollector(page, sleep=AsyncMock(), log=lambda _: None)
+    swaps, more = await collector.swaps("alice", max_swaps=2)
+    assert [s["id"] for s in swaps] == ["a", "b"] and more is True
+    assert len(page.calls) == 1
+
+
+async def test_check_api_reports_the_database_the_server_writes_to():
+    async def handle(request):
+        return httpx.Response(200, json={"cohort": None, "coins": [], "database": "grid@10.0.0.1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        assert await check_api(http, "http://localhost:9000") == "grid@10.0.0.1"
+
+    async def old_server(request):
+        return httpx.Response(200, json={"cohort": None, "coins": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(old_server)) as http:
+        assert await check_api(http, "http://localhost:9000") == "неизвестно"

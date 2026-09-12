@@ -87,13 +87,23 @@ def normalize_swap(row):
     return legs
 
 
-def aggregate_legs(legs, identities):
+def aggregate_legs(legs, identities, names=None):
+    """``names`` maps ``(chain_id, token_address)`` to ``(symbol, name)``.
+
+    The swap feed itself carries no symbol, so without this every coin is a
+    bare address. A leg that does carry one still wins: it came from the trade
+    record, while a looked-up name is only the best current guess about which
+    of several same-ticker pools this address is.
+    """
+    names = names or {}
     coins = {}
     for leg in legs:
         key = (leg.chain_id, leg.token_address)
+        looked_up, full_name = names.get(key, (None, None))
         coin = coins.setdefault(key, {
             "chain_id": leg.chain_id, "token_address": leg.token_address,
-            "symbol": leg.symbol, "buy_usd": Decimal(0), "sell_usd": Decimal(0),
+            "symbol": leg.symbol or looked_up, "name": full_name,
+            "buy_usd": Decimal(0), "sell_usd": Decimal(0),
             "unpriced": 0, "last_at_ms": 0, "traders": {},
         })
         if leg.symbol:
