@@ -638,6 +638,96 @@ class FomoToken(Base):
     )
 
 
+class TokenSnapshot(Base):
+    """One reading of a coin's market, kept as history rather than overwritten.
+
+    Append-only for a reason that is not visible yet: "what happened after the
+    thesis" can only ever be answered by rows that were already being written
+    before the thesis appeared. Overwriting one row per token would make that
+    question permanently unanswerable.
+
+    ``source`` says where the numbers came from, because the two sources do not
+    mean the same thing. ``dexscreener`` is the whole market for that coin.
+    ``tape`` is our own scan of Robinhood Chain, which DexScreener does not
+    index at all -- there the volume and counts are only the wallets we track,
+    and ``liquidity_usd`` is simply unknown. A score must never compare one
+    against the other as if they measured the same thing.
+    """
+
+    __tablename__ = "token_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_address: Mapped[str] = mapped_column(String(128), nullable=False)
+    observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="dexscreener")
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    market_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
+    fdv_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
+    liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
+    volume_h24_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
+    volume_h6_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
+    buys_h24: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sells_h24: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    change_m5: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    change_h1: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    change_h6: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    change_h24: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    pair_created_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pools: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("ix_token_snapshots_token_time", "chain_id", "token_address", "observed_at_ms"),
+    )
+
+
+class TokenSecurity(Base):
+    """Latest contract-safety answer for one coin, as given, plus our reading.
+
+    One row per coin, unlike snapshots: a mint authority is a property of the
+    contract, not a measurement of a moment. ``checked_at`` is what stops us
+    asking again every pass, and ``unknown`` is kept distinct from "safe" --
+    GoPlus answers with an empty string for fields it could not determine, and
+    reading that as "no" is exactly how a honeypot passes a risk gate.
+    """
+
+    __tablename__ = "token_security"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_address: Mapped[str] = mapped_column(String(128), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="goplus")
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    # Normalised booleans/decimals plus the flags a human should read; the
+    # provider's raw answer stays in `raw` so a re-reading never needs a refetch.
+    facts: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class ThesisEvent(Base):
+    """What a thesis actually claims, as far as anything can tell.
+
+    Kept beside ``fomo_theses`` rather than inside it because the note is a
+    fact (someone wrote this) while the classification is an opinion about it
+    that can be recomputed, improved, or come from a different reader --
+    ``source`` is ``rules`` or ``llm``. Re-running the rules must never edit
+    the note itself.
+    """
+
+    __tablename__ = "thesis_events"
+
+    thesis_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
+    kinds: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    stance: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    importance: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    numbers: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 0..1 -- how much the reader itself trusts this reading.
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ChainTransaction(Base):
     """Raw ERC-20 ``Transfer`` legs for one transaction, kept independent of
     however ``classify()`` currently reads them.

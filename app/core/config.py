@@ -171,5 +171,34 @@ class Settings(BaseSettings):
     # realtime cursor, not about RPC cost per wallet.
     chain_tape_backfill_wallets: int = 50
 
+    # ---- token intelligence (what the top is buying, and is it safe) ------
+    # Free, keyless sources only: DexScreener for market data on the chains it
+    # indexes, GoPlus for contract safety, and our own tape for Robinhood
+    # Chain, which neither of them covers.
+    goplus_base_url: str = "https://api.gopluslabs.io"
+    intel_refresh_seconds: float = 600.0
+    # How old a market snapshot may be before the page refreshes it. Shorter
+    # than the worker's period on purpose: the page is read on demand.
+    intel_market_ttl_seconds: float = 300.0
+    # Contract properties change rarely and cost a request each; holders and
+    # taxes do drift, so this is a day, not a week.
+    intel_security_ttl_hours: float = 24.0
+    # Coins refreshed in one pass, most recently traded by the cohort first.
+    intel_max_tokens: int = 120
+
+    # Optional LLM pass over thesis text. Rules run first and always; the model
+    # only sees the notes the rules could not classify. Blank key = off, and
+    # off is a working configuration, not a degraded one.
+    intel_llm_provider: str = "anthropic"
+    intel_llm_api_key: str = ""
+    # Opus by default because a misread thesis is a wrong signal, not a typo.
+    # Bulk classification is where a cheaper model earns its place: set
+    # INTEL_LLM_MODEL=claude-haiku-4-5 (or claude-sonnet-5) and it is used as is.
+    intel_llm_model: str = "claude-opus-5"
+    intel_llm_base_url: str = ""
+    # A budget, not a target: one pass never spends more calls than this.
+    intel_llm_max_calls: int = 40
+    intel_llm_timeout_seconds: float = 30.0
+
 
 settings = Settings()

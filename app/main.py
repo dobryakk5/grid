@@ -7,6 +7,7 @@ from app.api.auth_routes import router as auth_router
 from app.api.routes import router as api_router
 from app.api.dex_positions import router as dex_positions_router
 from app.api.fomo_activity import router as fomo_activity_router
+from app.api.intel import router as intel_router
 from app.core.auth import require_operator
 from app.core.config import settings
 from app.db.init import init_db
@@ -51,6 +52,7 @@ app.include_router(web_router)
 app.include_router(auth_router)
 app.include_router(api_router, dependencies=[Depends(require_operator)])
 app.include_router(fomo_activity_router, dependencies=[Depends(require_operator)])
+app.include_router(intel_router, dependencies=[Depends(require_operator)])
 app.include_router(dex_positions_router, dependencies=[Depends(require_operator)])
 
 

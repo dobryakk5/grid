@@ -47,6 +47,9 @@ fomo-browser-install:
 fomo-sync:
 	.venv/bin/python scripts/fomo_sync.py $(FOMO_ARGS)
 
+intel:
+	.venv/bin/python -m app.workers.intel
+
 chain-tape:
 	./scripts/run-chain-tape.sh
 

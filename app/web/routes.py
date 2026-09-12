@@ -27,6 +27,11 @@ async def fomo_analysis_page(request: Request):
     return templates.TemplateResponse(request=request, name="fomo_activity.html", context={})
 
 
+@router.get("/intel")
+async def intel_page(request: Request):
+    return templates.TemplateResponse(request=request, name="intel.html", context={})
+
+
 @router.get("/positions")
 async def dex_positions_page(request: Request):
     return templates.TemplateResponse(request=request, name="dex_positions.html", context={})
