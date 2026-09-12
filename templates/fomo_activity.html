@@ -45,10 +45,41 @@
   </style>
 <style>
 select,input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px}
-.table-wrap{overflow:auto} .coin-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-summary{cursor:pointer;font-weight:650} details table{min-width:650px}
-.address{overflow-wrap:anywhere;color:var(--muted);font:12px ui-monospace,monospace}
+.table-wrap{overflow-x:auto}
 #coverage{color:var(--warn)} .notice{max-width:900px} code{overflow-wrap:anywhere}
+
+/* Desktop-first: the coin list is a table, so 250+ coins can be scanned and
+   sorted down a column instead of scrolled through as cards. */
+.wrap{max-width:1440px}
+.coins{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;margin:0;min-width:980px}
+.coins th{position:sticky;top:0;z-index:2;background:var(--panel);white-space:nowrap}
+.coins th,.coins td{border-bottom:1px solid var(--line2);padding:9px 12px;vertical-align:middle}
+.coins th.sortable{cursor:pointer;user-select:none}
+.coins th.sortable:hover{color:var(--text)}
+.coins th.sorted{color:var(--accent)}
+.coins th .arrow{opacity:.65;font-size:9px;margin-left:3px}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.coin{cursor:pointer}
+tr.coin:hover>td{background:#141a26}
+tr.coin.open>td{background:#151c2b}
+.chev{display:inline-block;width:14px;color:var(--muted);transition:transform .15s ease;font-size:10px}
+tr.coin.open .chev{transform:rotate(90deg);color:var(--accent)}
+.coinname{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.coinname b{font-size:14px}
+.coinlink{color:inherit;text-decoration:none}
+.coinlink:hover{color:var(--accent);text-decoration:underline}
+.fullname{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px}
+/* The contract address is machine input, not something anyone reads off a
+   screen -- one click copies it and it never takes a column of its own. */
+.copy{border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:7px;
+      padding:2px 6px;line-height:1.2;cursor:pointer;font-size:12px}
+.copy:hover{color:var(--text);border-color:#3a4660}
+.copy.done{color:var(--good);border-color:var(--good)}
+tr.detail>td{padding:0 12px 16px;background:var(--panel2)}
+tr.detail table{margin-top:0;min-width:720px}
+tr.detail th{position:static;background:transparent}
+tr.detail tr:hover td{background:transparent}
+.legend{margin-top:10px;font-size:12px}
 </style></head><body><main class="wrap">
 <header class="top"><div><h1>Что торгует топ FOMO</h1><div id="cohort" class="muted">Топ-30 · лидерборд за 30 дней · все сети</div></div>
 <div class="row"><a id="chainLink" class="button">Лента Robinhood →</a><button id="refresh">Обновить</button></div></header>
@@ -59,29 +90,84 @@ summary{cursor:pointer;font-weight:650} details table{min-width:650px}
 <section class="panel"><div class="row"><label>Сделки за <select id="hours"><option value="1">час</option><option value="24" selected>сутки</option><option value="168">7 дней</option><option value="720">30 дней</option><option value="2160">90 дней</option><option value="8760">всю историю</option></select></label>
 <label>Сеть <select id="network"><option value="">Все сети</option></select></label><input id="search" placeholder="Монета, адрес или трейдер" aria-label="Поиск монеты или трейдера"></div>
 <div id="summary" class="muted" style="margin-top:12px"></div></section>
-<div id="coins"></div>
+<section class="panel" style="padding:0;overflow:hidden"><div class="table-wrap"><table class="coins">
+<thead><tr>
+<th class="sortable" data-sort="label">Монета</th>
+<th class="sortable num" data-sort="buy_usd">Куплено</th>
+<th class="sortable num" data-sort="sell_usd">Продано</th>
+<th class="sortable num" data-sort="net_usd">Чистая</th>
+<th class="sortable num" data-sort="buyers">Покупателей</th>
+<th class="sortable num" data-sort="sellers">Продавцов</th>
+<th class="sortable num" data-sort="participants">Трейдеров</th>
+<th class="sortable num" data-sort="last_at_ms">Последняя</th>
+</tr></thead><tbody id="coins"></tbody></table></div></section>
+<p class="muted legend">Покупателей + продавцов больше, чем трейдеров, когда один и тот же участник и покупал, и продавал эту монету. Все три числа считаны только по членам топа лидерборда; чужие сделки в выборку не попадают.</p>
 </main><script>
 const BASE=location.pathname.replace(/\/fomo(\/.*)?$/, '');
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const chains={1:'Ethereum',56:'BNB Chain',143:'Monad',4663:'Robinhood',8453:'Base',1399811149:'Solana'};
+const chains={1:'Ethereum',56:'BNB Chain',143:'Monad',1337:'Hyperliquid',4663:'Robinhood',8453:'Base',1399811149:'Solana'};
 const chain=id=>chains[id]||`Сеть ${id}`;
+// FOMO's own URL slugs, read out of its chains-v2 bundle rather than guessed:
+// it writes `bnb` where DexScreener writes `bsc`, so this is deliberately a
+// separate map from CHAIN_SLUGS in app/fomo/tokens.py. A chain missing here
+// gets no link at all -- better an unlinked ticker than a 404.
+const fomoSlugs={1:'ethereum',56:'bnb',143:'monad',1337:'hyperliquid',4663:'robinhood',8453:'base',1399811149:'solana'};
+const fomoLink=c=>fomoSlugs[c.chain_id]?`https://fomo.family/tokens/${fomoSlugs[c.chain_id]}/${encodeURIComponent(c.token_address)}`:null;
 const fmt=(n,d=2)=>Number(n).toLocaleString('ru-RU',{maximumFractionDigits:d});
 const usd=n=>'$'+fmt(n);
 const time=n=>new Date(n).toLocaleString('ru-RU');
 let coins=[];let sequence=0;
+let sort={key:'buy_usd',dir:-1};
+const open=new Set();
+const keyOf=c=>c.chain_id+':'+c.token_address;
+const label=c=>(c.symbol||c.name||c.token_address).toLowerCase();
+const value=(c,key)=>key==='label'?label(c):key==='participants'?c.traders.length:Number(c[key]);
 $('chainLink').href=BASE+'/fomo/chain';
 $('command').textContent='FOMO_API_BASE='+location.origin+BASE+' make fomo-token';
+function traderRows(c){
+ return `<table><thead><tr><th>Ранг / трейдер</th><th class="num">Куплено</th><th class="num">Продано</th>
+ <th class="num">Количество BUY / SELL</th><th class="num">Сделки BUY / SELL</th><th class="num">Последняя</th></tr></thead>
+ <tbody>${c.traders.map(t=>`<tr><td><span class="muted">#${t.rank}</span> <b>${esc(t.display_name||t.handle||t.user_id)}</b>${t.handle?` <span class="muted">@${esc(t.handle)}</span>`:''}</td>
+ <td class="num good">${usd(t.buy_usd)}</td>
+ <td class="num bad">${usd(t.sell_usd)}${t.unpriced?`<div class="muted">${t.unpriced} без USD</div>`:''}</td>
+ <td class="num">${fmt(t.buy_amount,6)} / ${fmt(t.sell_amount,6)}</td>
+ <td class="num">${t.buys} / ${t.sells}</td>
+ <td class="num muted">${time(t.last_at_ms)}</td></tr>`).join('')}</tbody></table>`;
+}
+function coinRow(c){
+ const key=keyOf(c), shown=open.has(key);
+ const name=c.name&&c.name!==c.symbol?`<span class="fullname" title="${esc(c.name)}">${esc(c.name)}</span>`:'';
+ // No symbol anywhere means nothing named this address; a short prefix at
+ // least distinguishes rows, and the copy button hands over the real thing.
+ const title=c.symbol||esc(c.token_address.slice(0,10))+'…';
+ const href=fomoLink(c);
+ const named=href?`<a class="coinlink" href="${esc(href)}" target="_blank" rel="noopener noreferrer"
+ title="Открыть монету на fomo.family">${esc(title)}</a>`:esc(title);
+ return `<tr class="coin${shown?' open':''}" data-key="${esc(key)}">
+ <td><span class="coinname"><span class="chev">▶</span><b>${named}</b>
+ <span class="badge">${esc(chain(c.chain_id))}</span>${name}
+ <button class="copy" data-addr="${esc(c.token_address)}" title="Скопировать адрес контракта" aria-label="Скопировать адрес контракта">⧉</button></span></td>
+ <td class="num good">${usd(c.buy_usd)}</td>
+ <td class="num bad">${usd(c.sell_usd)}</td>
+ <td class="num ${c.net_usd<0?'bad':'good'}">${usd(c.net_usd)}</td>
+ <td class="num">${c.buyers}</td><td class="num">${c.sellers}</td><td class="num">${c.traders.length}</td>
+ <td class="num muted">${time(c.last_at_ms)}</td></tr>
+ ${shown?`<tr class="detail" data-for="${esc(key)}"><td colspan="8"><div class="table-wrap">${traderRows(c)}</div>
+ ${c.unpriced?`<p style="color:var(--warn);margin:8px 0 0">${c.unpriced} сторон сделок без USD-оценки; денежные суммы неполные.</p>`:''}</td></tr>`:''}`;
+}
 function render(){
- const expanded=new Set([...document.querySelectorAll('#coins details[open]')].map(d=>d.dataset.coin));
  const query=$('search').value.toLowerCase().trim(), net=$('network').value;
  const selected=coins.filter(c=>(!net||String(c.chain_id)===net)&&(!query||[c.symbol,c.name,c.token_address,...c.traders.flatMap(t=>[t.handle,t.display_name])].join(' ').toLowerCase().includes(query)));
+ selected.sort((a,b)=>{const x=value(a,sort.key),y=value(b,sort.key);return (x<y?-1:x>y?1:0)*sort.dir;});
  $('summary').textContent=`Монет: ${selected.length} · сеть + адрес определяют монету; одинаковые тикеры не объединяются`;
- $('coins').innerHTML=selected.length?selected.map(c=>`<section class="panel"><div class="top" style="margin-bottom:8px"><div><div class="coin-line"><h2>${esc(c.symbol||c.token_address.slice(0,12)+'…')}</h2><span class="pill">${esc(chain(c.chain_id))}</span>${c.name&&c.name!==c.symbol?`<span class="muted">${esc(c.name)}</span>`:''}</div><p class="address">${esc(c.token_address)}</p></div><span class="muted">Последняя: ${time(c.last_at_ms)}</span></div>
- <div class="tiles"><div class="tile"><div class="label">Куплено · покупателей: ${c.buyers}</div><div class="value good">${usd(c.buy_usd)}</div></div><div class="tile"><div class="label">Продано · продавцов: ${c.sellers}</div><div class="value bad">${usd(c.sell_usd)}</div></div><div class="tile"><div class="label">Чистая покупка, по известным ценам</div><div class="value">${usd(c.net_usd)}</div></div></div>
- ${c.unpriced?`<p style="color:var(--warn)">${c.unpriced} сторон сделок без USD-оценки; денежные суммы неполные.</p>`:''}
- <details data-coin="${esc(c.chain_id+':'+c.token_address)}" style="margin-top:16px"><summary>Кто покупал и продавал · ${c.traders.length}</summary><div class="table-wrap"><table><thead><tr><th>Ранг / трейдер</th><th>Куплено</th><th>Продано</th><th>Количество BUY / SELL</th><th>Сделки BUY / SELL</th><th>Последняя</th></tr></thead><tbody>${c.traders.map(t=>`<tr><td><span class="muted">#${t.rank}</span> <b>${esc(t.display_name||t.handle||t.user_id)}</b>${t.handle?`<div class="muted">@${esc(t.handle)}</div>`:''}</td><td class="good">${usd(t.buy_usd)}</td><td class="bad">${usd(t.sell_usd)}${t.unpriced?`<div class="muted">${t.unpriced} без USD</div>`:''}</td><td>${fmt(t.buy_amount,6)} / ${fmt(t.sell_amount,6)}</td><td>${t.buys} / ${t.sells}</td><td>${time(t.last_at_ms)}</td></tr>`).join('')}</tbody></table></div></details></section>`).join(''):'<div class="panel empty">Нет собранных сделок для выбранного периода и фильтров.</div>';
- document.querySelectorAll('#coins details').forEach(d=>{d.open=expanded.has(d.dataset.coin);});
+ $('coins').innerHTML=selected.length?selected.map(coinRow).join(''):'<tr><td colspan="8" class="empty">Нет собранных сделок для выбранного периода и фильтров.</td></tr>';
+ document.querySelectorAll('.coins th.sortable').forEach(th=>{
+  const on=th.dataset.sort===sort.key;
+  th.classList.toggle('sorted',on);
+  th.querySelector('.arrow')?.remove();
+  if(on)th.insertAdjacentHTML('beforeend',`<span class="arrow">${sort.dir<0?'▼':'▲'}</span>`);
+ });
 }
 async function load(){
  const request=++sequence;
@@ -106,5 +192,36 @@ async function load(){
  finally{if(request===sequence)$('refresh').disabled=false;}
 }
 $('refresh').onclick=load;$('hours').onchange=load;$('network').onchange=render;$('search').oninput=render;
+document.querySelectorAll('.coins th.sortable').forEach(th=>th.onclick=()=>{
+ const key=th.dataset.sort;
+ // A new column starts where it is most useful: names A-Z, numbers biggest first.
+ sort=sort.key===key?{key,dir:-sort.dir}:{key,dir:key==='label'?1:-1};
+ render();
+});
+$('coins').onclick=async event=>{
+ const copy=event.target.closest('.copy');
+ if(copy){
+  event.stopPropagation();
+  try{ await navigator.clipboard.writeText(copy.dataset.addr); }
+  catch(e){
+   // Clipboard API needs a secure context; plain http has to go the old way.
+   const field=document.createElement('textarea');
+   field.value=copy.dataset.addr;field.style.position='fixed';field.style.opacity='0';
+   document.body.appendChild(field);field.select();
+   try{document.execCommand('copy');}finally{field.remove();}
+  }
+  copy.textContent='✓';copy.classList.add('done');
+  setTimeout(()=>{copy.textContent='⧉';copy.classList.remove('done');},1200);
+  return;
+ }
+ // The name is a link out to FOMO; let the browser follow it instead of
+ // toggling the row underneath it.
+ if(event.target.closest('a'))return;
+ const row=event.target.closest('tr.coin');
+ if(!row)return;
+ const key=row.dataset.key;
+ open.has(key)?open.delete(key):open.add(key);
+ render();
+};
 load();setInterval(load,60000);
 </script></body></html>
