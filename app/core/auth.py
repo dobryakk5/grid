@@ -19,7 +19,8 @@ from fastapi import Depends, HTTPException, Request, status
 from app.core.config import settings
 from app.core.security import AuthError, constant_time_equals, read_token
 
-__all__ = ["auth_configured", "require_operator", "require_trading", "bearer_of"]
+__all__ = ["auth_configured", "require_operator", "require_trading", "bearer_of",
+           "OPERATOR_TOKEN_HEADER"]
 
 # Deliberately no ``WWW-Authenticate`` header on our 401s.
 #
@@ -30,6 +31,12 @@ __all__ = ["auth_configured", "require_operator", "require_trading", "bearer_of"
 # it treats those credentials as rejected, drops them, and re-opens nginx's
 # password dialog. Logging in to the app would then ask for the *server*
 # password again. Answering 401 with no challenge leaves that session alone.
+#
+# ``OPERATOR_TOKEN_HEADER`` is the other half of coexisting with that basic
+# auth; see ``bearer_of``.
+
+#: Where the browser pages put the session token. Not ``Authorization``.
+OPERATOR_TOKEN_HEADER = "X-Grid-Token"
 
 
 def auth_configured() -> bool:
@@ -37,6 +44,23 @@ def auth_configured() -> bool:
 
 
 def bearer_of(request: Request) -> str:
+    """The operator's token: our own header first, ``Authorization`` after.
+
+    A browser only attaches its cached Basic credentials to a request that
+    carries no ``Authorization`` header of its own. While the pages put the
+    session token there, every API call reached nginx as a Bearer, failed its
+    ``auth_basic``, and came back 401 with a Basic challenge -- so the browser
+    re-opened the *server* password dialog, once per call, forever. Carrying
+    the token in a header of our own leaves that slot free for nginx, and the
+    two layers stop fighting over it.
+
+    ``Authorization: Bearer`` still works. Machine callers -- the FOMO
+    collector, curl, the service token -- have no basic-auth layer to collide
+    with, and breaking them to fix a browser problem would be a poor trade.
+    """
+    own = (request.headers.get(OPERATOR_TOKEN_HEADER) or "").strip()
+    if own:
+        return own
     header = request.headers.get("authorization") or ""
     scheme, _, token = header.partition(" ")
     return token.strip() if scheme.lower() == "bearer" else ""

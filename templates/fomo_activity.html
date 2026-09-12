@@ -175,10 +175,9 @@ async function load(){
  const request=++sequence;
  $('refresh').disabled=true;
  try{
-  // Same session-scoped token the positions page logs in for.
-  const token=sessionStorage.getItem('grid-token')||'';
-  const r=await fetch(BASE+'/api/fomo/activity?period=30d&hours='+$('hours').value,
-                      token?{headers:{Authorization:'Bearer '+token}}:{});
+  // The wrapper in _auth.html carries the session token the positions page
+  // logs in for. Setting Authorization here would cost nginx its basic session.
+  const r=await fetch(BASE+'/api/fomo/activity?period=30d&hours='+$('hours').value);
   if(r.status===401)throw new Error('Нужен вход — откройте страницу «Открытые позиции» и авторизуйтесь');
   if(!r.ok)throw new Error('HTTP '+r.status+' — проверьте API и перезапустите сервер после обновления');
   const data=await r.json();if(request!==sequence)return;

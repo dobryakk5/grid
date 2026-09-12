@@ -8,7 +8,14 @@
 
    That retry is also what stops the browser's basic-auth prompt storm. Every
    unauthenticated API call used to come back 401, and a page that fires three
-   of them produced three prompts. #}
+   of them produced three prompts.
+
+   The token rides in `X-Grid-Token`, not `Authorization`. A browser attaches
+   its cached Basic credentials only to a request that has no `Authorization`
+   header of its own, so putting the token there made every call fail nginx's
+   `auth_basic` and re-open the server's password dialog -- once per call. Our
+   own header leaves that slot to nginx: the server password is asked once per
+   browser session, this dialog once per tab. #}
 <dialog id="gridLogin" class="grid-login">
   <form method="dialog" id="gridLoginForm">
     <h2>Вход</h2>
@@ -87,7 +94,8 @@
   const source=(init&&init.headers)||(typeof input!=='string'&&input&&input.headers)||{};
   const headers=new Headers(source);
   const bearer=token();
-  if(bearer)headers.set('Authorization','Bearer '+bearer);
+  // Never 'Authorization': that header is nginx's, see the note at the top.
+  if(bearer)headers.set('X-Grid-Token',bearer);
   return Object.assign({},init||{},{headers});
  }
 

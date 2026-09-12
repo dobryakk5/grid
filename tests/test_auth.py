@@ -101,6 +101,27 @@ async def test_login_throttles_repeated_guesses(configured):
         assert (await http.post("/api/auth/login", json={"password": "hunter2"})).status_code == 200
 
 
+async def test_token_rides_its_own_header_so_nginx_keeps_its_basic_session(configured):
+    # A browser attaches cached Basic credentials only to a request with no
+    # Authorization header of its own. The pages must leave that slot to nginx,
+    # or every API call fails auth_basic and re-opens the server's password box.
+    async with client() as http:
+        login = await http.post("/api/auth/login", json={"password": "hunter2"})
+        token = login.json()["token"]
+        page = await http.get("/api/dex/pairs", headers={
+            "X-Grid-Token": token,
+            # What nginx forwards upstream once the browser is basic-authorised.
+            "Authorization": "Basic b3BlcmF0b3I6c2VydmVy",
+        })
+        assert page.status_code != 401, page.text
+        assert (await http.get("/api/auth/status", headers={
+            "X-Grid-Token": token})).json()["authenticated"] is True
+        # An empty header falls through rather than shadowing Authorization.
+        assert (await http.get("/api/dex/pairs", headers={
+            "X-Grid-Token": "   ",
+            "Authorization": f"Bearer {token}"})).status_code != 401
+
+
 async def test_our_401_carries_no_auth_challenge(configured):
     # The same origin sits behind nginx basic auth. A challenge header here
     # makes the browser drop its cached Basic credentials and re-prompt for

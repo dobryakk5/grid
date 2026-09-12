@@ -105,9 +105,6 @@ const BASE=location.pathname.replace(/\/positions(\/.*)?$/,'');
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num=(v,d=6)=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
-// Session-scoped on purpose: closing the tab drops the credential that can
-// spend money, rather than leaving it in localStorage for the next visitor.
-const token=()=>sessionStorage.getItem('grid-token')||'';
 let state={positions:[],dry_run:true,native_balance:'0'};
 let pending=null;let buying=null;
 $('fomoLink').href=BASE+'/fomo';

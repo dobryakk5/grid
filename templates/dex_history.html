@@ -64,13 +64,13 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num=(v,d=8)=>v==null?'—':Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
 const time=v=>v?new Date(v).toLocaleString('ru-RU'):'—';
-const token=()=>sessionStorage.getItem('grid-token')||'';
 let orders=[];
 $('positionsLink').href=BASE+'/positions';
 
 async function api(path){
- const headers=token()?{Authorization:'Bearer '+token()}:{};
- const response=await fetch(BASE+path,{headers});
+ // The wrapper in _auth.html carries the token and handles 401; adding an
+ // Authorization header here would displace nginx's cached basic credentials.
+ const response=await fetch(BASE+path);
  if(response.status===401)throw new Error('Нужен вход — авторизуйтесь на странице «Открытые позиции»');
  const body=await response.json().catch(()=>({}));
  if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
@@ -119,9 +119,8 @@ $('rows').onclick=async event=>{
  if(!confirm(`Отменить ордер ${id}? Уровень перестанет ждать цену.`))return;
  button.disabled=true;
  try{
-  const headers={'Content-Type':'application/json'};
-  if(token())headers.Authorization='Bearer '+token();
-  const response=await fetch(`${BASE}/api/fomo/limit-order/${id}/cancel`,{method:'POST',headers});
+  const response=await fetch(`${BASE}/api/fomo/limit-order/${id}/cancel`,
+   {method:'POST',headers:{'Content-Type':'application/json'}});
   const body=await response.json().catch(()=>({}));
   if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
   load();
