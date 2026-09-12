@@ -187,18 +187,25 @@ class Settings(BaseSettings):
     intel_max_tokens: int = 120
 
     # Optional LLM pass over thesis text. Rules run first and always; the model
-    # only sees the notes the rules could not classify. Blank key = off, and
-    # off is a working configuration, not a degraded one.
-    intel_llm_provider: str = "anthropic"
+    # only sees the notes they could not classify. Blank key = off, and off is a
+    # working configuration, not a degraded one.
+    intel_llm_provider: str = "openrouter"
     intel_llm_api_key: str = ""
-    # Opus by default because a misread thesis is a wrong signal, not a typo.
-    # Bulk classification is where a cheaper model earns its place: set
-    # INTEL_LLM_MODEL=claude-haiku-4-5 (or claude-sonnet-5) and it is used as is.
-    intel_llm_model: str = "claude-opus-5"
-    intel_llm_base_url: str = ""
+    # Falls back to the usual environment variable, so an OpenRouter key that is
+    # already in the shell needs no second home in .env.
+    openrouter_api_key: str = ""
+    intel_llm_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
+    intel_llm_base_url: str = "https://openrouter.ai/api/v1"
+    # "off", or an effort level ("low"/"medium"/"high") for the models that
+    # reason. Off by default: this is labelling, not reasoning, and it runs over
+    # every unread note on every pass.
+    intel_llm_reasoning: str = "off"
     # A budget, not a target: one pass never spends more calls than this.
     intel_llm_max_calls: int = 40
-    intel_llm_timeout_seconds: float = 30.0
+    # OpenRouter's free tier allows about 20 requests a minute; this keeps a
+    # pass comfortably inside that without thinking about it.
+    intel_llm_pause_seconds: float = 3.0
+    intel_llm_timeout_seconds: float = 120.0
 
 
 settings = Settings()

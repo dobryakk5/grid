@@ -23,6 +23,7 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal, database_target
 from app.api.fomo_activity import cohort_identities, token_names
+from app.intel import llm
 from app.intel.market import MarketFacts
 from app.intel.refresh import refresh as run_refresh
 from app.intel.scoring import score
@@ -235,8 +236,11 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
         "database": database_target(),
         "cohort": {"period": period, "traders": len(identities),
                    "captured_at": cohort.captured_at, "hours": hours},
+        # Whether the model pass is actually usable, not merely configured:
+        # a provider named in .env with no key behind it reads as off.
         "collected": {"market_observed_at_ms": freshest,
                       "stale_after_seconds": settings.intel_market_ttl_seconds,
-                      "llm_reader": settings.intel_llm_provider if settings.intel_llm_api_key else None},
+                      "llm_reader": f"{settings.intel_llm_provider} · {settings.intel_llm_model}"
+                      if llm.available() else None},
         "coins": coins[:limit],
     }
