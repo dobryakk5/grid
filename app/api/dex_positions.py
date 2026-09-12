@@ -13,11 +13,11 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.auth import require_trading
 from app.core.config import settings
-from app.db.models import ChainToken, DexIntent
+from app.db.models import ChainSwap, ChainToken, DexIntent
 from app.db.session import SessionLocal
 import asyncio
 
@@ -118,25 +118,88 @@ def _pair_for(symbol: str | None, address: str):
     raise HTTPException(422, f"Пара для {symbol} ({address}) не найдена среди торгуемых")
 
 
-async def _fills_by_symbol() -> dict[str, list[Fill]]:
-    """Confirmed swaps per pair, oldest first, in the pair's own terms."""
+async def _fills_by_address(wallet: str) -> dict[str, list[Fill]]:
+    """Confirmed swaps per token contract, oldest first.
+
+    Two records answer this and neither answers it alone. ``dex_intents`` is
+    what this system executed -- the only source that knows what the gas cost.
+    ``chain_swaps`` is what the chain says the wallet did, which includes every
+    coin bought by hand in the Robinhood app that no intent ever described; for
+    those holdings the intents table is simply empty, which is why the page
+    reported "средняя цена неизвестна" for a coin that plainly cost 100 USDG.
+
+    Keyed by contract address rather than by ticker on purpose: this chain
+    carries several contracts per ticker, and a cost basis attached to the
+    wrong one is worse than none.
+
+    A swap the bot made appears in *both* tables once the wallet has been
+    imported, so an intent's ``tx_hash`` suppresses the matching chain row.
+    Counting it twice would double the recorded cost of every coin the bot
+    itself bought.
+    """
     async with SessionLocal() as session:
-        rows = list((await session.execute(
+        intents = list((await session.execute(
             select(DexIntent).where(DexIntent.status == IntentStatus.FILLED)
             .order_by(DexIntent.id)
         )).scalars())
-    fills: dict[str, list[Fill]] = {}
-    for row in rows:
+        swaps = list((await session.execute(
+            select(ChainSwap)
+            .where(func.lower(ChainSwap.wallet_address) == wallet.lower())
+            .order_by(ChainSwap.block_time_ms)
+        )).scalars())
+
+    # (sort key, address, Fill) -- gathered from both sources, then merged into
+    # one chronological series per token, because FIFO is only meaningful in
+    # the order the trades actually happened.
+    gathered: list[tuple[tuple, str, Fill]] = []
+    ours: set[str] = set()
+
+    for row in intents:
         if row.filled_amount_in is None or row.filled_amount_out is None:
             continue
+        try:
+            pair = resolve_pair(row.symbol)
+        except DexConfigError:
+            # Nothing to attach the fill to: a pair we no longer recognise
+            # cannot be matched to a holding without guessing at the contract.
+            continue
+        address = (pair.base.address or "").lower()
+        if not address:
+            continue
+        if row.tx_hash:
+            ours.add(row.tx_hash.lower())
         base, quote = (
             (row.filled_amount_out, row.filled_amount_in) if row.side == "Buy"
             else (row.filled_amount_in, row.filled_amount_out)
         )
-        fills.setdefault(row.symbol.upper(), []).append(Fill(
-            side=row.side, base_qty=base, quote_qty=quote,
-            gas_quote=row.gas_quote or Decimal(0),
+        when = row.submitted_at or row.created_at
+        gathered.append((
+            (when.timestamp() if when else 0.0, row.id),
+            address,
+            Fill(side=row.side, base_qty=base, quote_qty=quote,
+                 gas_quote=row.gas_quote or Decimal(0)),
         ))
+
+    for swap in swaps:
+        if swap.tx_hash and swap.tx_hash.lower() in ours:
+            continue
+        side = "Buy" if swap.side.upper() == "BUY" else "Sell"
+        # An unpriced buy has no cost to carry, and inventing a zero-cost lot
+        # would report the whole holding as profit -- it is left out, so the
+        # quantity surfaces as uncovered instead. An unpriced *sell* is still
+        # recorded: FIFO only needs the quantity to retire the lots it ate.
+        if side == "Buy" and swap.quote_amount is None:
+            continue
+        gathered.append((
+            (swap.block_time_ms / 1000, 0),
+            swap.token_address.lower(),
+            Fill(side=side, base_qty=swap.token_amount,
+                 quote_qty=swap.quote_amount or Decimal(0)),
+        ))
+
+    fills: dict[str, list[Fill]] = {}
+    for _key, address, fill in sorted(gathered, key=lambda item: item[0]):
+        fills.setdefault(address, []).append(fill)
     return fills
 
 
@@ -204,7 +267,7 @@ async def positions() -> dict:
     finally:
         await chain.close()
 
-    fills = await _fills_by_symbol()
+    fills = await _fills_by_address(wallet)
     quote_address = (resolve_token(QUOTE_SYMBOL).address or "").lower()
     cash, rows, priced = None, [], []
     for position in held:
@@ -223,7 +286,9 @@ async def positions() -> dict:
                 # Unknown or mismatched ticker: still list the holding, just
                 # without a price or a cost we would have to guess at.
                 pair = None
-        basis = cost_basis(fills.get(pair.symbol, []) if pair else [], position.amount)
+        # Keyed by contract, so a holding whose ticker no longer resolves to a
+        # tradable pair still gets the cost of what we paid for it.
+        basis = cost_basis(fills.get(position.address.lower(), []), position.amount)
         entry.update({
             "pair": pair.symbol if pair else None,
             "covered_qty": str(basis.covered_qty),

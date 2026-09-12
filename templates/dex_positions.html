@@ -159,7 +159,7 @@ function banners(){
 // beats averaging it in at zero, which would report the whole value as profit.
 function unknown(p){
  if(Number(p.uncovered_qty)>0&&Number(p.covered_qty)===0)
-  return '<span class="muted" title="Покупок этой монеты нет в истории сделок">неизвестна</span>';
+  return '<span class="muted" title="Покупок этой монеты нет ни в наших ордерах, ни в истории кошелька на цепочке">неизвестна</span>';
  return '—';
 }
 // Two different facts wear the same blank cell unless they are told apart: a
@@ -209,7 +209,8 @@ async function load(){
   $('note').innerHTML='Видны только токены, которые знает <code>chain_tokens</code>. '+
    '«Сейчас стоит» — котировка на продажу всего объёма, уже с учётом проскальзывания; '+
    '«роутер не ответил» — временный сбой, помогает «Обновить». '+
-   'Себестоимость считается по нашим же исполненным сделкам методом FIFO; газ покупки входит в неё, газ продажи — нет.'+
+   'Себестоимость — FIFO по сделкам этого кошелька: и нашим исполненным ордерам, и покупкам, '+
+   'прочитанным из цепочки (<code>chain_swaps</code>). Газ покупки входит в неё, газ продажи — нет.'+
    (partial?' <span class="warn">Звёздочкой отмечены позиции, которые история сделок покрывает не полностью.</span>':'');
  }catch(e){$('rows').innerHTML=`<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`;}
  finally{$('refresh').disabled=false;}

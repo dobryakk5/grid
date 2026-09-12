@@ -229,6 +229,69 @@ async def test_a_token_with_no_route_is_not_retried():
     assert value is None and failure == "unavailable"
 
 
+class _Rows:
+    """A session whose two queries answer with canned rows, in order."""
+
+    def __init__(self, *batches):
+        self.batches = list(batches)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, _statement):
+        batch = self.batches.pop(0)
+        return type("Result", (), {"scalars": lambda self_, rows=batch: rows})()
+
+
+def _intent(**kw):
+    from datetime import datetime, timezone
+    base = dict(id=1, symbol="CHATGPTUSDG", side="Buy", tx_hash=None,
+                filled_amount_in=Decimal(40), filled_amount_out=Decimal(8),
+                gas_quote=Decimal("0.5"), submitted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    return type("Intent", (), {**base, **kw})()
+
+
+def _swap(**kw):
+    base = dict(tx_hash="0xaaa", wallet_address="0xWALLET", token_address=CHATGPT,
+                side="BUY", token_amount=Decimal(8), quote_amount=Decimal(40),
+                block_time_ms=1_760_000_000_000)
+    return type("Swap", (), {**base, **kw})()
+
+
+async def test_a_hand_bought_coin_gets_its_cost_from_the_chain(monkeypatch):
+    """The gap this closes: no intent ever described these buys."""
+    monkeypatch.setattr(dex_positions, "_pair_for", lambda symbol, address: _pair())
+    monkeypatch.setattr(dex_positions, "SessionLocal", lambda: _Rows([], [_swap()]))
+    fills = await dex_positions._fills_by_address("0xWALLET")
+    basis = dex_positions.cost_basis(fills[CHATGPT], Decimal(8))
+    assert basis.cost_quote == Decimal(40) and basis.average_price == Decimal(5)
+
+
+async def test_a_swap_in_both_tables_is_counted_once(monkeypatch):
+    """Double-counting here would double the cost of everything the bot bought."""
+    monkeypatch.setattr(dex_positions, "resolve_pair", lambda symbol: _pair())
+    monkeypatch.setattr(dex_positions, "SessionLocal",
+                        lambda: _Rows([_intent(tx_hash="0xAAA")], [_swap(tx_hash="0xaaa")]))
+    fills = await dex_positions._fills_by_address("0xWALLET")
+    assert len(fills[CHATGPT]) == 1, "одна сделка в двух таблицах -- всё ещё одна сделка"
+    # The intent's row is the one kept, so the gas it paid is still in the cost.
+    assert fills[CHATGPT][0].gas_quote == Decimal("0.5")
+
+
+async def test_an_unpriced_chain_buy_leaves_the_quantity_uncovered(monkeypatch):
+    """A zero-cost lot would report the whole holding as profit."""
+    monkeypatch.setattr(dex_positions, "SessionLocal",
+                        lambda: _Rows([], [_swap(quote_amount=None)]))
+    fills = await dex_positions._fills_by_address("0xWALLET")
+    basis = dex_positions.cost_basis(fills.get(CHATGPT, []), Decimal(8))
+    assert basis.covered_qty == 0 and basis.uncovered_qty == Decimal(8)
+    assert basis.average_price is None
+
+
 def _pair(base_address=CHATGPT):
     from app.dex.tokens import DexPair
     return DexPair(
