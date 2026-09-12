@@ -13,8 +13,9 @@ from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
-from app.fomo.activity import SWAP_FIELDS, swap_rows
+from app.fomo.activity import SWAP_FIELDS, normalize_swap, swap_rows
 from app.fomo.schema import normalize_leaderboard
+from app.fomo.theses import public_thesis, thesis_rows
 
 FOMO_ORIGIN = "https://fomo.family"
 API_ORIGIN = "https://prod-api.fomo.family"
@@ -23,10 +24,29 @@ PAGE_LIMIT = 100
 # A stop, not a target. One trader's whole history is ~600 swaps today; this
 # bounds the POST body if an account turns out to have orders of magnitude more.
 MAX_SWAPS_PER_TRADER = 5000
+# Theses are read per coin, so the cost of the pass is the number of coins the
+# cohort touched in the window, not the number of people in it.
+THESIS_PAGE_LIMIT = 80
+THESIS_WINDOW_HOURS = 24
+MAX_THESIS_TOKENS = 300
+# Anything but "no minimum": the threshold filters the feed by trade size, and
+# a small trade's thesis is still a thesis.
+THESIS_THRESHOLD = 0
+# The session is gone or the endpoint is refusing everyone; retrying the next
+# coin cannot help, and it must not look like "this coin has no theses".
+FATAL_STATUSES = frozenset({401, 403, 429, 430, 431})
 
 
 class BrowserSyncError(RuntimeError):
-    pass
+    """``status`` is the upstream HTTP code when there was one, else None.
+
+    It exists so an optional pass (theses) can tell "this one coin answered
+    404" from "the session died", and only give up on the second.
+    """
+
+    def __init__(self, message, *, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def unwrap(payload):
@@ -161,12 +181,14 @@ class BrowserCollector:
                 continue
             if status in {401, 403, 430, 431}:
                 raise BrowserSyncError(
-                    f"FOMO: HTTP {status} в самом браузере. Проверьте вход на сайте; сбор остановлен."
+                    f"FOMO: HTTP {status} в самом браузере. Проверьте вход на сайте; сбор остановлен.",
+                    status=status,
                 )
             if status == 429:
-                raise BrowserSyncError("FOMO продолжает ограничивать запросы (429); повторите позднее")
+                raise BrowserSyncError("FOMO продолжает ограничивать запросы (429); повторите позднее",
+                                       status=429)
             if not 200 <= status < 300 or result.get("data") is None:
-                raise BrowserSyncError(f"FOMO: HTTP {status} или не JSON ({path})")
+                raise BrowserSyncError(f"FOMO: HTTP {status} или не JSON ({path})", status=status or None)
             await self.sleep(0.5)
             return unwrap(result["data"])
 
@@ -206,7 +228,85 @@ class BrowserCollector:
                 return collected, more
             cursor = last_id
 
-    async def collect(self, *, period="30d", limit=30, max_swaps=MAX_SWAPS_PER_TRADER):
+    async def token_theses(self, chain_id, token_address, *, after_ms, before_ms):
+        """One page of theses written about one coin inside the window.
+
+        Deliberately a single request, not a walk. ``sortedThesis`` takes a
+        time window but no cursor that has been verified, and its sort order
+        is a guess; moving ``beforeTime`` down would silently skip rows if it
+        does not sort by time. So the page is taken as it comes and
+        ``hasNextPage`` is passed up to be reported, not quietly dropped.
+        """
+        params = {
+            "tokenAddress": token_address, "networkId": chain_id,
+            "afterTime": after_ms, "beforeTime": before_ms,
+            "limit": THESIS_PAGE_LIMIT, "threshold": THESIS_THRESHOLD,
+        }
+        try:
+            rows, more = thesis_rows(await self.get("/feed/token/sortedThesis", params))
+        except ValueError as exc:
+            raise BrowserSyncError(str(exc), status=200) from None
+        return [public_thesis(row) for row in rows if isinstance(row, dict)], more
+
+    async def theses(self, traders, *, window_hours=THESIS_WINDOW_HOURS,
+                     max_tokens=MAX_THESIS_TOKENS, now_ms=None):
+        """Theses about every coin the cohort traded inside the window.
+
+        FOMO publishes theses per coin, not per person: there is no verified
+        "what did this user write" endpoint. So the coins the cohort just
+        traded are the way in, and the server keeps the rows whose author is
+        in the cohort. A thesis is written next to a trade, so a member who
+        traded in the window is reachable this way; one who only wrote about a
+        coin nobody in the cohort touched is not, and that is the honest limit
+        of this pass, recorded in ``coverage`` rather than glossed over.
+
+        Never fatal: theses are an enrichment on top of a swap history that
+        can take a quarter of an hour to read. One coin answering 404 costs
+        that coin; only a dead session or a rate limit stops the pass.
+        """
+        before_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+        after_ms = before_ms - int(window_hours * 3600_000)
+        seen = {}
+        for trader in traders:
+            for row in trader["swaps"]:
+                for leg in normalize_swap(row):
+                    if leg["occurred_at_ms"] >= after_ms:
+                        key = (leg["chain_id"], leg["token_address"])
+                        seen[key] = max(seen.get(key, 0), leg["occurred_at_ms"])
+        # Most recently traded first, so a cap cuts the stalest coins; the
+        # address breaks ties so two runs on the same data ask the same coins.
+        wanted = sorted(seen, key=lambda key: (-seen[key], key[0], key[1]))
+        coverage = {
+            "window_hours": window_hours, "after_ms": after_ms, "before_ms": before_ms,
+            "tokens_in_window": len(wanted), "tokens_read": min(len(wanted), max_tokens),
+            "tokens_skipped": max(0, len(wanted) - max_tokens),
+            "tokens_with_more": 0, "tokens_failed": 0, "items": 0,
+        }
+        if not wanted:
+            return [], coverage
+        self.log(f"Тезисы за {window_hours} ч: {coverage['tokens_read']} монет"
+                 + (f" из {len(wanted)}" if coverage["tokens_skipped"] else ""))
+        groups = []
+        for chain_id, token_address in wanted[:max_tokens]:
+            try:
+                items, more = await self.token_theses(
+                    chain_id, token_address, after_ms=after_ms, before_ms=before_ms)
+            except BrowserSyncError as exc:
+                if exc.status is None or exc.status in FATAL_STATUSES:
+                    raise
+                coverage["tokens_failed"] += 1
+                continue
+            coverage["tokens_with_more"] += more is True
+            if items:
+                coverage["items"] += len(items)
+                groups.append({"chain_id": chain_id, "token_address": token_address,
+                               "items": items})
+        self.log(f"Тезисы: {coverage['items']} записей по {len(groups)} монетам"
+                 + (f"; не ответили: {coverage['tokens_failed']}" if coverage["tokens_failed"] else ""))
+        return groups, coverage
+
+    async def collect(self, *, period="30d", limit=30, max_swaps=MAX_SWAPS_PER_TRADER,
+                      thesis_hours=THESIS_WINDOW_HOURS, max_thesis_tokens=MAX_THESIS_TOKENS):
         # /trades is a position summary, not an execution stream. Rank cohort
         # comes strictly from the selected leaderboard, never token holders.
         ranks = normalize_leaderboard(await self.get(f"/v2/leaderboard/{period}", {"limit": limit}))
@@ -228,7 +328,19 @@ class BrowserCollector:
             })
             self.log(f"{index}/{len(selected)} @{row.handle or row.display_name or row.user_id}: "
                      f"{len(swaps)} swaps" + (f" (упёрлись в предел {max_swaps})" if more else ""))
-        return {"period": period, "requested_limit": limit, "traders": traders}
+        payload = {"period": period, "requested_limit": limit, "traders": traders}
+        if thesis_hours:
+            try:
+                payload["theses"], payload["thesis_coverage"] = await self.theses(
+                    traders, window_hours=thesis_hours, max_tokens=max_thesis_tokens)
+            except BrowserSyncError as exc:
+                # The swap history above can take a quarter of an hour to read.
+                # A thesis feed that dies mid-pass must not take it with it --
+                # the import still lands, saying plainly that this part failed.
+                payload["theses"] = []
+                payload["thesis_coverage"] = {"window_hours": thesis_hours, "stopped": str(exc)}
+                self.log(f"Тезисы не собраны: {exc}")
+        return payload
 
     async def close(self):
         for task in self._tasks:

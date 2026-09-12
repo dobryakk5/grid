@@ -3,15 +3,16 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
 from app.db.models import (
-    ChainToken, FomoActivityLeg, FomoLeaderboardState, FomoToken, FomoTrader,
+    ChainToken, FomoActivityLeg, FomoLeaderboardState, FomoThesis, FomoToken, FomoTrader,
 )
 from app.db.session import SessionLocal, database_target
 from app.fomo.activity import aggregate_legs, normalize_swap
+from app.fomo.theses import normalize_thesis
 from app.fomo.tokens import CHAIN_SLUGS, resolve as resolve_names
 
 router = APIRouter(prefix="/api/fomo/activity")
@@ -28,10 +29,45 @@ class TraderSwaps(BaseModel):
     swaps: list[dict] = Field(default_factory=list, max_length=5000)
 
 
+class TokenTheses(BaseModel):
+    """Theses the collector read about one coin, exactly as the feed gave them.
+
+    Grouped by coin rather than by author because that is how FOMO serves
+    them: the request names a coin, and each row names its author.
+    """
+
+    chain_id: int = Field(ge=1, le=2**31 - 1)
+    token_address: str = Field(min_length=1, max_length=128)
+    items: list[dict] = Field(default_factory=list, max_length=2000)
+
+
 class ActivityImport(BaseModel):
     period: Literal["24h", "7d", "30d"] = "30d"
     requested_limit: int = Field(default=30, ge=1, le=500)
     traders: list[TraderSwaps] = Field(min_length=1, max_length=500)
+    # Optional: an older collector sends none, and an import that read swaps
+    # but failed to read theses is still a good import.
+    theses: list[TokenTheses] = Field(default_factory=list, max_length=1000)
+    thesis_coverage: dict | None = None
+
+    @field_validator("thesis_coverage")
+    @classmethod
+    def small_diagnostics(cls, value):
+        """Counters and one message, not a place to park arbitrary JSON.
+
+        This dict is stored verbatim in the cohort snapshot, so it is bounded
+        here rather than trusted for being ours.
+        """
+        if value is None:
+            return None
+        if len(value) > 40:
+            raise ValueError("thesis_coverage: слишком много полей")
+        for key, item in value.items():
+            if len(str(key)) > 40 or not isinstance(item, (int, float, str, bool, type(None))):
+                raise ValueError("thesis_coverage: допустимы только числа, строки и флаги")
+            if isinstance(item, str) and len(item) > 500:
+                raise ValueError("thesis_coverage: слишком длинное значение")
+        return value
 
     @model_validator(mode="after")
     def unique_cohort(self):
@@ -63,6 +99,31 @@ def prepare_import(payload):
         "history_complete": not rejected and len(payload.traders) == payload.requested_limit
         and all(t.has_more is False for t in payload.traders),
     }
+
+
+def prepare_theses(payload):
+    """Stored theses plus what was dropped and why.
+
+    Only the cohort's own notes are kept: the feed for a coin carries everyone
+    who wrote about it, and this table answers "what did the leaderboard say",
+    not "what does the internet think of this coin". An unparseable row is
+    counted, never guessed at.
+    """
+    cohort = {trader.user_id for trader in payload.traders}
+    rows, outside, rejected = {}, 0, 0
+    for group in payload.theses:
+        for item in group.items:
+            thesis = normalize_thesis(item, chain_id=group.chain_id,
+                                      token_address=group.token_address)
+            if thesis is None:
+                rejected += 1
+            elif thesis["user_id"] not in cohort:
+                outside += 1
+            else:
+                rows[thesis["thesis_id"]] = thesis
+    coverage = dict(payload.thesis_coverage or {})
+    coverage.update({"stored": len(rows), "outside_cohort": outside, "rejected": rejected})
+    return list(rows.values()), coverage
 
 
 async def name_tokens(session, wanted) -> int:
@@ -136,6 +197,8 @@ async def remember_traders(session, payload):
 @router.post("/import")
 async def import_activity(payload: ActivityImport):
     legs, coverage = prepare_import(payload)
+    theses, thesis_coverage = prepare_theses(payload)
+    coverage["theses"] = thesis_coverage
     if coverage["source_rows"] and not legs:
         raise HTTPException(status_code=422, detail="Ни один swap не распознан; прежний сбор сохранён")
     async with SessionLocal() as session:
@@ -161,12 +224,108 @@ async def import_activity(payload: ActivityImport):
             index_elements=[FomoLeaderboardState.period],
             set_={k: v for k, v in values.items() if k != "period"},
         ))
+        for start in range(0, len(theses), 500):
+            statement = insert(FomoThesis).values(
+                [{**row, "imported_at": datetime.now(timezone.utc)}
+                 for row in theses[start:start + 500]])
+            await session.execute(statement.on_conflict_do_update(
+                index_elements=[FomoThesis.thesis_id],
+                # A thesis can be edited and liked after it is written; the
+                # coin and the author it was filed under cannot change.
+                set_={key: getattr(statement.excluded, key) for key in (
+                    "text", "likes", "replies", "usd_amount", "created_at_ms",
+                    "trade_id", "imported_at",
+                )},
+            ))
         await remember_traders(session, payload)
         await session.commit()
         named = await name_tokens(
             session, {(leg["chain_id"], leg["token_address"]) for leg in legs})
     return {"traders": len(payload.traders), "swap_legs": len(legs),
-            "coverage": coverage, "database": database_target(), "named_tokens": named}
+            "theses": len(theses), "coverage": coverage,
+            "database": database_target(), "named_tokens": named}
+
+
+async def cohort_identities(session, cohort) -> dict:
+    """``user_id -> {handle, display_name, rank}`` for the stored cohort.
+
+    The cohort snapshot can carry a null handle; ``fomo_traders`` is where a
+    name learned on any earlier import still lives.
+    """
+    identities = {t["user_id"]: dict(t) for t in cohort.traders}
+    for trader in (await session.execute(select(FomoTrader).where(
+        FomoTrader.fomo_user_id.in_(identities)
+    ))).scalars():
+        identity = identities[trader.fomo_user_id]
+        identity["handle"] = identity.get("handle") or trader.user_handle
+        identity["display_name"] = identity.get("display_name") or trader.display_name
+    return identities
+
+
+async def token_names(session, coins) -> dict:
+    return {(row.chain_id, row.token_address): (row.symbol, row.name)
+            for row in (await session.execute(select(FomoToken).where(
+                tuple_(FomoToken.chain_id, FomoToken.token_address).in_(coins)
+            ))).scalars()} if coins else {}
+
+
+async def leg_symbols(session, coins) -> dict:
+    """What the trade records themselves called each coin, where they said.
+
+    The same precedence the coin table applies (``aggregate_legs``): a ticker
+    that came with the trade beats a looked-up one, so the same coin is not
+    labelled two different ways on one page.
+    """
+    if not coins:
+        return {}
+    rows = await session.execute(select(
+        FomoActivityLeg.chain_id, FomoActivityLeg.token_address, FomoActivityLeg.symbol,
+    ).where(
+        tuple_(FomoActivityLeg.chain_id, FomoActivityLeg.token_address).in_(coins),
+        FomoActivityLeg.symbol.is_not(None),
+    ).distinct())
+    return {(chain_id, address): symbol for chain_id, address, symbol in rows}
+
+
+@router.get("/theses")
+async def theses(period: Literal["24h", "7d", "30d"] = "30d",
+                 hours: int = Query(default=24, ge=1, le=24 * 365),
+                 limit: int = Query(default=200, ge=1, le=1000)):
+    """What the current cohort wrote, newest first.
+
+    Stored theses are not scoped to a leaderboard period -- the note is the
+    same note whichever window brought its author into view -- so the period
+    only selects whose notes to show.
+    """
+    async with SessionLocal() as session:
+        cohort = await session.get(FomoLeaderboardState, period)
+        if cohort is None:
+            return {"cohort": None, "theses": [], "database": database_target()}
+        identities = await cohort_identities(session, cohort)
+        cutoff = int(datetime.now(timezone.utc).timestamp() * 1000) - hours * 3600_000
+        rows = list((await session.execute(select(FomoThesis).where(
+            FomoThesis.user_id.in_(identities),
+            FomoThesis.created_at_ms >= cutoff,
+        ).order_by(FomoThesis.created_at_ms.desc()).limit(limit))).scalars())
+        coins = {(row.chain_id, row.token_address) for row in rows}
+        names = await token_names(session, coins)
+        traded = await leg_symbols(session, coins)
+        return {
+            "database": database_target(),
+            "cohort": {"period": period, "captured_at": cohort.captured_at,
+                       "coverage": (cohort.coverage or {}).get("theses")},
+            "theses": [{
+                "thesis_id": row.thesis_id,
+                **identities[row.user_id],
+                "chain_id": row.chain_id, "token_address": row.token_address,
+                "symbol": traded.get((row.chain_id, row.token_address))
+                or names.get((row.chain_id, row.token_address), (None, None))[0],
+                "name": names.get((row.chain_id, row.token_address), (None, None))[1],
+                "trade_id": row.trade_id, "text": row.text,
+                "likes": row.likes, "replies": row.replies,
+                "usd_amount": row.usd_amount, "created_at_ms": row.created_at_ms,
+            } for row in rows],
+        }
 
 
 @router.get("")
@@ -178,26 +337,14 @@ async def activity(period: Literal["24h", "7d", "30d"] = "30d",
         cohort = await session.get(FomoLeaderboardState, period)
         if cohort is None:
             return {"cohort": None, "coins": [], "database": database_target()}
-        identities = {t["user_id"]: t for t in cohort.traders}
-        # The cohort snapshot can carry a null handle; fomo_traders is where a
-        # name learned on any earlier import still lives.
-        for trader in (await session.execute(select(FomoTrader).where(
-            FomoTrader.fomo_user_id.in_(identities)
-        ))).scalars():
-            identity = identities[trader.fomo_user_id]
-            identity["handle"] = identity.get("handle") or trader.user_handle
-            identity["display_name"] = identity.get("display_name") or trader.display_name
+        identities = await cohort_identities(session, cohort)
         cutoff = int(datetime.now(timezone.utc).timestamp() * 1000) - hours * 3600_000
         legs = list((await session.execute(select(FomoActivityLeg).where(
             FomoActivityLeg.period == period,
             FomoActivityLeg.user_id.in_(identities),
             FomoActivityLeg.occurred_at_ms >= cutoff,
         ))).scalars())
-        coins = {(leg.chain_id, leg.token_address) for leg in legs}
-        names = {(row.chain_id, row.token_address): (row.symbol, row.name)
-                 for row in (await session.execute(select(FomoToken).where(
-                     tuple_(FomoToken.chain_id, FomoToken.token_address).in_(coins)
-                 ))).scalars()} if coins else {}
+        names = await token_names(session, {(leg.chain_id, leg.token_address) for leg in legs})
         return {
             "database": database_target(),
             "cohort": {"period": period, "requested_limit": cohort.requested_limit,

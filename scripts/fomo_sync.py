@@ -12,7 +12,8 @@ sys.path.insert(0, str(ROOT))
 import httpx
 
 from app.fomo.browser import (
-    MAX_SWAPS_PER_TRADER, BrowserCollector, BrowserSyncError, FOMO_ORIGIN,
+    MAX_SWAPS_PER_TRADER, MAX_THESIS_TOKENS, THESIS_WINDOW_HOURS,
+    BrowserCollector, BrowserSyncError, FOMO_ORIGIN,
     import_activity, check_api, validate_base,
 )
 
@@ -27,6 +28,10 @@ def arguments():
     parser.add_argument("--max-swaps", type=int, default=MAX_SWAPS_PER_TRADER,
                         metavar="N", help="потолок истории на трейдера (не цель)")
     parser.add_argument("--period", choices=["24h", "7d", "30d"], default="30d")
+    parser.add_argument("--thesis-hours", type=int, default=THESIS_WINDOW_HOURS, metavar="H",
+                        help="окно сбора тезисов лидеров; 0 — не собирать")
+    parser.add_argument("--max-thesis-tokens", type=int, default=MAX_THESIS_TOKENS, metavar="N",
+                        help="сколько монет опросить на тезисы (по одному запросу на монету)")
     parser.add_argument("--watch", type=int, default=0, metavar="SECONDS",
                         help="повторять сбор, минимум 300 секунд; 0 = один проход")
     parser.add_argument("--dry-run", action="store_true", help="проверить сбор без записи в Grid")
@@ -35,6 +40,8 @@ def arguments():
         parser.error("limit: 1..500; login-timeout > 0; watch: 0 или >= 300")
     if not 1 <= args.max_swaps <= MAX_SWAPS_PER_TRADER:
         parser.error(f"max-swaps: 1..{MAX_SWAPS_PER_TRADER}")
+    if not 0 <= args.thesis_hours <= 24 * 365 or not 1 <= args.max_thesis_tokens <= 1000:
+        parser.error("thesis-hours: 0..8760; max-thesis-tokens: 1..1000")
     return args
 
 
@@ -75,15 +82,24 @@ async def run(args):
                 await collector.wait_session(args.login_timeout)
                 while True:
                     payload = await collector.collect(period=args.period, limit=args.limit,
-                                                      max_swaps=args.max_swaps)
+                                                      max_swaps=args.max_swaps,
+                                                      thesis_hours=args.thesis_hours,
+                                                      max_thesis_tokens=args.max_thesis_tokens)
                     if args.dry_run:
-                        from app.api.fomo_activity import ActivityImport, prepare_import
-                        legs, coverage = prepare_import(ActivityImport.model_validate(payload))
-                        print(f"Проверка: {len(legs)} сторон swaps; диагностика: {coverage}. Без записи в Grid.", flush=True)
+                        from app.api.fomo_activity import (
+                            ActivityImport, prepare_import, prepare_theses,
+                        )
+                        parsed = ActivityImport.model_validate(payload)
+                        legs, coverage = prepare_import(parsed)
+                        theses, thesis_coverage = prepare_theses(parsed)
+                        print(f"Проверка: {len(legs)} сторон swaps; {len(theses)} тезисов топа; "
+                              f"диагностика: {coverage}; тезисы: {thesis_coverage}. "
+                              f"Без записи в Grid.", flush=True)
                     else:
                         result = await import_activity(http, base, payload)
                         print(f"Импортировано трейдеров: {result['traders']}; "
                               f"сторон swaps: {result['swap_legs']}; "
+                              f"тезисов: {result.get('theses', 0)}; "
                               f"названий монет добавлено: {result.get('named_tokens', 0)}; "
                               f"БД: {result.get('database', database)}", flush=True)
                         if not result["coverage"]["history_complete"]:

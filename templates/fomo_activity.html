@@ -81,6 +81,16 @@ tr.detail table{margin-top:0;min-width:720px}
 tr.detail th{position:static;background:transparent}
 tr.detail tr:hover td{background:transparent}
 .legend{margin-top:10px;font-size:12px}
+
+/* Theses: prose, not numbers -- a column layout would fight the text. */
+.theses{display:grid;gap:10px;margin-top:12px}
+.thesis{background:var(--panel2);border:1px solid var(--line2);border-radius:12px;padding:10px 12px}
+.thesis .head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.thesis .who{color:var(--text);font-weight:700;font-size:13px}
+.thesis .said{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}
+.thesis.own{border-color:var(--line)}
+tr.detail .theses{margin:12px 0 0}
+.say{border:1px solid var(--line);border-radius:999px;padding:2px 7px;font-size:10px;color:var(--warn)}
 </style></head><body><main class="wrap">
 {% include "_nav.html" %}
 <header class="top"><div><h1>Что торгует топ FOMO</h1><div id="cohort" class="muted">Топ-30 · лидерборд за 30 дней · все сети</div></div>
@@ -92,6 +102,9 @@ tr.detail tr:hover td{background:transparent}
 <section class="panel"><div class="row"><label>Сделки за <select id="hours"><option value="1">час</option><option value="24" selected>сутки</option><option value="168">7 дней</option><option value="720">30 дней</option><option value="2160">90 дней</option><option value="8760">всю историю</option></select></label>
 <label>Сеть <select id="network"><option value="">Все сети</option></select></label><input id="search" placeholder="Монета, адрес или трейдер" aria-label="Поиск монеты или трейдера"></div>
 <div id="summary" class="muted" style="margin-top:12px"></div></section>
+<section class="panel"><div class="row" style="justify-content:space-between">
+<h2>Что пишут лидеры</h2><span id="thesisNote" class="muted"></span></div>
+<div id="theses" class="theses"></div></section>
 <section class="panel" style="padding:0;overflow:hidden"><div class="table-wrap"><table class="coins">
 <thead><tr>
 <th class="sortable" data-sort="label">Монета</th>
@@ -120,13 +133,30 @@ const fomoLink=c=>fomoSlugs[c.chain_id]?`https://fomo.family/tokens/${fomoSlugs[
 const fmt=(n,d=2)=>Number(n).toLocaleString('ru-RU',{maximumFractionDigits:d});
 const usd=n=>'$'+fmt(n);
 const time=n=>new Date(n).toLocaleString('ru-RU');
-let coins=[];let sequence=0;
+let coins=[];let theses=[];let thesisStopped='';let sequence=0;
 let sort={key:'buy_usd',dir:-1};
 const open=new Set();
 const keyOf=c=>c.chain_id+':'+c.token_address;
+const who=t=>(t.display_name||t.handle||t.user_id);
 const label=c=>(c.symbol||c.name||c.token_address).toLowerCase();
 const value=(c,key)=>key==='label'?label(c):key==='participants'?c.traders.length:Number(c[key]);
 $('command').textContent='FOMO_API_BASE='+location.origin+BASE+' make fomo-token';
+function thesisCard(t,{coin=true}={}){
+ const name=t.symbol||t.token_address.slice(0,10)+'…';
+ const size=t.usd_amount!=null?` · ${usd(t.usd_amount)}`:'';
+ return `<article class="thesis">
+ <div class="head"><span class="who">${esc(who(t))}</span>
+ ${t.rank!=null?`<span class="badge">#${t.rank}</span>`:''}
+ ${t.handle?`<span>@${esc(t.handle)}</span>`:''}
+ ${coin?`<span class="badge">${esc(name)}</span><span>${esc(chain(t.chain_id))}</span>`:''}
+ <span>${time(t.created_at_ms)}</span>${size}
+ ${t.likes?`<span>♥ ${t.likes}</span>`:''}${t.replies?`<span>💬 ${t.replies}</span>`:''}</div>
+ <div class="said">${esc(t.text)}</div></article>`;
+}
+function thesesFor(c){
+ const key=keyOf(c);
+ return theses.filter(t=>t.chain_id+':'+t.token_address===key);
+}
 function traderRows(c){
  return `<table><thead><tr><th>Ранг / трейдер</th><th class="num">Куплено</th><th class="num">Продано</th>
  <th class="num">Количество BUY / SELL</th><th class="num">Сделки BUY / SELL</th><th class="num">Последняя</th></tr></thead>
@@ -138,7 +168,7 @@ function traderRows(c){
  <td class="num muted">${time(t.last_at_ms)}</td></tr>`).join('')}</tbody></table>`;
 }
 function coinRow(c){
- const key=keyOf(c), shown=open.has(key);
+ const key=keyOf(c), shown=open.has(key), said=thesesFor(c);
  const name=c.name&&c.name!==c.symbol?`<span class="fullname" title="${esc(c.name)}">${esc(c.name)}</span>`:'';
  // No symbol anywhere means nothing named this address; a short prefix at
  // least distinguishes rows, and the copy button hands over the real thing.
@@ -149,6 +179,7 @@ function coinRow(c){
  return `<tr class="coin${shown?' open':''}" data-key="${esc(key)}">
  <td><span class="coinname"><span class="chev">▶</span><b>${named}</b>
  <span class="badge">${esc(chain(c.chain_id))}</span>${name}
+ ${said.length?`<span class="say" title="Тезисов от топа за период">✎ ${said.length}</span>`:''}
  <button class="copy" data-addr="${esc(c.token_address)}" title="Скопировать адрес контракта" aria-label="Скопировать адрес контракта">⧉</button></span></td>
  <td class="num good">${usd(c.buy_usd)}</td>
  <td class="num bad">${usd(c.sell_usd)}</td>
@@ -156,6 +187,7 @@ function coinRow(c){
  <td class="num">${c.buyers}</td><td class="num">${c.sellers}</td><td class="num">${c.traders.length}</td>
  <td class="num muted">${time(c.last_at_ms)}</td></tr>
  ${shown?`<tr class="detail" data-for="${esc(key)}"><td colspan="8"><div class="table-wrap">${traderRows(c)}</div>
+ ${said.length?`<div class="theses">${said.map(t=>thesisCard(t,{coin:false})).join('')}</div>`:''}
  ${c.unpriced?`<p style="color:var(--warn);margin:8px 0 0">${c.unpriced} сторон сделок без USD-оценки; денежные суммы неполные.</p>`:''}</td></tr>`:''}`;
 }
 function render(){
@@ -163,6 +195,7 @@ function render(){
  const selected=coins.filter(c=>(!net||String(c.chain_id)===net)&&(!query||[c.symbol,c.name,c.token_address,...c.traders.flatMap(t=>[t.handle,t.display_name])].join(' ').toLowerCase().includes(query)));
  selected.sort((a,b)=>{const x=value(a,sort.key),y=value(b,sort.key);return (x<y?-1:x>y?1:0)*sort.dir;});
  $('summary').textContent=`Монет: ${selected.length} · сеть + адрес определяют монету; одинаковые тикеры не объединяются`;
+ renderTheses();
  $('coins').innerHTML=selected.length?selected.map(coinRow).join(''):'<tr><td colspan="8" class="empty">Нет собранных сделок для выбранного периода и фильтров.</td></tr>';
  document.querySelectorAll('.coins th.sortable').forEach(th=>{
   const on=th.dataset.sort===sort.key;
@@ -171,12 +204,50 @@ function render(){
   if(on)th.insertAdjacentHTML('beforeend',`<span class="arrow">${sort.dir<0?'▼':'▲'}</span>`);
  });
 }
+// The same filters as the coin table: a search for a coin or a person should
+// narrow what they said, not leave a list that contradicts the table above it.
+function renderTheses(){
+ const query=$('search').value.toLowerCase().trim(), net=$('network').value;
+ const shown=theses.filter(t=>(!net||String(t.chain_id)===net)
+  &&(!query||[t.symbol,t.name,t.token_address,t.handle,t.display_name,t.text].join(' ').toLowerCase().includes(query)));
+ $('theses').innerHTML=shown.length?shown.map(t=>thesisCard(t)).join('')
+  :`<div class="empty">${theses.length?'Ни один тезис не подходит под фильтр.':'Тезисов за период не собрано.'}</div>`;
+ // Each pass reads only the last 24 hours of theses, so a wider window shows
+ // what earlier passes stored rather than a deeper read of the feed.
+ const deeper=Number($('hours').value)>24?' · за проход собираются последние 24 ч, более ранние — из прошлых проходов':'';
+ $('thesisNote').textContent=thesisStopped?'последний сбор тезисов прервался: '+thesisStopped
+  :(shown.length?`${shown.length} за выбранный период`:'')+deeper;
+}
+
+// Theses are a separate collection pass over a separate endpoint, so they get
+// their own request: a coin table that loaded must not disappear because the
+// thesis feed answered badly, and vice versa.
+async function loadTheses(request){
+ try{
+  const r=await fetch(BASE+'/api/fomo/activity/theses?period=30d&limit=500&hours='+$('hours').value);
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  const data=await r.json();
+  if(request!==sequence)return;
+  theses=data.theses||[];
+  // Silence and a failed pass look identical in the list; only the collector's
+  // own diagnostics can tell them apart, so say which one it is.
+  thesisStopped=(data.cohort&&data.cohort.coverage&&data.cohort.coverage.stopped)||'';
+  renderTheses();
+ }catch(e){
+  if(request!==sequence)return;
+  theses=[];thesisStopped='';
+  $('theses').innerHTML=`<div class="empty">Тезисы не загрузились: ${esc(e.message)}</div>`;
+  $('thesisNote').textContent='';
+ }
+}
+
 async function load(){
  const request=++sequence;
  $('refresh').disabled=true;
  try{
   // The wrapper in _auth.html carries the session token the positions page
   // logs in for. Setting Authorization here would cost nginx its basic session.
+  const theses_=loadTheses(request);
   const r=await fetch(BASE+'/api/fomo/activity?period=30d&hours='+$('hours').value);
   if(r.status===401)throw new Error('Нужен вход — откройте страницу «Открытые позиции» и авторизуйтесь');
   if(!r.ok)throw new Error('HTTP '+r.status+' — проверьте API и перезапустите сервер после обновления');
@@ -192,6 +263,8 @@ async function load(){
   const previous=$('network').value;
   $('network').innerHTML='<option value="">Все сети</option>'+[...new Set(coins.map(c=>c.chain_id))].sort((a,b)=>a-b).map(id=>`<option value="${id}">${esc(chain(id))}</option>`).join('');
   if([...$('network').options].some(o=>o.value===previous))$('network').value=previous;
+  await theses_;
+  if(request!==sequence)return;
   render();
  }catch(e){if(request===sequence)$('status').textContent='Не удалось обновить: '+e.message;}
  finally{if(request===sequence)$('refresh').disabled=false;}

@@ -579,6 +579,40 @@ class FomoActivityLeg(Base):
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
 
 
+class FomoThesis(Base):
+    """A note a leaderboard trader published next to a trade.
+
+    Separate from ``fomo_activity_legs`` because it is a different record from
+    a different endpoint: a swap is what someone did, a thesis is what they
+    said about it. A swap has both legs and always exists; a thesis is
+    optional, editable after the fact (hence the upsert on text), and can
+    outlive the position it was written for.
+
+    Not keyed by period: the note is the same note whichever leaderboard
+    window brought its author into view.
+    """
+
+    __tablename__ = "fomo_theses"
+
+    thesis_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_address: Mapped[str] = mapped_column(String(128), nullable=False)
+    trade_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    likes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replies: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usd_amount: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_fomo_theses_token", "chain_id", "token_address"),
+    )
+
+
 class FomoToken(Base):
     """Name for a token id seen in FOMO swaps, looked up once and kept.
 

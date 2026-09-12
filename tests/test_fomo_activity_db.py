@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api import fomo_activity
 from app.db.models import (
-    Base, ChainToken, FomoActivityLeg, FomoLeaderboardState, FomoToken, FomoTrader,
+    Base, ChainToken, FomoActivityLeg, FomoLeaderboardState, FomoThesis, FomoToken,
+    FomoTrader,
 )
 
 
@@ -28,7 +29,8 @@ async def test_reimport_does_not_double_totals_and_latest_cohort_controls_names(
         await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
         await conn.run_sync(lambda sync: Base.metadata.create_all(
             sync, tables=[FomoActivityLeg.__table__, FomoLeaderboardState.__table__,
-                          FomoToken.__table__, FomoTrader.__table__, ChainToken.__table__],
+                          FomoThesis.__table__, FomoToken.__table__, FomoTrader.__table__,
+                          ChainToken.__table__],
         ))
     monkeypatch.setattr(fomo_activity, "SessionLocal", async_sessionmaker(engine, expire_on_commit=False))
 
@@ -57,10 +59,14 @@ async def test_reimport_does_not_double_totals_and_latest_cohort_controls_names(
             on_chain = {**swap, "id": "rh-swap", "inTokenAddress": "0xUSDG",
                         "outTokenAddress": "0xpons", "inNetworkId": 4663,
                         "outNetworkId": 4663, "outTokenSymbol": None}
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             payload = {"requested_limit": 1, "traders": [{
                 "user_id": "alice", "handle": "alice", "rank": 1, "has_more": True,
                 "swaps": [swap, on_chain],
-            }]}
+            }], "theses": [{"chain_id": 1399811149, "token_address": "SoLaNa", "items": [
+                {"id": "th-1", "userId": "alice", "createdAt": now_ms, "thesis": "держу"},
+                {"id": "th-2", "userId": "stranger", "createdAt": now_ms, "thesis": "чужое"},
+            ]}], "thesis_coverage": {"window_hours": 24, "tokens_failed": 0}}
             for _ in range(2):
                 response = await http.post("/api/fomo/activity/import", json=payload)
                 assert response.status_code == 200, response.text
@@ -78,6 +84,21 @@ async def test_reimport_does_not_double_totals_and_latest_cohort_controls_names(
             assert (pons["symbol"], pons["name"]) == ("PONS", None)
             assert not result["cohort"]["coverage"]["history_complete"]
 
+            # Theses: only the cohort's own, named and de-duplicated across the
+            # two identical imports above.
+            said = (await http.get("/api/fomo/activity/theses")).json()
+            assert [t["thesis_id"] for t in said["theses"]] == ["th-1"]
+            assert (said["theses"][0]["handle"], said["theses"][0]["symbol"]) == ("alice", "TOKEN")
+            assert said["cohort"]["coverage"] == {
+                "window_hours": 24, "tokens_failed": 0,
+                "stored": 1, "outside_cohort": 1, "rejected": 0,
+            }
+            # An edited note replaces the stored one instead of adding a row.
+            payload["theses"][0]["items"][0]["thesis"] = "продал"
+            assert (await http.post("/api/fomo/activity/import", json=payload)).status_code == 200
+            said = (await http.get("/api/fomo/activity/theses")).json()
+            assert [t["text"] for t in said["theses"]] == ["продал"]
+
             # Malformed responses preserve the old cohort and stored events.
             payload["traders"][0]["swaps"] = [{"id": "bad"}]
             assert (await http.post("/api/fomo/activity/import", json=payload)).status_code == 422
@@ -93,8 +114,11 @@ async def test_reimport_does_not_double_totals_and_latest_cohort_controls_names(
 
             # Outgoing members' historical swaps cannot leak into the new top.
             payload["traders"] = [{"user_id": "bob", "rank": 1, "has_more": False, "swaps": []}]
+            payload["theses"] = []
             assert (await http.post("/api/fomo/activity/import", json=payload)).status_code == 200
             assert (await http.get("/api/fomo/activity")).json()["coins"] == []
+            # The note stays in the table; it is simply not this cohort's.
+            assert (await http.get("/api/fomo/activity/theses")).json()["theses"] == []
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
