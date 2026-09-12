@@ -19,14 +19,22 @@ button:hover:not(:disabled),.button:hover{border-color:#3a4660}
 button:disabled{opacity:.45;cursor:not-allowed}
 input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;min-width:220px}
 .table-wrap{overflow-x:auto}
-table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:1120px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:940px}
 th,td{white-space:nowrap}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line2);vertical-align:middle}
 th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .addr{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
-.quarters{display:flex;gap:6px;justify-content:flex-end}
-.quarters button{padding:6px 10px;font-size:12px}
+.actions{display:flex;gap:6px;justify-content:flex-end}
+.actions button{padding:6px 12px;font-size:12px;letter-spacing:.04em}
+.actions .buy{border-color:#2f6b46;background:#16281f;color:#9ee7bd}
+.actions .sell{border-color:#6b2f36;background:#2a1519;color:#ffb4b4}
+.actions button:disabled{border-color:var(--line);background:#171d2a;color:var(--muted)}
+/* The share chips are a segmented control: exactly one is live at a time, and
+   the live one has to read as chosen from across the dialog. */
+.chips{display:flex;gap:6px;margin:4px 0 12px}
+.chips button{flex:1;padding:8px 0;font-size:13px}
+.chips button[aria-pressed=true]{border-color:var(--accent);background:#1b2740;color:#cfe0ff}
 .banner{border-radius:10px;padding:11px 14px;margin-bottom:12px;border:1px solid}
 .banner.live{border-color:var(--bad);background:#2a1418;color:#ffb4b4}
 .banner.dry{border-color:var(--line);background:var(--panel2);color:var(--muted)}
@@ -70,8 +78,8 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
 <table><thead><tr><th>Монета</th><th class="num">Количество</th>
 <th class="num">Средняя цена</th><th class="num">Вложено</th>
 <th class="num">Сейчас стоит</th><th class="num">PnL</th>
-<th class="num" style="width:110px">Купить</th><th class="num" style="width:260px">Продать за USDG</th></tr></thead>
-<tbody id="rows"><tr><td colspan="8" class="empty">Загрузка…</td></tr></tbody></table></div></section>
+<th class="num" style="width:170px">Действия</th></tr></thead>
+<tbody id="rows"><tr><td colspan="7" class="empty">Загрузка…</td></tr></tbody></table></div></section>
 
 <p class="muted" id="note"></p>
 
@@ -91,13 +99,24 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
   <button type="button" id="cancelBuy">Отмена</button>
   <button type="submit" id="doBuy">Купить</button></div></form></dialog>
 
-<dialog id="confirm"><h2 style="margin:0;font-size:17px">Подтвердите продажу</h2>
-<p class="muted" id="confirmIntro"></p>
-<dl id="confirmDetails"></dl>
-<p class="warn" id="confirmWarn" style="margin:0 0 14px"></p>
+<dialog id="sell"><h2 style="margin:0;font-size:17px">Продажа за USDG</h2>
+<p class="muted" id="sellIntro"></p>
+<form id="sellForm">
+<div class="muted" style="font-size:12px">Доля позиции</div>
+<div class="chips" id="sellChips"></div>
+<label class="choice"><input type="radio" name="sellType" value="market" checked>
+ <span>По рынку — лимит встанет на кэп проскальзывания ниже котировки</span></label>
+<label class="choice"><input type="radio" name="sellType" value="limit">
+ <span>Лимиткой по цене, USDG за штуку
+ <input id="sellLimit" type="text" inputmode="decimal" placeholder="например 4.20" disabled
+  style="width:100%;margin-top:4px"></span></label>
+<dl id="sellDetails"></dl>
+<p class="warn" id="sellWarn" style="margin:0 0 14px"></p>
+<p class="bad" id="sellError" style="margin:0 0 10px"></p>
 <div style="display:flex;gap:10px;justify-content:flex-end">
-  <button id="cancelSell">Отмена</button>
-  <button id="doSell" style="border-color:var(--bad);background:#3a1a1f">Продать</button></div></dialog>
+  <button type="button" id="cancelSell">Отмена</button>
+  <button type="submit" id="doSell" style="border-color:var(--bad);background:#3a1a1f">Продать</button>
+</div></form></dialog>
 
 {% include "_auth.html" %}
 <script>
@@ -105,6 +124,10 @@ const BASE=location.pathname.replace(/\/positions(\/.*)?$/,'');
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num=(v,d=6)=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
+// A full 42-character address in a nowrap cell pushes the action buttons off
+// the right edge of the screen; the ends identify the contract and the whole
+// thing stays one hover away.
+const short=a=>esc(a).replace(/^(0x.{6}).+(.{6})$/,'$1…$2');
 let state={positions:[],dry_run:true,native_balance:'0'};
 let pending=null;let buying=null;
 $('fomoLink').href=BASE+'/fomo';
@@ -155,16 +178,18 @@ function render(){
   <div class="tile"><div class="label">Открытых позиций</div><div class="value">${state.positions.length}</div></div>
   <div class="tile"><div class="label">Кошелёк</div><div class="value addr">${esc(state.wallet||'')}</div></div>`;
  $('rows').innerHTML=state.positions.length?state.positions.map(p=>`<tr>
-  <td><b>${esc(p.symbol||'без тикера')}</b><div class="addr">${esc(p.token_address)}</div></td>
+  <td><b>${esc(p.symbol||'без тикера')}</b><div class="addr" title="${esc(p.token_address)}">${short(p.token_address)}</div></td>
   <td class="num">${num(p.amount,8)}</td>
   <td class="num">${p.average_price?num(p.average_price,8):unknown(p)}</td>
   <td class="num">${p.cost_quote?num(p.cost_quote,6):'—'}</td>
   <td class="num">${p.value_quote!=null?num(p.value_quote,6):'<span class="muted">нет котировки</span>'}</td>
   <td class="num">${pnl(p)}</td>
-  <td><div class="quarters"><button data-buy="${esc(p.token_address)}">Купить…</button></div></td>
-  <td><div class="quarters">${[25,50,75,100].map(q=>
-   `<button data-address="${esc(p.token_address)}" data-percent="${q}">${q}%</button>`).join('')}</div></td>
- </tr>`).join(''):'<tr><td colspan="8" class="empty">В кошельке нет токенов Robinhood Chain, кроме USDG.</td></tr>';
+  <td><div class="actions">
+   <button class="buy" data-buy="${esc(p.token_address)}">BUY</button>
+   <button class="sell" data-sell="${esc(p.token_address)}"${p.pair?'':
+    ' disabled title="Пара с USDG не найдена среди торгуемых — продать через роутер нечем"'}>SELL</button>
+  </div></td>
+ </tr>`).join(''):'<tr><td colspan="7" class="empty">В кошельке нет токенов Robinhood Chain, кроме USDG.</td></tr>';
 }
 
 async function load(){
@@ -177,7 +202,7 @@ async function load(){
    '«Сейчас стоит» — котировка на продажу всего объёма, уже с учётом проскальзывания. '+
    'Себестоимость считается по нашим же исполненным сделкам методом FIFO; газ покупки входит в неё, газ продажи — нет.'+
    (partial?' <span class="warn">Звёздочкой отмечены позиции, которые история сделок покрывает не полностью.</span>':'');
- }catch(e){$('rows').innerHTML=`<tr><td colspan="3" class="empty">${esc(e.message)}</td></tr>`;}
+ }catch(e){$('rows').innerHTML=`<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`;}
  finally{$('refresh').disabled=false;}
 }
 
@@ -187,37 +212,76 @@ $('rows').onclick=event=>{
   const held=state.positions.find(p=>p.token_address===buyButton.dataset.buy);
   return openBuy(buyButton.dataset.buy,held?held.symbol:null);
  }
- const button=event.target.closest('button[data-address]');
- if(!button)return;
- const position=state.positions.find(p=>p.token_address===button.dataset.address);
- if(!position)return;
- pending={address:position.token_address,percent:Number(button.dataset.percent),symbol:position.symbol};
- const share=Number(position.amount)*pending.percent/100;
- $('confirmIntro').textContent=`${pending.percent}% позиции ${position.symbol||position.token_address} за USDG.`;
- $('confirmDetails').innerHTML=`<dt>Монета</dt><dd>${esc(position.symbol||'—')}</dd>
-  <dt>Контракт</dt><dd class="addr">${esc(position.token_address)}</dd>
-  <dt>В кошельке</dt><dd>${num(position.amount,8)}</dd>
-  <dt>К продаже</dt><dd>${num(share,8)}</dd>`;
- $('confirmWarn').textContent=state.dry_run
-  ?'DEX_DRY_RUN включён — сделка не будет подписана.'
-  :'DEX_DRY_RUN выключен — воркер подпишет и отправит эту сделку.';
- $('confirm').showModal();
+ const sellButton=event.target.closest('button[data-sell]');
+ if(sellButton)openSell(sellButton.dataset.sell);
 };
 
-$('cancelSell').onclick=()=>{pending=null;$('confirm').close();};
-$('doSell').onclick=async()=>{
+// The share is a quarter of what the wallet holds *now*; showing the resulting
+// token amount is the whole point of the chips, since a percentage of an
+// unfamiliar balance means nothing on its own.
+function sellDetails(){
+ const position=pending&&pending.position;
+ if(!position)return;
+ const share=Number(position.amount)*pending.percent/100;
+ const price=$('sellForm').sellType.value==='limit'?Number($('sellLimit').value.replace(',','.')):NaN;
+ const proceeds=Number.isFinite(price)&&price>0
+  ?`<dt>Если исполнится</dt><dd>${num(share*price,6)} USDG</dd>`:'';
+ $('sellDetails').innerHTML=`<dt>Контракт</dt><dd class="addr">${esc(position.token_address)}</dd>
+  <dt>В кошельке</dt><dd>${num(position.amount,8)}</dd>
+  <dt>К продаже</dt><dd>${num(share,8)} ${esc(position.symbol||'')}</dd>${proceeds}`;
+}
+
+function openSell(address){
+ const position=state.positions.find(p=>p.token_address===address);
+ if(!position)return;
+ pending={address:position.token_address,percent:25,symbol:position.symbol,position};
+ $('sellIntro').textContent=(position.symbol?position.symbol+' · ':'')+position.token_address;
+ $('sellError').textContent='';$('sellLimit').value='';
+ $('sellForm').sellType.value='market';$('sellLimit').disabled=true;
+ $('sellChips').innerHTML=[25,50,75,100].map(q=>
+  `<button type="button" data-percent="${q}" aria-pressed="${q===25}">${q}%</button>`).join('');
+ $('sellWarn').textContent=state.dry_run
+  ?'DEX_DRY_RUN включён — сделка не будет подписана.'
+  :'DEX_DRY_RUN выключен — воркер подпишет и отправит эту сделку.';
+ sellDetails();
+ $('sell').showModal();
+}
+
+$('sellChips').onclick=event=>{
+ const chip=event.target.closest('button[data-percent]');
+ if(!chip||!pending)return;
+ pending.percent=Number(chip.dataset.percent);
+ [...$('sellChips').children].forEach(b=>b.setAttribute('aria-pressed',b===chip));
+ sellDetails();
+};
+[...document.querySelectorAll('input[name=sellType]')].forEach(radio=>radio.onchange=()=>{
+ $('sellLimit').disabled=$('sellForm').sellType.value!=='limit';
+ if(!$('sellLimit').disabled)$('sellLimit').focus();
+ sellDetails();
+});
+$('sellLimit').oninput=sellDetails;
+$('cancelSell').onclick=()=>{pending=null;$('sell').close();};
+
+$('sellForm').onsubmit=async event=>{
+ event.preventDefault();
  if(!pending)return;
+ $('sellError').textContent='';
+ const body={percent:pending.percent};
+ if($('sellForm').sellType.value==='limit'){
+  if(!$('sellLimit').value.trim()){$('sellError').textContent='Укажите цену лимитки.';return;}
+  body.limit_price=$('sellLimit').value.trim();
+ }
  $('doSell').disabled=true;
  try{
   const result=await api(`/api/dex/positions/${pending.address}/sell`,
-   {method:'POST',body:JSON.stringify({percent:pending.percent})});
-  $('confirm').close();
-  alert(`Ордер поставлен (intent ${result.intent_id}).\n`+
-        `${result.amount} ${result.amount_coin} по лимиту ${result.limit_price} USDG за штуку.\n`+
-        `Котировка: ${result.quoted_proceeds} USDG.\n${result.note}`);
-  load();
- }catch(e){alert('Продажа не поставлена: '+e.message);}
- finally{$('doSell').disabled=false;pending=null;}
+   {method:'POST',body:JSON.stringify(body)});
+  $('sell').close();
+  alert(`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
+        `${result.amount} ${result.amount_coin} по лимиту ${result.limit_price} USDG за штуку.`+
+        (result.quoted_proceeds?`\nКотировка: ${result.quoted_proceeds} USDG.`:'')+`\n${result.note}`);
+  pending=null;load();
+ }catch(e){$('sellError').textContent=e.message;}
+ finally{$('doSell').disabled=false;}
 };
 
 function openBuy(address,symbol){

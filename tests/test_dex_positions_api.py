@@ -113,6 +113,35 @@ async def test_half_a_position_is_armed_as_a_bounded_sell(wired, monkeypatch):
     assert wired[0]["side"] == "Sell" and wired[0]["limit_price"] == Decimal("9.95")
 
 
+async def test_a_limit_sale_is_armed_at_the_asked_price_without_a_quote(wired, monkeypatch):
+    monkeypatch.setattr(dex_positions, "_pair_for", lambda symbol, address: _pair())
+
+    class Unreachable(FakeUniswap):
+        async def quote_exact_in(self, **kwargs):
+            raise AssertionError("лимитку нельзя котировать заранее: цена придёт позже")
+
+    monkeypatch.setattr(dex_positions, "UniswapClient", lambda: Unreachable())
+    async with client() as http:
+        response = await http.post(f"/api/dex/positions/{CHATGPT}/sell",
+                                   json={"percent": 50, "limit_price": "12.5"}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["order_type"] == "limit" and body["quoted_proceeds"] is None
+    assert Decimal(body["limit_price"]) == Decimal("12.5")
+    assert wired[0]["limit_price"] == Decimal("12.5")
+
+
+async def test_a_limit_sale_too_small_to_execute_is_refused(wired, monkeypatch):
+    # 2 tokens at 0.01 USDG is 0.02 USDG: the router would never fill it, and
+    # the quote that usually catches dust is not taken for a limit order.
+    monkeypatch.setattr(dex_positions, "_pair_for", lambda symbol, address: _pair())
+    async with client() as http:
+        response = await http.post(f"/api/dex/positions/{CHATGPT}/sell",
+                                   json={"percent": 25, "limit_price": "0.01"}, headers=AUTH)
+    assert response.status_code == 422 and "Минимальный ордер" in response.text
+    assert not wired
+
+
 async def test_a_ticker_pointing_at_another_contract_stops_the_sale(wired, monkeypatch):
     # Same ticker, different address: selling this would spend the wrong coin.
     monkeypatch.setattr(dex_positions, "_pair_for", dex_positions._pair_for)

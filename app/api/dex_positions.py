@@ -37,9 +37,19 @@ ADDRESS = Path(pattern=r"^0x[0-9a-fA-F]{40}$")
 
 
 class SellRequest(BaseModel):
-    # Quarters only. A free-text amount is a different feature with a
-    # different failure mode; these four are what the page offers.
+    """Sell ``percent`` of the holding, at market or at a price of your own.
+
+    Quarters only for the size. A free-text amount is a different feature with
+    a different failure mode; these four are what the page offers.
+
+    ``limit_price`` absent means "at market": the router is quoted and the
+    limit is set a slippage cap below that quote, so the order fills now but
+    still cannot fill at any price. Present means a real limit order, which
+    waits for the market to come up to it and may never fill at all.
+    """
+
     percent: int = Field(json_schema_extra={"enum": [25, 50, 75, 100]})
+    limit_price: Decimal | None = Field(default=None, gt=0, max_digits=38, decimal_places=18)
 
 
 class BuyRequest(BaseModel):
@@ -245,38 +255,54 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
     if amount <= 0:
         raise HTTPException(422, "Доля меньше одной единицы токена")
 
-    uniswap = UniswapClient()
-    try:
-        quote = await uniswap.quote_exact_in(
-            pair=pair, side="Sell",
-            amount_in_wei=int(amount.scaleb(position.decimals)),
-            swapper=wallet,
-        )
-    except UniswapError as exc:
-        raise HTTPException(502, f"Не удалось получить котировку: {exc}") from None
-    finally:
-        await uniswap.close()
+    limit, proceeds = payload.limit_price, None
+    if limit is None:
+        uniswap = UniswapClient()
+        try:
+            quote = await uniswap.quote_exact_in(
+                pair=pair, side="Sell",
+                amount_in_wei=int(amount.scaleb(position.decimals)),
+                swapper=wallet,
+            )
+        except UniswapError as exc:
+            raise HTTPException(502, f"Не удалось получить котировку: {exc}") from None
+        finally:
+            await uniswap.close()
 
-    proceeds = Decimal(quote.amount_out).scaleb(-resolve_token(QUOTE_SYMBOL).decimals)
-    if proceeds < settings.dex_min_order_quote:
-        raise HTTPException(
-            422,
-            f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}; "
-            f"эта доля стоит около {proceeds} {QUOTE_SYMBOL}",
-        )
-    limit = limit_from_quote(amount, proceeds, settings.dex_max_slippage_pct, side="Sell")
+        proceeds = Decimal(quote.amount_out).scaleb(-resolve_token(QUOTE_SYMBOL).decimals)
+        if proceeds < settings.dex_min_order_quote:
+            raise HTTPException(
+                422,
+                f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}; "
+                f"эта доля стоит около {proceeds} {QUOTE_SYMBOL}",
+            )
+        limit = limit_from_quote(amount, proceeds, settings.dex_max_slippage_pct, side="Sell")
 
-    # The router priced the gas for this exact swap; compare the wallet against
-    # that, not against a guess. Refusing here costs a click, while arming a
-    # level the wallet can never broadcast wastes the price it was armed at.
-    gas_wei = quote.gas_fee_native_wei
-    native_wei = int(native_balance.scaleb(18))
-    if gas_wei and native_wei < gas_wei:
-        raise HTTPException(
-            422,
-            f"Не хватает нативного ETH на газ: нужно примерно "
-            f"{Decimal(gas_wei).scaleb(-18)}, на кошельке {native_balance}",
-        )
+        # The router priced the gas for this exact swap; compare the wallet
+        # against that, not against a guess. Refusing here costs a click, while
+        # arming a level the wallet can never broadcast wastes the price it was
+        # armed at.
+        gas_wei = quote.gas_fee_native_wei
+        native_wei = int(native_balance.scaleb(18))
+        if gas_wei and native_wei < gas_wei:
+            raise HTTPException(
+                422,
+                f"Не хватает нативного ETH на газ: нужно примерно "
+                f"{Decimal(gas_wei).scaleb(-18)}, на кошельке {native_balance}",
+            )
+    else:
+        # A limit order is deliberately not quoted or gas-checked here: it may
+        # wait days, and both facts will have changed by the time it triggers.
+        # The worker re-checks them at execution. What the order is worth *if*
+        # it fills is known without the router, though, so the minimum still
+        # applies -- a level too small to be executable is not worth arming.
+        asked = amount * limit
+        if asked < settings.dex_min_order_quote:
+            raise HTTPException(
+                422,
+                f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}; "
+                f"эта доля по такой цене даёт около {asked} {QUOTE_SYMBOL}",
+            )
 
     async with SessionLocal() as session:
         intent = await DexIntentRepository(session).create_level(
@@ -289,9 +315,11 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
 
     return {
         "intent_id": intent_id, "symbol": pair.symbol, "side": "Sell",
+        "order_type": "market" if payload.limit_price is None else "limit",
         "percent": payload.percent, "amount": str(amount),
         "amount_coin": pair.base_coin,
-        "quoted_proceeds": str(proceeds), "limit_price": str(limit),
+        "quoted_proceeds": str(proceeds) if proceeds is not None else None,
+        "limit_price": str(limit),
         "slippage_pct": str(settings.dex_max_slippage_pct),
         "status": "WAITING", "dry_run": settings.dex_dry_run,
         "note": (
