@@ -326,8 +326,13 @@ async function refreshNamesPanel() {
       api(BASE + '/api/fomo/status'),
       api(BASE + `/api/fomo/coins?hours=${$('hours').value}&limit=10`),
     ]);
-    const tracked = status.traders_known || 0;
-    $('namesCount').textContent = `кошельков: ${tracked}`;
+    // Deliberately not the registry size: 313 named identities mean nothing
+    // while none of them is a wallet we see trading.
+    const trading = status.trading_wallets || 0;
+    const named = status.named_trading_wallets || 0;
+    $('namesCount').textContent = named
+      ? `имён у торгующих кошельков: ${named} из ${trading}`
+      : `имён ни у одного из ${trading} торгующих кошельков (в реестре ${status.traders_known || 0} личностей)`;
     $('snippet').value = buildSnippet(coins.coins.map(c => c.token_address));
   } catch (e) {
     $('namesCount').textContent = 'не удалось подготовить код';

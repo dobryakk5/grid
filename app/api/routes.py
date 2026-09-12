@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import case, func, select, update as sa_update
+from sqlalchemy import case, func, or_, select, update as sa_update
 
 from app.core.config import settings
 from app.db.models import (
@@ -1305,8 +1305,23 @@ async def fomo_status() -> dict:
                     FomoTrader.evm_address.is_not(None),
                 )
             )
+            # The only naming figure worth showing: how many of the wallets we
+            # actually see trading carry a name. Counting registry rows instead
+            # reads as success while the column on every table stays empty --
+            # FOMO's own evmAddress never appears on this chain, so most rows
+            # are named identities that trade nowhere we can see.
+            trading = select(func.distinct(func.lower(ChainSwap.wallet_address))).subquery()
+            trading_wallets = await session.scalar(select(func.count()).select_from(trading))
+            named_trading = await session.scalar(
+                select(func.count(func.distinct(func.lower(FomoTrader.evm_address)))).where(
+                    func.lower(FomoTrader.evm_address).in_(select(trading.c[0])),
+                    or_(FomoTrader.user_handle.is_not(None), FomoTrader.display_name.is_not(None)),
+                )
+            )
             cursor = await session.get(ChainScanCursor, (settings.rh_chain_id, "realtime"))
         result.update({
+            "trading_wallets": trading_wallets or 0,
+            "named_trading_wallets": named_trading or 0,
             "registry_last_updated": newest_rank.isoformat() if newest_rank else None,
             "traders_known": traders_known or 0,
             "traders_with_wallet": traders_with_wallet or 0,
