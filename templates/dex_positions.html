@@ -18,7 +18,9 @@ button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text)
 button:hover:not(:disabled),.button:hover{border-color:#3a4660}
 button:disabled{opacity:.45;cursor:not-allowed}
 input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;min-width:220px}
-table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:1120px}
+th,td{white-space:nowrap}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line2);vertical-align:middle}
 th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
 .num{text-align:right;font-variant-numeric:tabular-nums}
@@ -73,9 +75,12 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
   <p class="muted" style="margin:10px 0 0">Монета должна быть среди проверенных на цепочке (<code>chain_tokens</code>).</p>
 </section>
 
-<section class="panel" style="padding:0;overflow:hidden">
-<table><thead><tr><th>Монета</th><th class="num">Количество</th><th class="num" style="width:120px">Купить</th><th class="num" style="width:270px">Продать за USDG</th></tr></thead>
-<tbody id="rows"><tr><td colspan="3" class="empty">Загрузка…</td></tr></tbody></table></section>
+<section class="panel" style="padding:0;overflow:hidden"><div class="table-wrap">
+<table><thead><tr><th>Монета</th><th class="num">Количество</th>
+<th class="num">Средняя цена</th><th class="num">Вложено</th>
+<th class="num">Сейчас стоит</th><th class="num">PnL</th>
+<th class="num" style="width:110px">Купить</th><th class="num" style="width:260px">Продать за USDG</th></tr></thead>
+<tbody id="rows"><tr><td colspan="8" class="empty">Загрузка…</td></tr></tbody></table></div></section>
 
 <p class="muted" id="note"></p>
 
@@ -137,6 +142,20 @@ function banners(){
  $('banners').innerHTML=out.join('');
 }
 
+// A holding with no recorded purchase has no honest cost to show. Saying so
+// beats averaging it in at zero, which would report the whole value as profit.
+function unknown(p){
+ if(Number(p.uncovered_qty)>0&&Number(p.covered_qty)===0)
+  return '<span class="muted" title="Покупок этой монеты нет в истории сделок">неизвестна</span>';
+ return '—';
+}
+function pnl(p){
+ if(p.pnl_quote==null)return '<span class="muted">—</span>';
+ const value=Number(p.pnl_quote), sign=value>=0?'+':'−';
+ const pct=p.pnl_pct!=null?` <span class="muted">(${sign}${num(Math.abs(p.pnl_pct),2)}%)</span>`:'';
+ const partial=p.basis_complete?'':' <span class="warn" title="Часть позиции не покрыта историей сделок">*</span>';
+ return `<span class="${value>=0?'good':'bad'}">${sign}${num(Math.abs(value),6)}</span>${pct}${partial}`;
+}
 function render(){
  banners();
  $('wallet').textContent='Robinhood Chain · '+(state.wallet||'');
@@ -148,10 +167,14 @@ function render(){
  $('rows').innerHTML=state.positions.length?state.positions.map(p=>`<tr>
   <td><b>${esc(p.symbol||'без тикера')}</b><div class="addr">${esc(p.token_address)}</div></td>
   <td class="num">${num(p.amount,8)}</td>
+  <td class="num">${p.average_price?num(p.average_price,8):unknown(p)}</td>
+  <td class="num">${p.cost_quote?num(p.cost_quote,6):'—'}</td>
+  <td class="num">${p.value_quote!=null?num(p.value_quote,6):'<span class="muted">нет котировки</span>'}</td>
+  <td class="num">${pnl(p)}</td>
   <td><div class="quarters"><button data-buy="${esc(p.token_address)}">Купить…</button></div></td>
   <td><div class="quarters">${[25,50,75,100].map(q=>
    `<button data-address="${esc(p.token_address)}" data-percent="${q}">${q}%</button>`).join('')}</div></td>
- </tr>`).join(''):'<tr><td colspan="4" class="empty">В кошельке нет токенов Robinhood Chain, кроме USDG.</td></tr>';
+ </tr>`).join(''):'<tr><td colspan="8" class="empty">В кошельке нет токенов Robinhood Chain, кроме USDG.</td></tr>';
 }
 
 async function load(){
@@ -159,7 +182,11 @@ async function load(){
  try{
   const data=await api('/api/dex/positions');
   state=data;render();
-  $('note').textContent='Видны только токены, которые знает chain_tokens: монета, которой не касался никто из отслеживаемых кошельков, здесь не появится.';
+  const partial=state.positions.some(p=>!p.basis_complete);
+  $('note').innerHTML='Видны только токены, которые знает <code>chain_tokens</code>. '+
+   '«Сейчас стоит» — котировка на продажу всего объёма, уже с учётом проскальзывания. '+
+   'Себестоимость считается по нашим же исполненным сделкам методом FIFO; газ покупки входит в неё, газ продажи — нет.'+
+   (partial?' <span class="warn">Звёздочкой отмечены позиции, которые история сделок покрывает не полностью.</span>':'');
  }catch(e){$('rows').innerHTML=`<tr><td colspan="3" class="empty">${esc(e.message)}</td></tr>`;}
  finally{$('refresh').disabled=false;}
 }
