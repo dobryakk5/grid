@@ -94,7 +94,8 @@
             Request Headers → <span class="addr">Authorization</span>,
             скопировать часть <b>после</b> <span class="addr">Bearer&nbsp;</span>.</li>
         <li>Код обойдёт монеты и положит JSON в буфер.
-            <b>Вернитесь сюда</b> и вставьте его в поле ниже.</li>
+            <b>Вернитесь сюда</b> и вставьте его в поле ниже.
+            Это дольше прежнего — один запрос на трейдера с паузой, чтобы не поймать 429.</li>
       </ol>
       <textarea id="snippet" readonly rows="5" style="width:100%;background:#0e131d;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:11px"></textarea>
       <div class="row" style="margin-top:8px">
@@ -102,7 +103,7 @@
         <span class="muted" style="font-size:12px">↑ выполнять в консоли fomo.family, не здесь</span>
       </div>
       <p class="muted" style="font-size:13px;margin-top:14px">Шаг 4 — вставьте JSON из буфера сюда:</p>
-      <textarea id="namesInput" rows="4" placeholder='[{"wallet_address":"0x…","handle":"trader","display_name":"Trader"}]'
+      <textarea id="namesInput" rows="4" placeholder='[{"handle":"trader","display_name":"Trader","candidates":["0x…","0x…"]}]'
                 style="width:100%;background:#0e131d;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></textarea>
       <div class="row" style="margin-top:8px">
         <button id="importNamesBtn" class="primary">Импортировать имена</button>
@@ -281,19 +282,42 @@ async function loadLeaders() {
 
 // Runs in the user's own fomo.family tab, where the session is genuine --
 // our server gets 430 from that API no matter what token it presents.
+//
+// It does NOT read user.evmAddress any more. That address is what FOMO
+// publishes as the user's wallet, and not one of the 313 imported ones has
+// ever appeared in a single Transfer on this chain -- so naming by it can
+// only produce an empty column. A trade record instead mentions several
+// addresses without labelling which is the trader, so this harvests every
+// 0x address it can see and lets the server decide: the real wallet is the
+// one that also shows up in our own on-chain tape, claimed by nobody else.
 function buildSnippet(tokenAddresses) {
   const tokens = JSON.stringify(tokenAddresses.map(a => ({address: a, networkId: 4663})));
   return `(async()=>{const jwt=prompt("Вставьте FOMO Bearer-токен (без слова Bearer)");if(!jwt)return;`
-    + `const out={};for(const t of ${tokens}){`
-    + `const r=await fetch("https://prod-api.fomo.family/hodlers/top?tokens="+encodeURIComponent(JSON.stringify([t])),`
-    + `{headers:{authorization:"Bearer "+jwt,"x-supported-chains":"1,56,143,4663,8453,1399811149"}});`
-    + `if(!r.ok){console.warn("HTTP",r.status,"для",t.address);continue;}`
-    + `let d=await r.json();d=d.responseObject||d;const e=Array.isArray(d)?(d[0]||{}):d;`
-    + `for(const h of (e.topHolders||[])){const u=h.user||{};const a=u.evmAddress;`
-    + `if(a&&(u.userHandle||u.displayName))out[a.toLowerCase()]={wallet_address:a,handle:u.userHandle||null,display_name:u.displayName||null};}}`
-    + `const list=Object.values(out);const json=JSON.stringify(list,null,2);`
-    + `console.log(json);try{await navigator.clipboard.writeText(json);console.log("%cСкопировано: "+list.length+" имён","color:#58d68d");}`
-    + `catch(e){console.log("Скопируйте JSON выше вручную");}})()`;
+    + `const H={authorization:"Bearer "+jwt,"x-supported-chains":"1,56,143,4663,8453,1399811149"};`
+    + `const nap=ms=>new Promise(r=>setTimeout(r,ms));`
+    + `const get=async u=>{const r=await fetch(u,{headers:H});if(!r.ok)throw new Error("HTTP "+r.status);return r.json()};`
+    + `const users={};`
+    + `for(const t of ${tokens}){try{`
+    + `let d=await get("https://prod-api.fomo.family/hodlers/top?tokens="+encodeURIComponent(JSON.stringify([t])));`
+    + `d=d.responseObject||d;const e=Array.isArray(d)?(d[0]||{}):d;`
+    + `for(const h of (e.topHolders||[])){const u=h.user||{};`
+    + `if(!u.id||!(u.userHandle||u.displayName))continue;`
+    + `users[u.id]=users[u.id]||{handle:u.userHandle||null,display_name:u.displayName||null,candidates:[]};}`
+    + `}catch(err){console.warn("hodlers",t.address,err.message);}await nap(200);}`
+    + `const ids=Object.keys(users);console.log("трейдеров:",ids.length,"— читаю их сделки…");`
+    + `let done=0,failed=0;`
+    + `for(const id of ids){done++;`
+    + `try{const trades=await get("https://prod-api.fomo.family/trades?userId="+encodeURIComponent(id));`
+    + `const seen=new Set();`
+    + `(JSON.stringify(trades).match(/0x[0-9a-fA-F]{40}/g)||[]).forEach(a=>seen.add(a.toLowerCase()));`
+    + `users[id].candidates=[...seen].slice(0,200);`
+    + `}catch(err){failed++;if(err.message.indexOf("429")>=0){console.log("429 — пауза 60с");await nap(60000);}}`
+    + `if(done%10===0)console.log(done+"/"+ids.length);await nap(250);}`
+    + `const list=Object.values(users).filter(u=>u.candidates.length);`
+    + `const json=JSON.stringify(list);`
+    + `console.log("готово: "+list.length+" с адресами, "+failed+" ошибок");console.log(json);`
+    + `try{await navigator.clipboard.writeText(json);console.log("%cСкопировано в буфер","color:#58d68d");}`
+    + `catch(err){console.log("Скопируйте JSON выше вручную");}})()`;
 }
 
 async function refreshNamesPanel() {
@@ -320,14 +344,30 @@ async function importNames() {
     $('importResult').textContent = 'Это не JSON: ' + e.message;
     return;
   }
-  const names = Array.isArray(parsed) ? parsed : (parsed.names || []);
+  const names = Array.isArray(parsed) ? parsed : (parsed.names || parsed.entries || []);
   if (!names.length) {
     $('importResult').textContent = 'В JSON нет записей';
     return;
   }
+  // Two shapes are accepted: the old one, where a name comes with the single
+  // address FOMO calls its wallet, and the current one, where it comes with
+  // every address its trades mention and the server picks which is real.
+  const candidateForm = names.some(n => Array.isArray(n.candidates));
   try {
-    const r = await api(BASE + '/api/fomo/names/bulk', {method: 'POST', body: JSON.stringify({names})});
-    $('importResult').textContent = `Импортировано ${r.applied}, с именем ${r.named} из ${r.tracked}`;
+    let text;
+    if (candidateForm) {
+      const r = await api(BASE + '/api/fomo/names/candidates',
+        {method: 'POST', body: JSON.stringify({entries: names})});
+      text = `Записей ${r.entries}: совпало ${r.matched}, проставлено имён ${r.named}`
+        + (r.ambiguous ? `, неоднозначных ${r.ambiguous}` : '')
+        + `, без совпадения ${r.unmatched}`
+        + ` (адресов ${r.addresses}, из них общих ${r.shared_addresses})`;
+    } else {
+      const r = await api(BASE + '/api/fomo/names/bulk',
+        {method: 'POST', body: JSON.stringify({names})});
+      text = `Импортировано ${r.applied}, с именем ${r.named} из ${r.tracked}`;
+    }
+    $('importResult').textContent = text;
     $('namesInput').value = '';
     await loadAll();
   } catch (e) {

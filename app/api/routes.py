@@ -45,6 +45,7 @@ from app.exchanges.robinhood import RobinhoodClient
 from app.dex.dynamic_tokens import load_dynamic_tokens
 from app.dex.repository import DexIntentRepository
 from app.fomo.client import FomoAuthError, FomoClient, FomoError, FomoRateLimited
+from app.fomo.identity import candidate_claims, exclusive_addresses, wallets_per_entry
 from app.fomo.session import (
     clear_session as clear_fomo_session,
     current_jwt as current_fomo_jwt,
@@ -1445,6 +1446,90 @@ async def set_fomo_names_bulk(payload: FomoNamesBulkPayload) -> dict:
         )
         total = await session.scalar(select(func.count(FomoTrader.fomo_user_id)))
     return {"applied": applied, "created": created, "named": named or 0, "tracked": total or 0}
+
+
+
+class FomoCandidatePayload(BaseModel):
+    """One FOMO identity plus every address seen anywhere in its trade JSON."""
+
+    handle: str | None = Field(default=None, max_length=120)
+    display_name: str | None = Field(default=None, max_length=120)
+    candidates: list[str] = Field(default_factory=list, max_length=200)
+
+
+class FomoCandidatesBulkPayload(BaseModel):
+    entries: list[FomoCandidatePayload] = Field(min_length=1, max_length=500)
+
+
+@router.post("/fomo/names/candidates")
+async def resolve_fomo_names_from_candidates(payload: FomoCandidatesBulkPayload) -> dict:
+    """Name a wallet by intersecting FOMO's addresses with wallets that trade.
+
+    The address FOMO publishes as a user's ``evmAddress`` turns out never to
+    appear on this chain at all -- not one of the 313 imported ones shows up
+    in a single ``Transfer`` -- so naming by that field can only ever produce
+    an empty column. A trade record, though, mentions several addresses
+    (payer, receiver, router, pool) without saying which is the trader.
+
+    So the caller sends every address it saw and this decides, using the one
+    thing it knows independently: which addresses actually trade. Two filters
+    make that safe -- an address must appear in ``chain_swaps``, and it must
+    be claimed by exactly one identity, which drops the routers and pools
+    that necessarily show up in everybody's trades.
+    """
+    entries = payload.entries
+    claims = candidate_claims([entry.candidates for entry in entries])
+    exclusive = exclusive_addresses(claims)
+    shared = len(claims) - len(exclusive)
+
+    named = matched = ambiguous = 0
+    async with SessionLocal() as session:
+        trading: set[str] = set()
+        if exclusive:
+            rows = await session.execute(
+                select(func.distinct(func.lower(ChainSwap.wallet_address)))
+                .where(func.lower(ChainSwap.wallet_address).in_(exclusive))
+            )
+            trading = {row[0] for row in rows}
+
+        for entry, hits in zip(entries, wallets_per_entry(claims, trading, len(entries))):
+            if not hits:
+                continue
+            matched += 1
+            if len(hits) > 1:
+                # Two trading wallets under one name is not a naming failure,
+                # but guessing which one is meant would be.
+                ambiguous += 1
+                continue
+            handle = (entry.handle or "").strip() or None
+            display_name = (entry.display_name or "").strip() or None
+            if handle is None and display_name is None:
+                continue
+            result = await session.execute(
+                sa_update(FomoTrader)
+                .where(func.lower(FomoTrader.evm_address) == hits[0])
+                .values(user_handle=handle, display_name=display_name)
+            )
+            if result.rowcount == 0:
+                session.add(FomoTrader(
+                    fomo_user_id=f"manual:{hits[0]}",
+                    evm_address=hits[0],
+                    user_handle=handle,
+                    display_name=display_name,
+                    source="manual",
+                ))
+            named += 1
+        await session.commit()
+
+    return {
+        "entries": len(payload.entries),
+        "addresses": len(claims),
+        "shared_addresses": shared,
+        "matched": matched,
+        "ambiguous": ambiguous,
+        "named": named,
+        "unmatched": len(payload.entries) - matched,
+    }
 
 
 @router.get("/fomo/coins")
