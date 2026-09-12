@@ -78,7 +78,7 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
 
 <section class="panel" style="padding:0;overflow:hidden"><div class="table-wrap">
 <table><thead><tr><th>Монета</th><th class="num">Количество</th>
-<th class="num">Средняя цена</th><th class="num">Вложено</th>
+<th class="num" title="Средневзвешенная цена покупки одной штуки, в USDG: «вложено», делённое на количество">Цена покупки</th><th class="num" title="Сколько USDG всего отдано за то, что сейчас лежит в кошельке">Вложено</th>
 <th class="num">Сейчас стоит</th><th class="num">PnL</th>
 <th class="num" style="width:170px">Действия</th></tr></thead>
 <tbody id="rows"><tr><td colspan="7" class="empty">Загрузка…</td></tr></tbody></table></div></section>
@@ -173,9 +173,13 @@ function noQuote(p){
 function pnl(p){
  if(p.pnl_quote==null)return '<span class="muted">—</span>';
  const value=Number(p.pnl_quote), sign=value>=0?'+':'−';
- const pct=p.pnl_pct!=null?` <span class="muted">(${sign}${num(Math.abs(p.pnl_pct),2)}%)</span>`:'';
+ // Whole USDG and whole percent: the sixth decimal of a profit is noise next
+ // to the slippage the exit will actually pay, and it made the column hard to
+ // scan for the thing it is read for -- which positions are up and which down.
+ const pct=p.pnl_pct!=null?` <span class="muted">(${sign}${num(Math.abs(p.pnl_pct),0)}%)</span>`:'';
  const partial=p.basis_complete?'':' <span class="warn" title="Часть позиции не покрыта историей сделок">*</span>';
- return `<span class="${value>=0?'good':'bad'}">${sign}${num(Math.abs(value),6)}</span>${pct}${partial}`;
+ const exact=`${sign}${num(Math.abs(value),6)} USDG (${sign}${num(Math.abs(p.pnl_pct??0),2)}%)`;
+ return `<span class="${value>=0?'good':'bad'}" title="${esc(exact)}">${sign}${num(Math.abs(value),0)}</span>${pct}${partial}`;
 }
 function render(){
  banners();
