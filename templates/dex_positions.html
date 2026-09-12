@@ -101,8 +101,7 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
   <button type="button" id="cancelBuy">Отмена</button>
   <button type="submit" id="doBuy">Купить</button></div></form></dialog>
 
-<dialog id="sell"><h2 style="margin:0;font-size:17px">Продажа за USDG</h2>
-<p class="muted" id="sellIntro"></p>
+<dialog id="sell"><h2 style="margin:0 0 14px;font-size:17px" id="sellTitle">Продажа за USDG</h2>
 <form id="sellForm">
 <div class="muted" style="font-size:12px">Доля позиции</div>
 <div class="chips" id="sellChips"></div>
@@ -111,7 +110,8 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
 <label class="choice"><input type="radio" name="sellType" value="limit">
  <span>Лимиткой по цене, USDG за штуку
  <input id="sellLimit" type="text" inputmode="decimal" placeholder="например 4.20" disabled
-  style="width:100%;margin-top:4px"></span></label>
+  style="width:100%;margin-top:4px">
+ <span class="muted" id="sellLimitHint" style="font-size:12px"></span></span></label>
 <dl id="sellDetails"></dl>
 <p class="warn" id="sellWarn" style="margin:0 0 14px"></p>
 <p class="bad" id="sellError" style="margin:0 0 10px"></p>
@@ -236,17 +236,41 @@ function sellDetails(){
  const price=$('sellForm').sellType.value==='limit'?Number($('sellLimit').value.replace(',','.')):NaN;
  const proceeds=Number.isFinite(price)&&price>0
   ?`<dt>Если исполнится</dt><dd>${num(share*price,6)} USDG</dd>`:'';
- $('sellDetails').innerHTML=`<dt>Контракт</dt><dd class="addr">${esc(position.token_address)}</dd>
+ $('sellDetails').innerHTML=`<dt>Текущая цена</dt><dd>${currentPrice(position)}</dd>
   <dt>В кошельке</dt><dd>${num(position.amount,8)}</dd>
   <dt>К продаже</dt><dd>${num(share,8)} ${esc(position.symbol||'')}</dd>${proceeds}`;
+}
+
+// Per token, derived from the quote for the whole holding -- so it already
+// carries the price impact of this size, unlike a pool mid price.
+function currentPrice(p){
+ if(p.value_quote==null||!(Number(p.amount)>0))
+  return '<span class="muted">нет котировки</span>';
+ return num(Number(p.value_quote)/Number(p.amount),10)+' USDG';
+}
+
+// A number a Decimal field will accept: no exponent, no locale comma, and
+// never more decimals than the API's 18.
+function plain(x){
+ if(!Number.isFinite(x)||x<=0)return '';
+ let text=x.toPrecision(8);
+ if(text.includes('e'))text=x.toFixed(18);
+ return text.includes('.')?text.replace(/0+$/,'').replace(/\.$/,''):text;
 }
 
 function openSell(address){
  const position=state.positions.find(p=>p.token_address===address);
  if(!position)return;
  pending={address:position.token_address,percent:25,symbol:position.symbol,position};
- $('sellIntro').textContent=(position.symbol?position.symbol+' · ':'')+position.token_address;
- $('sellError').textContent='';$('sellLimit').value='';
+ $('sellTitle').textContent=`Продажа ${position.symbol||'позиции'} → USDG`;
+ $('sellError').textContent='';
+ // Twice what the coin cost is the take-profit this page is most often opened
+ // to place, so it is filled in rather than typed. Unknown cost leaves it
+ // empty -- a suggested price with nothing behind it would be worse than none.
+ $('sellLimit').value=position.average_price?plain(Number(position.average_price)*2):'';
+ $('sellLimitHint').textContent=position.average_price
+  ? `×2 от цены закупа ${num(position.average_price,10)}`
+  : 'цена закупа неизвестна — подставить нечего';
  $('sellForm').sellType.value='market';$('sellLimit').disabled=true;
  $('sellChips').innerHTML=[25,50,75,100].map(q=>
   `<button type="button" data-percent="${q}" aria-pressed="${q===25}">${q}%</button>`).join('');
@@ -279,7 +303,7 @@ $('sellForm').onsubmit=async event=>{
  const body={percent:pending.percent};
  if($('sellForm').sellType.value==='limit'){
   if(!$('sellLimit').value.trim()){$('sellError').textContent='Укажите цену лимитки.';return;}
-  body.limit_price=$('sellLimit').value.trim();
+  body.limit_price=$('sellLimit').value.trim().replace(',','.');
  }
  $('doSell').disabled=true;
  try{
@@ -322,7 +346,7 @@ $('buyForm').onsubmit=async event=>{
  const body={quote_amount:$('buyAmount').value.trim()};
  if($('buyForm').buyType.value==='limit'){
   if(!$('buyLimit').value.trim()){$('buyError').textContent='Укажите цену лимитки.';return;}
-  body.limit_price=$('buyLimit').value.trim();
+  body.limit_price=$('buyLimit').value.trim().replace(',','.');
  }
  $('doBuy').disabled=true;
  try{
