@@ -24,6 +24,11 @@ async def grid_analysis_page(request: Request):
 
 @router.get("/fomo")
 async def fomo_analysis_page(request: Request):
+    return templates.TemplateResponse(request=request, name="fomo_activity.html", context={})
+
+
+@router.get("/fomo/chain")
+async def fomo_chain_page(request: Request):
     return templates.TemplateResponse(request=request, name="fomo_analysis.html", context={})
 
 

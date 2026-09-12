@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FOMO · Покупки и продажи лидеров</title>
+  <style>
+    :root{
+      color-scheme:dark;
+      --bg:#0b0e14;--panel:#121722;--panel2:#0e131d;--line:#273044;--line2:#202838;
+      --text:#e6eaf2;--muted:#8e9aaf;--good:#58d68d;--bad:#ff6b6b;--accent:#6ea8fe;--warn:#f2c66d;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    button,a,select,input{font:inherit}
+    button,a{transition:.15s ease}
+    .wrap{max-width:1180px;margin:auto;padding:24px 20px 60px}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+    h1,h2,h3{margin:0}
+    h1{font-size:24px}
+    h2{font-size:17px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input[type=password]{border:1px solid var(--line);background:#0e131d;color:var(--text);padding:9px 11px;border-radius:9px;min-width:200px}
+    button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text);padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none}
+    button:hover,.button:hover{border-color:#3a4660}
+    .primary{border-color:var(--accent);background:#1c4d8f}
+    .muted{color:var(--muted)}
+    .good,.side-buy{color:var(--good)}
+    .bad,.side-sell{color:var(--bad)}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;border:1px solid var(--line);font-size:12px;font-weight:650}
+    .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+    .pill.on .dot{background:var(--good)}
+    .pill.off .dot{background:var(--bad)}
+    .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:6px}
+    .tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+    .tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
+    .tile .value{font-size:19px;font-weight:750}
+    table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+    th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+    th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+    tr:hover td{background:#141a26}
+    tr.clickable{cursor:pointer}
+    .coin-name{font-weight:750;font-size:15px}
+    .badge{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+    .empty{padding:20px 8px;text-align:center;color:var(--muted)}
+    .addr{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  </style>
+<style>
+select,input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px}
+.table-wrap{overflow:auto} .coin-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+summary{cursor:pointer;font-weight:650} details table{min-width:650px}
+.address{overflow-wrap:anywhere;color:var(--muted);font:12px ui-monospace,monospace}
+#coverage{color:var(--warn)} .notice{max-width:900px} code{overflow-wrap:anywhere}
+</style></head><body><main class="wrap">
+<header class="top"><div><h1>Что торгует топ FOMO</h1><div id="cohort" class="muted">Топ-30 · лидерборд за 30 дней · все сети</div></div>
+<div class="row"><a id="chainLink" class="button">Лента Robinhood →</a><button id="refresh">Обновить</button></div></header>
+<section class="panel notice"><div id="status">Загрузка…</div><p id="coverage"></p>
+<p class="muted">Выборка — текущий топ лидерборда на момент сбора. Покупка — полученный токен, продажа — потраченный; учитываются обе стороны обмена, включая стейблкоины. Переводы и сводки позиций не считаются сделками.</p>
+<details id="setup"><summary>Подключить автоматический сбор</summary><p>Один раз в терминале проекта: <code>make fomo-browser-install</code>.</p>
+<p>Затем: <code id="command"></code></p><p class="muted">Войдите в FOMO в открывшемся окне Chrome. Сборщик сам импортирует сделки с именами; куки и JWT копировать не нужно. Повторный сбор каждые 10 минут: <code>make fomo-sync FOMO_ARGS='--watch 600'</code> с тем же FOMO_API_BASE.</p></details></section>
+<section class="panel"><div class="row"><label>Сделки за <select id="hours"><option value="1">час</option><option value="24" selected>сутки</option><option value="168">7 дней</option><option value="720">30 дней</option></select></label>
+<label>Сеть <select id="network"><option value="">Все сети</option></select></label><input id="search" placeholder="Монета, адрес или трейдер" aria-label="Поиск монеты или трейдера"></div>
+<div id="summary" class="muted" style="margin-top:12px"></div></section>
+<div id="coins"></div>
+</main><script>
+const BASE=location.pathname.replace(/\/fomo(\/.*)?$/, '');
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const chains={1:'Ethereum',56:'BNB Chain',143:'Monad',4663:'Robinhood',8453:'Base',1399811149:'Solana'};
+const chain=id=>chains[id]||`Сеть ${id}`;
+const fmt=(n,d=2)=>Number(n).toLocaleString('ru-RU',{maximumFractionDigits:d});
+const usd=n=>'$'+fmt(n);
+const time=n=>new Date(n).toLocaleString('ru-RU');
+let coins=[];let sequence=0;
+$('chainLink').href=BASE+'/fomo/chain';
+$('command').textContent='FOMO_API_BASE='+location.origin+BASE+' make fomo-token';
+function render(){
+ const expanded=new Set([...document.querySelectorAll('#coins details[open]')].map(d=>d.dataset.coin));
+ const query=$('search').value.toLowerCase().trim(), net=$('network').value;
+ const selected=coins.filter(c=>(!net||String(c.chain_id)===net)&&(!query||[c.symbol,c.token_address,...c.traders.flatMap(t=>[t.handle,t.display_name])].join(' ').toLowerCase().includes(query)));
+ $('summary').textContent=`Монет: ${selected.length} · сеть + адрес определяют монету; одинаковые тикеры не объединяются`;
+ $('coins').innerHTML=selected.length?selected.map(c=>`<section class="panel"><div class="top" style="margin-bottom:8px"><div><div class="coin-line"><h2>${esc(c.symbol||c.token_address.slice(0,12)+'…')}</h2><span class="pill">${esc(chain(c.chain_id))}</span></div><p class="address">${esc(c.token_address)}</p></div><span class="muted">Последняя: ${time(c.last_at_ms)}</span></div>
+ <div class="tiles"><div class="tile"><div class="label">Куплено · покупателей: ${c.buyers}</div><div class="value good">${usd(c.buy_usd)}</div></div><div class="tile"><div class="label">Продано · продавцов: ${c.sellers}</div><div class="value bad">${usd(c.sell_usd)}</div></div><div class="tile"><div class="label">Чистая покупка, по известным ценам</div><div class="value">${usd(c.net_usd)}</div></div></div>
+ ${c.unpriced?`<p style="color:var(--warn)">${c.unpriced} сторон сделок без USD-оценки; денежные суммы неполные.</p>`:''}
+ <details data-coin="${esc(c.chain_id+':'+c.token_address)}" style="margin-top:16px"><summary>Кто покупал и продавал · ${c.traders.length}</summary><div class="table-wrap"><table><thead><tr><th>Ранг / трейдер</th><th>Куплено</th><th>Продано</th><th>Количество BUY / SELL</th><th>Сделки BUY / SELL</th><th>Последняя</th></tr></thead><tbody>${c.traders.map(t=>`<tr><td><span class="muted">#${t.rank}</span> <b>${esc(t.display_name||t.handle||t.user_id)}</b>${t.handle?`<div class="muted">@${esc(t.handle)}</div>`:''}</td><td class="good">${usd(t.buy_usd)}</td><td class="bad">${usd(t.sell_usd)}${t.unpriced?`<div class="muted">${t.unpriced} без USD</div>`:''}</td><td>${fmt(t.buy_amount,6)} / ${fmt(t.sell_amount,6)}</td><td>${t.buys} / ${t.sells}</td><td>${time(t.last_at_ms)}</td></tr>`).join('')}</tbody></table></div></details></section>`).join(''):'<div class="panel empty">Нет собранных сделок для выбранного периода и фильтров.</div>';
+ document.querySelectorAll('#coins details').forEach(d=>{d.open=expanded.has(d.dataset.coin);});
+}
+async function load(){
+ const request=++sequence;
+ $('refresh').disabled=true;
+ try{
+  const r=await fetch(BASE+'/api/fomo/activity?period=30d&hours='+$('hours').value);
+  if(!r.ok)throw new Error('HTTP '+r.status+' — проверьте API и перезапустите сервер после обновления');
+  const data=await r.json();if(request!==sequence)return;
+  coins=data.coins;const cohort=data.cohort;
+  $('setup').open=!cohort;
+  if(cohort){
+   $('cohort').textContent=`Топ-${cohort.requested_limit} · лидерборд за 30 дней · все сети`;
+   $('status').textContent=`Собрано ${cohort.traders} из ${cohort.requested_limit} трейдеров · обновлено ${time(cohort.captured_at)}`;
+   const c=cohort.coverage;
+   $('coverage').textContent=c.history_complete?'API сообщил, что дальнейших страниц истории нет.':`История неполная. Ещё страницы у ${c.traders_with_more} трейдеров; полнота неизвестна у ${c.traders_unknown_coverage}; пропущено записей: ${c.rejected_rows}; не получено мест топа: ${c.cohort_shortfall}. Показаны только собранные swaps.`;
+  }else{ $('status').textContent='Сбор ещё не запускался. Подключите FOMO, чтобы увидеть имена и покупки/продажи топ-30.'; $('coverage').textContent=''; }
+  const previous=$('network').value;
+  $('network').innerHTML='<option value="">Все сети</option>'+[...new Set(coins.map(c=>c.chain_id))].sort((a,b)=>a-b).map(id=>`<option value="${id}">${esc(chain(id))}</option>`).join('');
+  if([...$('network').options].some(o=>o.value===previous))$('network').value=previous;
+  render();
+ }catch(e){if(request===sequence)$('status').textContent='Не удалось обновить: '+e.message;}
+ finally{if(request===sequence)$('refresh').disabled=false;}
+}
+$('refresh').onclick=load;$('hours').onchange=load;$('network').onchange=render;$('search').oninput=render;
+load();setInterval(load,60000);
+</script></body></html>

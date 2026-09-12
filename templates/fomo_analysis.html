@@ -81,10 +81,14 @@
     <details id="namesPanel">
       <summary>Имена трейдеров — <span id="namesCount" class="muted"></span></summary>
       <p class="muted" style="font-size:13px;max-width:780px">
-        Наш сервер получает от FOMO <b>430</b> на любой токен, а ваш браузер — нет.
-        Поэтому имена собираются <b>во вкладке fomo.family</b>: отсюда, с localhost,
-        тот же запрос браузер режет по CORS.
+        Автоматический сбор: в терминале проекта выполните
+        <span class="addr">make fomo-browser-install</span> один раз, затем
+        <span class="addr">FOMO_API_BASE=адрес_API make fomo-token</span>.
+        Войдите в FOMO в открывшемся окне Chrome — сборщик сам импортирует имена.
+        Копировать куки и JWT не нужно. Имена привязываются только к кошелькам
+        нашей сети; держатели той же монеты на Base могут быть другими.
       </p>
+      <p class="muted" style="font-size:13px">Ручной запасной вариант:</p>
       <ol class="muted" style="font-size:13px;max-width:780px;line-height:1.8;padding-left:20px">
         <li><b>Здесь</b> (эта страница) — «Скопировать код».</li>
         <li>Перейдите на <a href="https://fomo.family" target="_blank" rel="noopener">fomo.family</a>,
@@ -150,9 +154,10 @@ async function loadStatus() {
     const s = await api(BASE + '/api/fomo/status');
     pill.className = 'pill ' + (s.authenticated ? 'on' : 'off');
     text.textContent = s.authenticated
-      ? `сессия активна${s.expires_in != null ? ', ~' + Math.max(0, Math.round(s.expires_in / 60)) + ' мин' : ''}`
-      : 'нет FOMO-сессии — имена недоступны';
+      ? `JWT сохранён${s.expires_in != null ? ', ~' + Math.max(0, Math.round(s.expires_in / 60)) + ' мин' : ''}`
+      : 'нет серверной FOMO-сессии; сохранённые имена доступны';
     const parts = [];
+    if (s.chain_name) parts.push(`сеть: ${s.chain_name} (${s.chain_id})`);
     if (s.traders_known != null) parts.push(`кошельков: ${s.traders_known}`);
     if (s.wallets_pending_backfill) parts.push(`ждут backfill: ${s.wallets_pending_backfill}`);
     if (s.chain_scan_last_block != null) parts.push(`блок ${s.chain_scan_last_block}`);
@@ -290,9 +295,18 @@ async function loadLeaders() {
 // addresses without labelling which is the trader, so this harvests every
 // 0x address it can see and lets the server decide: the real wallet is the
 // one that also shows up in our own on-chain tape, claimed by nobody else.
-function buildSnippet(tokenAddresses) {
-  const tokens = JSON.stringify(tokenAddresses.map(a => ({address: a, networkId: 4663})));
-  return `(async()=>{const jwt=prompt("Вставьте FOMO Bearer-токен (без слова Bearer)");if(!jwt)return;`
+// Manual fallback reads an access token only; the site owns refresh rotation.
+const FOMO_TOKEN_JS =
+  `async function fomoToken(){`
+  + `try{const raw=localStorage.getItem("privy:token");if(!raw)return null;`
+  + `let t;try{const p=JSON.parse(raw);t=typeof p==="string"?p:p.token;}catch(e){t=raw;}`
+  + `const c=JSON.parse(atob(t.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));`
+  + `return c.exp*1000>Date.now()+60000?t:null;}catch(e){return null;}}`;
+
+function buildSnippet(tokenAddresses, chainId) {
+  const tokens = JSON.stringify(tokenAddresses.map(a => ({address: a, networkId: chainId})));
+  return FOMO_TOKEN_JS
+    + `;(async()=>{let jwt=await fomoToken();if(!jwt)jwt=prompt("Вставьте FOMO Bearer-токен (без слова Bearer)");if(!jwt)return;`
     + `const H={authorization:"Bearer "+jwt,"x-supported-chains":"1,56,143,4663,8453,1399811149"};`
     + `const nap=ms=>new Promise(r=>setTimeout(r,ms));`
     + `const get=async u=>{const r=await fetch(u,{headers:H});if(!r.ok)throw new Error("HTTP "+r.status);return r.json()};`
@@ -308,8 +322,11 @@ function buildSnippet(tokenAddresses) {
     + `let done=0,failed=0;`
     + `for(const id of ids){done++;`
     + `try{const trades=await get("https://prod-api.fomo.family/trades?userId="+encodeURIComponent(id));`
-    + `const seen=new Set();`
-    + `(JSON.stringify(trades).match(/0x[0-9a-fA-F]{40}/g)||[]).forEach(a=>seen.add(a.toLowerCase()));`
+    + `const d=trades.responseObject||trades;const rows=Array.isArray(d)?d:(d.items||[...(d.activeTrades||[]),...(d.closedTrades||[])]);`
+    + `const seen=new Set();for(const row of rows){const t=row.trade||row;`
+    + `if(Number(t.networkId)!==${Number(chainId)})continue;`
+    + `const a=t.userAddress||(row.swaps&&row.swaps[0]&&row.swaps[0].address);`
+    + `if(typeof a==="string"&&/^0x[0-9a-fA-F]{40}$/.test(a))seen.add(a.toLowerCase());}`
     + `users[id].candidates=[...seen].slice(0,200);`
     + `}catch(err){failed++;if(err.message.indexOf("429")>=0){console.log("429 — пауза 60с");await nap(60000);}}`
     + `if(done%10===0)console.log(done+"/"+ids.length);await nap(250);}`
@@ -333,7 +350,7 @@ async function refreshNamesPanel() {
     $('namesCount').textContent = named
       ? `имён у торгующих кошельков: ${named} из ${trading}`
       : `имён ни у одного из ${trading} торгующих кошельков (в реестре ${status.traders_known || 0} личностей)`;
-    $('snippet').value = buildSnippet(coins.coins.map(c => c.token_address));
+    $('snippet').value = buildSnippet(coins.coins.map(c => c.token_address), status.chain_id);
   } catch (e) {
     $('namesCount').textContent = 'не удалось подготовить код';
   }

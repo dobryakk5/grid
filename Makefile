@@ -1,4 +1,4 @@
-.PHONY: install install-systemd test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed chain-tape chain-tape-bench chain-tape-rebuild
+.PHONY: install install-systemd test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed fomo-token chain-tape chain-tape-bench chain-tape-rebuild
 
 install:
 	python3 -m venv .venv
@@ -35,6 +35,17 @@ fomo-registry:
 
 fomo-seed:
 	.venv/bin/python scripts/seed_fomo_wallets.py
+
+# Opens a persistent browser session and imports trader names automatically.
+fomo-token:
+	./scripts/fomo-token.sh
+
+.PHONY: fomo-browser-install fomo-sync
+fomo-browser-install:
+	.venv/bin/pip install -r requirements-fomo.txt
+
+fomo-sync:
+	.venv/bin/python scripts/fomo_sync.py $(FOMO_ARGS)
 
 chain-tape:
 	./scripts/run-chain-tape.sh

@@ -125,6 +125,12 @@ class Settings(BaseSettings):
     fomo_new_wallet_backfill_blocks: int = 60_000
     # Raw-response inspection endpoint; off by default outside development.
     fomo_debug_api: bool = False
+    # Optional manual helper: let the logged-in fomo.family tab POST a cached
+    # session to this API (``scripts/fomo-token.sh --console``). Off
+    # by default so nothing cross-origin can reach ``/api/fomo/session`` unless
+    # a developer turns it on; when off, the token-grab snippet falls back to
+    # copying the token for a manual paste, so the bridge is convenience only.
+    fomo_token_bridge: bool = False
 
     # ---- automatic trader discovery --------------------------------------
     # The tape only watches wallets it already knows, so the roster has to

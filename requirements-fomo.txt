@@ -1,0 +1,2 @@
+# Optional local browser collector; not required on the API server.
+playwright>=1.51,<2

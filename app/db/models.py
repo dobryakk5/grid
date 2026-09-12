@@ -554,6 +554,31 @@ class FomoTraderRank(Base):
     stats: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
+class FomoLeaderboardState(Base):
+    """Latest completely imported cohort; never confused with historic ranks."""
+    __tablename__ = "fomo_leaderboard_state"
+    period: Mapped[str] = mapped_column(String(8), primary_key=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    requested_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    traders: Mapped[list] = mapped_column(JSONB, nullable=False)
+    coverage: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+class FomoActivityLeg(Base):
+    """Actual FOMO swaps; no inferred wallet ownership or Robinhood dependency."""
+    __tablename__ = "fomo_activity_legs"
+    period: Mapped[str] = mapped_column(String(8), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    swap_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    side: Mapped[str] = mapped_column(String(4), primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_address: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    token_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    value_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+
 class ChainTransaction(Base):
     """Raw ERC-20 ``Transfer`` legs for one transaction, kept independent of
     however ``classify()`` currently reads them.
