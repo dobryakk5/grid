@@ -57,6 +57,7 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 </div></section>
 <p class="muted" id="note"></p>
 
+{% include "_auth.html" %}
 <script>
 const BASE=location.pathname.replace(/\/history(\/.*)?$/,'');
 const $=id=>document.getElementById(id);

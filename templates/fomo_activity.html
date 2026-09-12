@@ -102,7 +102,8 @@ tr.detail tr:hover td{background:transparent}
 <th class="sortable num" data-sort="last_at_ms">Последняя</th>
 </tr></thead><tbody id="coins"></tbody></table></div></section>
 <p class="muted legend">Покупателей + продавцов больше, чем трейдеров, когда один и тот же участник и покупал, и продавал эту монету. Все три числа считаны только по членам топа лидерборда; чужие сделки в выборку не попадают.</p>
-</main><script>
+</main>{% include "_auth.html" %}
+<script>
 const BASE=location.pathname.replace(/\/fomo(\/.*)?$/, '');
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));

@@ -1,0 +1,106 @@
+{# Shared login, included by every page.
+
+   The API requires a token; the pages call `fetch` directly, in a dozen
+   places, including one call assembled as a string at runtime. Patching each
+   call site would leave the next one to be written unprotected, so this wraps
+   `fetch` once: any same-origin /api/ request carries the bearer, and a 401
+   opens the password dialog and retries instead of surfacing as an error.
+
+   That retry is also what stops the browser's basic-auth prompt storm. Every
+   unauthenticated API call used to come back 401, and a page that fires three
+   of them produced three prompts. #}
+<dialog id="gridLogin" class="grid-login">
+  <form method="dialog" id="gridLoginForm">
+    <h2>Вход</h2>
+    <p>Сессия истекла или ещё не начата. Пароль оператора — не пароль сервера.</p>
+    <input id="gridLoginPassword" type="password" autocomplete="current-password"
+           placeholder="Пароль оператора" aria-label="Пароль оператора">
+    <p class="grid-login-error" id="gridLoginError"></p>
+    <menu><button value="cancel" type="button" id="gridLoginCancel">Отмена</button>
+    <button id="gridLoginSubmit" type="submit">Войти</button></menu>
+  </form>
+</dialog>
+<style>
+.grid-login{background:#121722;color:#e6eaf2;border:1px solid #273044;border-radius:14px;
+ padding:20px;max-width:400px;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+.grid-login::backdrop{background:rgba(0,0,0,.65)}
+.grid-login h2{margin:0 0 8px;font-size:17px}
+.grid-login p{margin:0 0 12px;color:#8e9aaf}
+.grid-login input{width:100%;background:#0e131d;color:#e6eaf2;border:1px solid #273044;
+ border-radius:9px;padding:9px;font:inherit}
+.grid-login menu{display:flex;gap:10px;justify-content:flex-end;margin:14px 0 0;padding:0}
+.grid-login button{border:1px solid #273044;background:#171d2a;color:#e6eaf2;padding:9px 13px;
+ border-radius:9px;cursor:pointer;font:inherit;font-weight:650}
+.grid-login-error{color:#ff6b6b;min-height:1.2em}
+</style>
+<script>
+(function(){
+ const KEY='grid-token';
+ const nativeFetch=window.fetch.bind(window);
+ const base=location.pathname.replace(/\/(positions|history|fomo|profiles|dashboard)(\/.*)?$/,'');
+ let asking=null;
+ const token=()=>{try{return sessionStorage.getItem(KEY)||''}catch(e){return ''}};
+
+ function isApi(url){
+  try{
+   const parsed=new URL(url,location.href);
+   return parsed.origin===location.origin
+    && parsed.pathname.includes('/api/')
+    && !parsed.pathname.includes('/api/auth/');
+  }catch(e){return false;}
+ }
+
+ // One dialog even if five calls fail at once, and it can be reopened later.
+ function askPassword(){
+  if(asking)return asking;
+  const dialog=document.getElementById('gridLogin');
+  const form=document.getElementById('gridLoginForm');
+  const field=document.getElementById('gridLoginPassword');
+  const error=document.getElementById('gridLoginError');
+  asking=new Promise(resolve=>{
+   function finish(ok){
+    form.onsubmit=null;
+    document.getElementById('gridLoginCancel').onclick=null;
+    if(dialog.open)dialog.close();
+    asking=null;resolve(ok);
+   }
+   document.getElementById('gridLoginCancel').onclick=()=>finish(false);
+   form.onsubmit=async event=>{
+    event.preventDefault();error.textContent='';
+    try{
+     const response=await nativeFetch(base+'/api/auth/login',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({password:field.value})});
+     const body=await response.json().catch(()=>({}));
+     if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
+     sessionStorage.setItem(KEY,body.token);
+     field.value='';finish(true);
+    }catch(e){error.textContent=e.message;}
+   };
+   error.textContent='';field.value='';
+   dialog.showModal();field.focus();
+  });
+  return asking;
+ }
+
+ function authorised(input,init){
+  const source=(init&&init.headers)||(typeof input!=='string'&&input&&input.headers)||{};
+  const headers=new Headers(source);
+  const bearer=token();
+  if(bearer)headers.set('Authorization','Bearer '+bearer);
+  return Object.assign({},init||{},{headers});
+ }
+
+ window.fetch=async function(input,init){
+  const url=typeof input==='string'?input:(input&&input.url)||'';
+  if(!isApi(url))return nativeFetch(input,init);
+  // A Request body can only be read once; keep a copy for the retry.
+  const retryInput=(typeof input==='string')?input:input.clone();
+  const response=await nativeFetch(input,authorised(input,init));
+  if(response.status!==401)return response;
+  try{sessionStorage.removeItem(KEY);}catch(e){}
+  if(!await askPassword())return response;
+  return nativeFetch(retryInput,authorised(retryInput,init));
+ };
+})();
+</script>

@@ -54,15 +54,6 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
 <div class="muted" id="wallet">Robinhood Chain · кошелёк бота</div></div>
 <div><a class="button" href="#" id="historyLink">История →</a> <a class="button" href="#" id="fomoLink">Что торгует топ FOMO →</a> <button id="refresh">Обновить</button></div></header>
 
-<section class="panel" id="loginPanel" hidden>
-  <h2 style="margin:0 0 10px;font-size:16px">Вход</h2>
-  <p class="muted" style="margin-top:0">Продажа требует входа. Токен хранится только в этой вкладке.</p>
-  <form id="loginForm" style="display:flex;gap:10px;flex-wrap:wrap">
-    <input id="password" type="password" placeholder="Пароль оператора" autocomplete="current-password">
-    <button type="submit">Войти</button></form>
-  <p id="loginError" class="bad" style="margin-bottom:0"></p>
-</section>
-
 <div id="banners"></div>
 
 <section class="panel"><div class="tiles" id="tiles"></div></section>
@@ -108,6 +99,7 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
   <button id="cancelSell">Отмена</button>
   <button id="doSell" style="border-color:var(--bad);background:#3a1a1f">Продать</button></div></dialog>
 
+{% include "_auth.html" %}
 <script>
 const BASE=location.pathname.replace(/\/positions(\/.*)?$/,'');
 const $=id=>document.getElementById(id);
@@ -122,11 +114,12 @@ $('fomoLink').href=BASE+'/fomo';
 $('historyLink').href=BASE+'/history';
 
 async function api(path,options={}){
+ // The shared wrapper in _auth.html adds the bearer and handles 401 by asking
+ // for the password and retrying, so a 401 reaching here means the operator
+ // dismissed that dialog.
  const headers={'Content-Type':'application/json',...(options.headers||{})};
- if(token())headers.Authorization='Bearer '+token();
  const response=await fetch(BASE+path,{...options,headers});
- if(response.status===401){sessionStorage.removeItem('grid-token');$('loginPanel').hidden=false;
-  throw new Error('Нужен вход');}
+ if(response.status===401)throw new Error('Нужен вход');
  const body=await response.json().catch(()=>({}));
  if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
  return body;
@@ -273,23 +266,6 @@ $('buyForm').onsubmit=async event=>{
  finally{$('doBuy').disabled=false;}
 };
 
-$('loginForm').onsubmit=async event=>{
- event.preventDefault();$('loginError').textContent='';
- try{
-  const response=await fetch(BASE+'/api/auth/login',{method:'POST',
-   headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('password').value})});
-  const body=await response.json().catch(()=>({}));
-  if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
-  sessionStorage.setItem('grid-token',body.token);
-  $('password').value='';$('loginPanel').hidden=true;load();
- }catch(e){$('loginError').textContent=e.message;}
-};
-
 $('refresh').onclick=load;
-(async()=>{
- const status=await fetch(BASE+'/api/auth/status',
-  {headers:token()?{Authorization:'Bearer '+token()}:{}}).then(r=>r.json()).catch(()=>({}));
- $('loginPanel').hidden=!(status.configured&&!status.authenticated);
- load();
-})();
+load();
 </script></main></body></html>
