@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Открытые позиции · Robinhood Chain</title>
+<style>
+:root{color-scheme:dark;
+ --bg:#0b0e14;--panel:#121722;--panel2:#0e131d;--line:#273044;--line2:#202838;
+ --text:#e6eaf2;--muted:#8e9aaf;--good:#58d68d;--bad:#ff6b6b;--accent:#6ea8fe;--warn:#f2c66d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+button,a,select,input{font:inherit}
+.wrap{max-width:1100px;margin:auto;padding:24px 20px 60px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+h1{margin:0;font-size:24px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+.muted{color:var(--muted)} .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text);padding:9px 13px;
+ border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none}
+button:hover:not(:disabled),.button:hover{border-color:#3a4660}
+button:disabled{opacity:.45;cursor:not-allowed}
+input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;min-width:220px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line2);vertical-align:middle}
+th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.addr{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
+.quarters{display:flex;gap:6px;justify-content:flex-end}
+.quarters button{padding:6px 10px;font-size:12px}
+.banner{border-radius:10px;padding:11px 14px;margin-bottom:12px;border:1px solid}
+.banner.live{border-color:var(--bad);background:#2a1418;color:#ffb4b4}
+.banner.dry{border-color:var(--line);background:var(--panel2);color:var(--muted)}
+.banner.gas{border-color:var(--warn);background:#2a2414;color:var(--warn)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
+.tile .value{font-size:18px;font-weight:750;overflow-wrap:anywhere}
+.empty{padding:22px 8px;text-align:center;color:var(--muted)}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;
+ padding:20px;max-width:480px}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:14px 0}
+/* The radio and its text belong on one line; the default inline layout drops
+   the control onto a line of its own once the label wraps. */
+.choice{display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;cursor:pointer}
+/* The page-wide `input` rule sets min-width for text fields; a radio inherits
+   it and becomes a 220px box with a dot floating in the middle of it. */
+.choice input[type=radio]{margin:3px 0 0;flex:none;width:auto;min-width:0}
+.field{display:block;margin-bottom:10px}
+.field input{width:100%;margin-top:4px}
+dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+</style></head><body><main class="wrap">
+<header class="top"><div><h1>Открытые позиции</h1>
+<div class="muted" id="wallet">Robinhood Chain · кошелёк бота</div></div>
+<div><a class="button" href="#" id="historyLink">История →</a> <a class="button" href="#" id="fomoLink">Что торгует топ FOMO →</a> <button id="refresh">Обновить</button></div></header>
+
+<section class="panel" id="loginPanel" hidden>
+  <h2 style="margin:0 0 10px;font-size:16px">Вход</h2>
+  <p class="muted" style="margin-top:0">Продажа требует входа. Токен хранится только в этой вкладке.</p>
+  <form id="loginForm" style="display:flex;gap:10px;flex-wrap:wrap">
+    <input id="password" type="password" placeholder="Пароль оператора" autocomplete="current-password">
+    <button type="submit">Войти</button></form>
+  <p id="loginError" class="bad" style="margin-bottom:0"></p>
+</section>
+
+<div id="banners"></div>
+
+<section class="panel"><div class="tiles" id="tiles"></div></section>
+
+<section class="panel">
+  <form id="openForm" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <label class="muted">Открыть новую позицию</label>
+    <input id="openAddress" placeholder="Адрес контракта 0x…" style="min-width:380px">
+    <button type="submit">Купить →</button></form>
+  <p class="muted" style="margin:10px 0 0">Монета должна быть среди проверенных на цепочке (<code>chain_tokens</code>).</p>
+</section>
+
+<section class="panel" style="padding:0;overflow:hidden">
+<table><thead><tr><th>Монета</th><th class="num">Количество</th><th class="num" style="width:120px">Купить</th><th class="num" style="width:270px">Продать за USDG</th></tr></thead>
+<tbody id="rows"><tr><td colspan="3" class="empty">Загрузка…</td></tr></tbody></table></section>
+
+<p class="muted" id="note"></p>
+
+<dialog id="buy"><h2 style="margin:0;font-size:17px">Покупка за USDG</h2>
+<p class="muted" id="buyIntro"></p>
+<form id="buyForm">
+<label class="field">Сумма, USDG<input id="buyAmount" type="text" inputmode="decimal" placeholder="например 25"></label>
+<label class="choice"><input type="radio" name="buyType" value="market" checked>
+ <span>По рынку — лимит встанет на кэп проскальзывания выше котировки</span></label>
+<label class="choice"><input type="radio" name="buyType" value="limit">
+ <span>Лимиткой по цене, USDG за штуку
+ <input id="buyLimit" type="text" inputmode="decimal" placeholder="например 4.20" disabled
+  style="width:100%;margin-top:4px"></span></label>
+<p class="warn" id="buyWarn" style="margin:0 0 14px"></p>
+<p class="bad" id="buyError" style="margin:0 0 10px"></p>
+<div style="display:flex;gap:10px;justify-content:flex-end">
+  <button type="button" id="cancelBuy">Отмена</button>
+  <button type="submit" id="doBuy">Купить</button></div></form></dialog>
+
+<dialog id="confirm"><h2 style="margin:0;font-size:17px">Подтвердите продажу</h2>
+<p class="muted" id="confirmIntro"></p>
+<dl id="confirmDetails"></dl>
+<p class="warn" id="confirmWarn" style="margin:0 0 14px"></p>
+<div style="display:flex;gap:10px;justify-content:flex-end">
+  <button id="cancelSell">Отмена</button>
+  <button id="doSell" style="border-color:var(--bad);background:#3a1a1f">Продать</button></div></dialog>
+
+<script>
+const BASE=location.pathname.replace(/\/positions(\/.*)?$/,'');
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const num=(v,d=6)=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
+// Session-scoped on purpose: closing the tab drops the credential that can
+// spend money, rather than leaving it in localStorage for the next visitor.
+const token=()=>sessionStorage.getItem('grid-token')||'';
+let state={positions:[],dry_run:true,native_balance:'0'};
+let pending=null;let buying=null;
+$('fomoLink').href=BASE+'/fomo';
+$('historyLink').href=BASE+'/history';
+
+async function api(path,options={}){
+ const headers={'Content-Type':'application/json',...(options.headers||{})};
+ if(token())headers.Authorization='Bearer '+token();
+ const response=await fetch(BASE+path,{...options,headers});
+ if(response.status===401){sessionStorage.removeItem('grid-token');$('loginPanel').hidden=false;
+  throw new Error('Нужен вход');}
+ const body=await response.json().catch(()=>({}));
+ if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
+ return body;
+}
+
+function banners(){
+ const out=[];
+ if(state.dry_run)out.push('<div class="banner dry">DEX_DRY_RUN включён: уровень будет наблюдаться и котироваться, но ничего не подписывается.</div>');
+ else out.push('<div class="banner live">DEX_DRY_RUN выключен. Подтверждённая продажа будет подписана и отправлена в сеть — это настоящие деньги.</div>');
+ // Whether this is enough for gas is decided against the router's own
+ // estimate when a sale is armed; here it is only shown.
+ out.push(`<div class="banner gas">Нативный баланс на газ: ${esc(state.native_balance)} ETH. Без него сделку невозможно отправить.</div>`);
+ $('banners').innerHTML=out.join('');
+}
+
+function render(){
+ banners();
+ $('wallet').textContent='Robinhood Chain · '+(state.wallet||'');
+ const cash=state.cash;
+ $('tiles').innerHTML=`
+  <div class="tile"><div class="label">Свободно USDG</div><div class="value good">${cash?num(cash.amount,6):'0'}</div></div>
+  <div class="tile"><div class="label">Открытых позиций</div><div class="value">${state.positions.length}</div></div>
+  <div class="tile"><div class="label">Кошелёк</div><div class="value addr">${esc(state.wallet||'')}</div></div>`;
+ $('rows').innerHTML=state.positions.length?state.positions.map(p=>`<tr>
+  <td><b>${esc(p.symbol||'без тикера')}</b><div class="addr">${esc(p.token_address)}</div></td>
+  <td class="num">${num(p.amount,8)}</td>
+  <td><div class="quarters"><button data-buy="${esc(p.token_address)}">Купить…</button></div></td>
+  <td><div class="quarters">${[25,50,75,100].map(q=>
+   `<button data-address="${esc(p.token_address)}" data-percent="${q}">${q}%</button>`).join('')}</div></td>
+ </tr>`).join(''):'<tr><td colspan="4" class="empty">В кошельке нет токенов Robinhood Chain, кроме USDG.</td></tr>';
+}
+
+async function load(){
+ $('refresh').disabled=true;
+ try{
+  const data=await api('/api/dex/positions');
+  state=data;render();
+  $('note').textContent='Видны только токены, которые знает chain_tokens: монета, которой не касался никто из отслеживаемых кошельков, здесь не появится.';
+ }catch(e){$('rows').innerHTML=`<tr><td colspan="3" class="empty">${esc(e.message)}</td></tr>`;}
+ finally{$('refresh').disabled=false;}
+}
+
+$('rows').onclick=event=>{
+ const buyButton=event.target.closest('button[data-buy]');
+ if(buyButton){
+  const held=state.positions.find(p=>p.token_address===buyButton.dataset.buy);
+  return openBuy(buyButton.dataset.buy,held?held.symbol:null);
+ }
+ const button=event.target.closest('button[data-address]');
+ if(!button)return;
+ const position=state.positions.find(p=>p.token_address===button.dataset.address);
+ if(!position)return;
+ pending={address:position.token_address,percent:Number(button.dataset.percent),symbol:position.symbol};
+ const share=Number(position.amount)*pending.percent/100;
+ $('confirmIntro').textContent=`${pending.percent}% позиции ${position.symbol||position.token_address} за USDG.`;
+ $('confirmDetails').innerHTML=`<dt>Монета</dt><dd>${esc(position.symbol||'—')}</dd>
+  <dt>Контракт</dt><dd class="addr">${esc(position.token_address)}</dd>
+  <dt>В кошельке</dt><dd>${num(position.amount,8)}</dd>
+  <dt>К продаже</dt><dd>${num(share,8)}</dd>`;
+ $('confirmWarn').textContent=state.dry_run
+  ?'DEX_DRY_RUN включён — сделка не будет подписана.'
+  :'DEX_DRY_RUN выключен — воркер подпишет и отправит эту сделку.';
+ $('confirm').showModal();
+};
+
+$('cancelSell').onclick=()=>{pending=null;$('confirm').close();};
+$('doSell').onclick=async()=>{
+ if(!pending)return;
+ $('doSell').disabled=true;
+ try{
+  const result=await api(`/api/dex/positions/${pending.address}/sell`,
+   {method:'POST',body:JSON.stringify({percent:pending.percent})});
+  $('confirm').close();
+  alert(`Ордер поставлен (intent ${result.intent_id}).\n`+
+        `${result.amount} ${result.amount_coin} по лимиту ${result.limit_price} USDG за штуку.\n`+
+        `Котировка: ${result.quoted_proceeds} USDG.\n${result.note}`);
+  load();
+ }catch(e){alert('Продажа не поставлена: '+e.message);}
+ finally{$('doSell').disabled=false;pending=null;}
+};
+
+function openBuy(address,symbol){
+ buying={address,symbol};
+ $('buyIntro').textContent=symbol?`${symbol} · ${address}`:address;
+ $('buyError').textContent='';$('buyAmount').value='';$('buyLimit').value='';
+ $('buyForm').buyType.value='market';$('buyLimit').disabled=true;
+ $('buyWarn').textContent=state.dry_run
+  ?'DEX_DRY_RUN включён — сделка не будет подписана.'
+  :'DEX_DRY_RUN выключен — воркер подпишет и отправит эту сделку.';
+ $('buy').showModal();
+}
+[...document.querySelectorAll('input[name=buyType]')].forEach(radio=>radio.onchange=()=>{
+ $('buyLimit').disabled=$('buyForm').buyType.value!=='limit';
+ if(!$('buyLimit').disabled)$('buyLimit').focus();
+});
+$('cancelBuy').onclick=()=>{buying=null;$('buy').close();};
+$('openForm').onsubmit=event=>{
+ event.preventDefault();
+ const address=$('openAddress').value.trim();
+ if(/^0x[0-9a-fA-F]{40}$/.test(address))openBuy(address,null);
+ else alert('Нужен адрес контракта вида 0x… (40 шестнадцатеричных знаков).');
+};
+$('buyForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(!buying)return;
+ $('buyError').textContent='';
+ const body={quote_amount:$('buyAmount').value.trim()};
+ if($('buyForm').buyType.value==='limit'){
+  if(!$('buyLimit').value.trim()){$('buyError').textContent='Укажите цену лимитки.';return;}
+  body.limit_price=$('buyLimit').value.trim();
+ }
+ $('doBuy').disabled=true;
+ try{
+  const result=await api(`/api/dex/positions/${buying.address}/buy`,
+   {method:'POST',body:JSON.stringify(body)});
+  $('buy').close();
+  alert(`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
+        `${result.amount} ${result.amount_coin} по лимиту ${result.limit_price} USDG за штуку.`+
+        (result.quoted_receive?`\nКотировка: ${result.quoted_receive}.`:'')+`\n${result.note}`);
+  buying=null;load();
+ }catch(e){$('buyError').textContent=e.message;}
+ finally{$('doBuy').disabled=false;}
+};
+
+$('loginForm').onsubmit=async event=>{
+ event.preventDefault();$('loginError').textContent='';
+ try{
+  const response=await fetch(BASE+'/api/auth/login',{method:'POST',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('password').value})});
+  const body=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
+  sessionStorage.setItem('grid-token',body.token);
+  $('password').value='';$('loginPanel').hidden=true;load();
+ }catch(e){$('loginError').textContent=e.message;}
+};
+
+$('refresh').onclick=load;
+(async()=>{
+ const status=await fetch(BASE+'/api/auth/status',
+  {headers:token()?{Authorization:'Bearer '+token()}:{}}).then(r=>r.json()).catch(()=>({}));
+ $('loginPanel').hidden=!(status.configured&&!status.authenticated);
+ load();
+})();
+</script></main></body></html>

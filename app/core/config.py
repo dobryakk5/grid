@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     # Pairs the sampler watches on top of any profile using exchange=robinhood.
     dex_watch_symbols: str = "PONSUSDG"
 
+    # ---- Operator authentication -----------------------------------------
+    # Empty secret or hash means "not configured": reads stay open for local
+    # work, and every endpoint that can spend money refuses to run at all.
+    # That way a half-finished deploy cannot quietly expose the wallet.
+    auth_secret: str = ""
+    auth_password_hash: str = ""
+    auth_token_ttl_minutes: int = 720
+    # A long random string for machine callers (the FOMO collector), accepted
+    # in place of a login token. Rotate it by changing this one value.
+    auth_service_token: str = ""
+
     # ---- FOMO (internal API, research access under one's own account) -----
     # The JWT expires quickly (a ~1h Privy session); the page can override
     # this with a pasted-in session instead of restarting the process.

@@ -27,6 +27,16 @@ async def fomo_analysis_page(request: Request):
     return templates.TemplateResponse(request=request, name="fomo_activity.html", context={})
 
 
+@router.get("/positions")
+async def dex_positions_page(request: Request):
+    return templates.TemplateResponse(request=request, name="dex_positions.html", context={})
+
+
+@router.get("/history")
+async def dex_history_page(request: Request):
+    return templates.TemplateResponse(request=request, name="dex_history.html", context={})
+
+
 @router.get("/fomo/chain")
 async def fomo_chain_page(request: Request):
     return templates.TemplateResponse(request=request, name="fomo_analysis.html", context={})

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>История сделок · Grid</title>
+<style>
+:root{color-scheme:dark;
+ --bg:#0b0e14;--panel:#121722;--panel2:#0e131d;--line:#273044;--line2:#202838;
+ --text:#e6eaf2;--muted:#8e9aaf;--good:#58d68d;--bad:#ff6b6b;--accent:#6ea8fe;--warn:#f2c66d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+button,a,select,input{font:inherit}
+.wrap{max-width:1400px;margin:auto;padding:24px 20px 60px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+h1{margin:0;font-size:24px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+.muted{color:var(--muted)} .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+button,.button{border:1px solid var(--line);background:#171d2a;color:var(--text);padding:9px 13px;
+ border-radius:9px;cursor:pointer;font-weight:650;text-decoration:none}
+button:hover:not(:disabled),.button:hover{border-color:#3a4660}
+button:disabled{opacity:.45;cursor:not-allowed}
+select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:1080px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line2);vertical-align:middle;white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:600;font-size:11px;
+ text-transform:uppercase;letter-spacing:.03em;z-index:2}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.tag{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+.tag.buy{color:var(--good);border-color:#2c5c43} .tag.sell{color:var(--bad);border-color:#5c2c34}
+.tag.open{color:var(--warn);border-color:#5c522c}
+.tx{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);text-decoration:none}
+.tx:hover{text-decoration:underline}
+.empty{padding:22px 8px;text-align:center;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
+.tile .value{font-size:18px;font-weight:750}
+</style></head><body><main class="wrap">
+<header class="top"><div><h1>История сделок</h1>
+<div class="muted">Покупки и продажи на Robinhood Chain — и сетки, и поставленные вручную</div></div>
+<div><a class="button" href="#" id="positionsLink">Открытые позиции →</a> <button id="refresh">Обновить</button></div></header>
+
+<section class="panel"><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+<label>Показывать <select id="filter">
+ <option value="all" selected>все</option>
+ <option value="open">только открытые</option>
+ <option value="filled">только исполненные</option>
+ <option value="closed">только завершённые</option></select></label>
+<span class="muted" id="summary"></span></div>
+<div class="tiles" id="tiles" style="margin-top:14px"></div></section>
+
+<section class="panel" style="padding:0;overflow:hidden"><div class="table-wrap">
+<table><thead><tr>
+<th>Время</th><th>Пара</th><th>Сторона</th><th>Статус</th>
+<th class="num">Объём</th><th class="num">Лимит</th><th class="num">Цена исполнения</th>
+<th class="num">Получено</th><th class="num">Газ</th><th>Транзакция</th><th></th>
+</tr></thead><tbody id="rows"><tr><td colspan="11" class="empty">Загрузка…</td></tr></tbody></table>
+</div></section>
+<p class="muted" id="note"></p>
+
+<script>
+const BASE=location.pathname.replace(/\/history(\/.*)?$/,'');
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const num=(v,d=8)=>v==null?'—':Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
+const time=v=>v?new Date(v).toLocaleString('ru-RU'):'—';
+const token=()=>sessionStorage.getItem('grid-token')||'';
+let orders=[];
+$('positionsLink').href=BASE+'/positions';
+
+async function api(path){
+ const headers=token()?{Authorization:'Bearer '+token()}:{};
+ const response=await fetch(BASE+path,{headers});
+ if(response.status===401)throw new Error('Нужен вход — авторизуйтесь на странице «Открытые позиции»');
+ const body=await response.json().catch(()=>({}));
+ if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
+ return body;
+}
+
+function render(){
+ const filled=orders.filter(o=>o.status==='FILLED');
+ const open=orders.filter(o=>o.open);
+ $('tiles').innerHTML=`
+  <div class="tile"><div class="label">Всего ордеров</div><div class="value">${orders.length}</div></div>
+  <div class="tile"><div class="label">Исполнено</div><div class="value good">${filled.length}</div></div>
+  <div class="tile"><div class="label">Ждут цены</div><div class="value warn">${open.length}</div></div>`;
+ $('summary').textContent=`${orders.length} записей`;
+ $('rows').innerHTML=orders.length?orders.map(o=>`<tr>
+  <td class="muted">${time(o.created_at)}</td>
+  <td><b>${esc(o.symbol)}</b><div class="muted" style="font-size:11px">${esc(o.source)}</div></td>
+  <td><span class="tag ${o.side==='Buy'?'buy':'sell'}">${o.side==='Buy'?'покупка':'продажа'}</span></td>
+  <td><span class="tag ${o.open?'open':''}">${esc(o.status)}</span>${
+    o.reason?`<div class="muted" style="font-size:11px;white-space:normal;max-width:260px">${esc(o.reason)}</div>`:''}</td>
+  <td class="num">${num(o.amount_in)} <span class="muted">${esc(o.amount_in_coin)}</span></td>
+  <td class="num">${num(o.limit_price)}</td>
+  <td class="num">${o.fill_price?`<b>${num(o.fill_price)}</b>`:'—'}</td>
+  <td class="num">${num(o.filled_amount_out)}</td>
+  <td class="num muted">${o.gas_quote?num(o.gas_quote,6)+' '+esc(o.gas_quote_coin||''):'—'}</td>
+  <td>${o.tx_hash?`<a class="tx" target="_blank" rel="noopener noreferrer"
+     href="https://robinhoodchain.blockscout.com/tx/${esc(o.tx_hash)}">${esc(o.tx_hash.slice(0,10))}…</a>`:'<span class="muted">—</span>'}</td>
+  <td>${o.open?`<button data-cancel="${o.id}">Отменить</button>`:''}</td>
+ </tr>`).join(''):'<tr><td colspan="11" class="empty">Пока ни одной сделки.</td></tr>';
+}
+
+async function load(){
+ $('refresh').disabled=true;
+ try{
+  orders=(await api('/api/dex/orders?status='+$('filter').value)).orders;
+  render();
+  $('note').textContent='Источник — таблица dex_intents: ордер и исполненная сделка это одна и та же строка в разные моменты жизни.';
+ }catch(e){$('rows').innerHTML=`<tr><td colspan="11" class="empty">${esc(e.message)}</td></tr>`;}
+ finally{$('refresh').disabled=false;}
+}
+
+$('rows').onclick=async event=>{
+ const button=event.target.closest('button[data-cancel]');
+ if(!button)return;
+ const id=button.dataset.cancel;
+ if(!confirm(`Отменить ордер ${id}? Уровень перестанет ждать цену.`))return;
+ button.disabled=true;
+ try{
+  const headers={'Content-Type':'application/json'};
+  if(token())headers.Authorization='Bearer '+token();
+  const response=await fetch(`${BASE}/api/fomo/limit-order/${id}/cancel`,{method:'POST',headers});
+  const body=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
+  load();
+ }catch(e){alert('Не отменён: '+e.message);button.disabled=false;}
+};
+
+$('refresh').onclick=load;$('filter').onchange=load;
+load();
+</script></main></body></html>

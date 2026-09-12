@@ -82,7 +82,7 @@ tr.detail tr:hover td{background:transparent}
 .legend{margin-top:10px;font-size:12px}
 </style></head><body><main class="wrap">
 <header class="top"><div><h1>Что торгует топ FOMO</h1><div id="cohort" class="muted">Топ-30 · лидерборд за 30 дней · все сети</div></div>
-<div class="row"><a id="chainLink" class="button">Лента Robinhood →</a><button id="refresh">Обновить</button></div></header>
+<div class="row"><a id="positionsLink" class="button">Открытые позиции →</a><a id="chainLink" class="button">Лента Robinhood →</a><button id="refresh">Обновить</button></div></header>
 <section class="panel notice"><div id="status">Загрузка…</div><p id="coverage"></p>
 <p class="muted">Выборка — текущий топ лидерборда на момент сбора. Покупка — полученный токен, продажа — потраченный; учитываются обе стороны обмена, включая стейблкоины. Переводы и сводки позиций не считаются сделками.</p>
 <details id="setup"><summary>Подключить автоматический сбор</summary><p>Один раз в терминале проекта: <code>make fomo-browser-install</code>.</p>
@@ -124,6 +124,7 @@ const keyOf=c=>c.chain_id+':'+c.token_address;
 const label=c=>(c.symbol||c.name||c.token_address).toLowerCase();
 const value=(c,key)=>key==='label'?label(c):key==='participants'?c.traders.length:Number(c[key]);
 $('chainLink').href=BASE+'/fomo/chain';
+$('positionsLink').href=BASE+'/positions';
 $('command').textContent='FOMO_API_BASE='+location.origin+BASE+' make fomo-token';
 function traderRows(c){
  return `<table><thead><tr><th>Ранг / трейдер</th><th class="num">Куплено</th><th class="num">Продано</th>
@@ -173,7 +174,11 @@ async function load(){
  const request=++sequence;
  $('refresh').disabled=true;
  try{
-  const r=await fetch(BASE+'/api/fomo/activity?period=30d&hours='+$('hours').value);
+  // Same session-scoped token the positions page logs in for.
+  const token=sessionStorage.getItem('grid-token')||'';
+  const r=await fetch(BASE+'/api/fomo/activity?period=30d&hours='+$('hours').value,
+                      token?{headers:{Authorization:'Bearer '+token}}:{});
+  if(r.status===401)throw new Error('Нужен вход — откройте страницу «Открытые позиции» и авторизуйтесь');
   if(!r.ok)throw new Error('HTTP '+r.status+' — проверьте API и перезапустите сервер после обновления');
   const data=await r.json();if(request!==sequence)return;
   coins=data.coins;const cohort=data.cohort;

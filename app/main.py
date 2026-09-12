@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth_routes import router as auth_router
 from app.api.routes import router as api_router
+from app.api.dex_positions import router as dex_positions_router
 from app.api.fomo_activity import router as fomo_activity_router
+from app.core.auth import require_operator
 from app.core.config import settings
 from app.db.init import init_db
 from app.web.routes import router as web_router
@@ -41,9 +44,14 @@ if _bridge_origins:
         allow_credentials=False,
     )
 
+# Pages are shells that fetch the API; the data and the money live behind
+# `require_operator`, so the HTML itself needs no gate. Login is mounted first
+# and ungated -- a caller with no token has to be able to ask for one.
 app.include_router(web_router)
-app.include_router(api_router)
-app.include_router(fomo_activity_router)
+app.include_router(auth_router)
+app.include_router(api_router, dependencies=[Depends(require_operator)])
+app.include_router(fomo_activity_router, dependencies=[Depends(require_operator)])
+app.include_router(dex_positions_router, dependencies=[Depends(require_operator)])
 
 
 @app.get("/health")

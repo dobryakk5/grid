@@ -141,3 +141,23 @@ async def test_check_api_reports_the_database_the_server_writes_to():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(old_server)) as http:
         assert await check_api(http, "http://localhost:9000") == "неизвестно"
+
+
+def test_collector_sends_its_service_token_only_when_it_has_one(monkeypatch):
+    from app.fomo.browser import api_headers
+    monkeypatch.delenv("GRID_API_TOKEN", raising=False)
+    assert api_headers() == {}
+    monkeypatch.setenv("GRID_API_TOKEN", "  svc  ")
+    assert api_headers() == {"Authorization": "Bearer svc"}
+
+
+async def test_a_401_from_grid_names_the_variable_to_set(monkeypatch):
+    monkeypatch.setenv("GRID_API_TOKEN", "stale")
+
+    async def handle(request):
+        assert request.headers["authorization"] == "Bearer stale"
+        return httpx.Response(401, json={"detail": "Требуется вход"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(BrowserSyncError, match="GRID_API_TOKEN"):
+            await check_api(http, "http://localhost:9000")

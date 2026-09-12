@@ -7,6 +7,7 @@ fake page/transport, without a browser or a FOMO account.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -43,13 +44,30 @@ def validate_base(value: str) -> str:
     return base
 
 
+def api_headers() -> dict:
+    """Bearer for the Grid API, or nothing when it has no auth configured.
+
+    The collector is a machine caller with no password prompt, so it carries
+    ``AUTH_SERVICE_TOKEN`` (as ``GRID_API_TOKEN``) rather than logging in.
+    Empty is fine and stays fine: an API with no auth configured accepts it.
+    """
+    token = os.environ.get("GRID_API_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 async def local_json(http, method: str, url: str, **kwargs):
+    kwargs["headers"] = {**api_headers(), **kwargs.get("headers", {})}
     try:
         response = await http.request(method, url, **kwargs)
     except httpx.HTTPError:
         raise BrowserSyncError(
             "API недоступен. Проверьте FOMO_API_BASE и запустите API/SSH-туннель."
         ) from None
+    if response.status_code in (401, 403):
+        raise BrowserSyncError(
+            "Grid API требует авторизации: передайте GRID_API_TOKEN="
+            "<AUTH_SERVICE_TOKEN из .env сервера>"
+        )
     if not response.is_success:
         raise BrowserSyncError(f"Grid API: HTTP {response.status_code} ({method} {urlsplit(url).path})")
     try:

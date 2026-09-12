@@ -4,10 +4,11 @@ from decimal import Decimal
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import case, func, or_, select, update as sa_update
 
+from app.core.auth import require_trading
 from app.core.config import settings
 from app.db.models import (
     ChainScanCursor,
@@ -1807,7 +1808,7 @@ class LimitOrderPayload(BaseModel):
     amount: Decimal = Field(gt=0)
 
 
-@router.post("/fomo/limit-order")
+@router.post("/fomo/limit-order", dependencies=[Depends(require_trading)])
 async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
     """Arm a limit buy for a coin, as a synthetic level the DEX worker runs.
 
@@ -1878,7 +1879,7 @@ async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
     }
 
 
-@router.post("/fomo/limit-order/{intent_id}/cancel")
+@router.post("/fomo/limit-order/{intent_id}/cancel", dependencies=[Depends(require_trading)])
 async def fomo_limit_order_cancel(intent_id: int) -> dict:
     async with SessionLocal() as session:
         intent = await session.get(DexIntent, intent_id)
