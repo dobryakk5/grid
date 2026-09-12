@@ -140,25 +140,56 @@ async def _fills_by_symbol() -> dict[str, list[Fill]]:
     return fills
 
 
-async def _exit_value(pair, position, wallet) -> Decimal | None:
-    """What selling the whole holding would fetch right now, or ``None``.
+# The router refuses a burst far more readily than a trickle: asking it for
+# every holding at once is what turns a page of quotes into a page of blanks.
+# Three at a time is slower to paint and far likelier to paint completely.
+QUOTE_CONCURRENCY = 3
+QUOTE_ATTEMPTS = 3
+
+# Failures the router itself describes as worth retrying, plus the transport
+# errors that never mean "this token has no market".
+_TRANSIENT_QUOTE_ERRORS = (
+    "UpstreamTimeoutError", "request failed", "non-JSON response",
+    "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504",
+)
+
+
+def _transient(exc: Exception) -> bool:
+    return any(marker in str(exc) for marker in _TRANSIENT_QUOTE_ERRORS)
+
+
+async def _exit_value(
+    pair, position, wallet, uniswap: UniswapClient, gate: asyncio.Semaphore,
+) -> tuple[Decimal | None, str | None]:
+    """What selling the whole holding would fetch, and why not if it cannot.
 
     A quote, not a mid price: it already carries the price impact of this size,
-    which is the number a position is actually worth to us. Best effort -- a
-    thin market or a router hiccup must not empty the page.
+    which is the number a position is actually worth to us.
+
+    Returns the reason alongside the value because the two failures are not the
+    same fact. "No pool" is a property of the token and will still be true on
+    the next load; "the router timed out" is a property of this second, and
+    reporting it as an absent price -- which is what this did before -- tells
+    the operator a liquid coin is unsellable.
     """
-    uniswap = UniswapClient()
-    try:
-        quote = await uniswap.quote_exact_in(
-            pair=pair, side="Sell",
-            amount_in_wei=int(position.amount.scaleb(position.decimals)),
-            swapper=wallet,
-        )
-        return Decimal(quote.amount_out).scaleb(-resolve_token(QUOTE_SYMBOL).decimals)
-    except (UniswapError, HTTPException, ValueError):
-        return None
-    finally:
-        await uniswap.close()
+    last: Exception | None = None
+    for attempt in range(QUOTE_ATTEMPTS):
+        try:
+            async with gate:
+                quote = await uniswap.quote_exact_in(
+                    pair=pair, side="Sell",
+                    amount_in_wei=int(position.amount.scaleb(position.decimals)),
+                    swapper=wallet,
+                )
+            value = Decimal(quote.amount_out).scaleb(-resolve_token(QUOTE_SYMBOL).decimals)
+            return value, None
+        except (UniswapError, HTTPException, ValueError) as exc:
+            last = exc
+            if not _transient(exc):
+                break
+            if attempt + 1 < QUOTE_ATTEMPTS:
+                await asyncio.sleep(0.4 * 2 ** attempt)
+    return None, ("timeout" if last is not None and _transient(last) else "unavailable")
 
 
 @router.get("/positions")
@@ -206,10 +237,20 @@ async def positions() -> dict:
         if pair is not None:
             priced.append((entry, pair, position, basis))
 
-    for (entry, _pair, position, basis), value in zip(
-        priced, await asyncio.gather(*(_exit_value(p, pos, wallet) for _e, p, pos, basis in priced))
-    ):
+    # One client and one gate for the whole page: a client per position was
+    # nine connections opening at once, which is the burst the router minds.
+    uniswap = UniswapClient()
+    gate = asyncio.Semaphore(QUOTE_CONCURRENCY)
+    try:
+        quotes = await asyncio.gather(*(
+            _exit_value(p, pos, wallet, uniswap, gate) for _e, p, pos, _b in priced
+        ))
+    finally:
+        await uniswap.close()
+
+    for (entry, _pair, position, basis), (value, failure) in zip(priced, quotes):
         entry["value_quote"] = str(value) if value is not None else None
+        entry["quote_error"] = failure
         if value is None or basis.covered_qty <= 0:
             entry["pnl_quote"] = entry["pnl_pct"] = None
             continue

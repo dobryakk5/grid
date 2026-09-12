@@ -1,3 +1,4 @@
+{% set nav_active = "positions" %}{% set nav_route = "/positions" %}
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Открытые позиции · Robinhood Chain</title>
@@ -58,9 +59,10 @@ dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:14px 0}
 .field input{width:100%;margin-top:4px}
 dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 </style></head><body><main class="wrap">
+{% include "_nav.html" %}
 <header class="top"><div><h1>Открытые позиции</h1>
 <div class="muted" id="wallet">Robinhood Chain · кошелёк бота</div></div>
-<div><a class="button" href="#" id="historyLink">История →</a> <a class="button" href="#" id="fomoLink">Что торгует топ FOMO →</a> <button id="refresh">Обновить</button></div></header>
+<div><button id="refresh">Обновить</button></div></header>
 
 <div id="banners"></div>
 
@@ -130,8 +132,6 @@ const num=(v,d=6)=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
 const short=a=>esc(a).replace(/^(0x.{6}).+(.{6})$/,'$1…$2');
 let state={positions:[],dry_run:true,native_balance:'0'};
 let pending=null;let buying=null;
-$('fomoLink').href=BASE+'/fomo';
-$('historyLink').href=BASE+'/history';
 
 async function api(path,options={}){
  // The shared wrapper in _auth.html adds the bearer and handles 401 by asking
@@ -162,6 +162,14 @@ function unknown(p){
   return '<span class="muted" title="Покупок этой монеты нет в истории сделок">неизвестна</span>';
  return '—';
 }
+// Two different facts wear the same blank cell unless they are told apart: a
+// token with no market stays unpriceable, while a router timeout is gone by
+// the next click of «Обновить».
+function noQuote(p){
+ return p.quote_error==='timeout'
+  ? '<span class="warn" title="Роутер не ответил на запрос котировки. Нажмите «Обновить».">роутер не ответил</span>'
+  : '<span class="muted" title="Роутер не нашёл маршрута для продажи этого объёма">нет котировки</span>';
+}
 function pnl(p){
  if(p.pnl_quote==null)return '<span class="muted">—</span>';
  const value=Number(p.pnl_quote), sign=value>=0?'+':'−';
@@ -182,7 +190,7 @@ function render(){
   <td class="num">${num(p.amount,8)}</td>
   <td class="num">${p.average_price?num(p.average_price,8):unknown(p)}</td>
   <td class="num">${p.cost_quote?num(p.cost_quote,6):'—'}</td>
-  <td class="num">${p.value_quote!=null?num(p.value_quote,6):'<span class="muted">нет котировки</span>'}</td>
+  <td class="num">${p.value_quote!=null?num(p.value_quote,6):noQuote(p)}</td>
   <td class="num">${pnl(p)}</td>
   <td><div class="actions">
    <button class="buy" data-buy="${esc(p.token_address)}">BUY</button>
@@ -199,7 +207,8 @@ async function load(){
   state=data;render();
   const partial=state.positions.some(p=>!p.basis_complete);
   $('note').innerHTML='Видны только токены, которые знает <code>chain_tokens</code>. '+
-   '«Сейчас стоит» — котировка на продажу всего объёма, уже с учётом проскальзывания. '+
+   '«Сейчас стоит» — котировка на продажу всего объёма, уже с учётом проскальзывания; '+
+   '«роутер не ответил» — временный сбой, помогает «Обновить». '+
    'Себестоимость считается по нашим же исполненным сделкам методом FIFO; газ покупки входит в неё, газ продажи — нет.'+
    (partial?' <span class="warn">Звёздочкой отмечены позиции, которые история сделок покрывает не полностью.</span>':'');
  }catch(e){$('rows').innerHTML=`<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`;}

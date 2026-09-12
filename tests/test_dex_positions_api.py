@@ -1,5 +1,6 @@
 """The sell endpoint's refusals. Every one of these guards real money."""
 
+import asyncio
 from decimal import Decimal
 
 import httpx
@@ -10,6 +11,7 @@ from app.core.config import settings
 from app.core.security import hash_password
 from app.dex.positions import Position
 from app.dex.tokens import Token
+from app.dex.uniswap import UniswapError
 
 
 class FakeChain:
@@ -187,6 +189,44 @@ async def test_a_wallet_that_cannot_pay_the_gas_arms_nothing(wired, monkeypatch)
                                    json={"percent": 100}, headers=AUTH)
     assert response.status_code == 422 and "газ" in response.text
     assert not wired
+
+
+async def test_a_timing_out_router_is_retried_before_the_price_is_given_up():
+    """The blank cell this prevents told operators a liquid coin had no market."""
+    calls = []
+
+    class Flaky:
+        async def quote_exact_in(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) < 3:
+                raise UniswapError(
+                    "Uniswap /quote HTTP 404: {\"errorCode\":\"UpstreamTimeoutError\"}"
+                )
+            return FakeQuote()
+
+    value, failure = await dex_positions._exit_value(
+        _pair(), Position(CHATGPT, "ChatGpt", 18, 8 * 10 ** 18), FakeChain.wallet_address,
+        Flaky(), asyncio.Semaphore(3),
+    )
+    assert len(calls) == 3 and failure is None
+    assert value == Decimal(40)
+
+
+async def test_a_token_with_no_route_is_not_retried():
+    """A missing market is a fact about the token, not about this second."""
+    calls = []
+
+    class NoRoute:
+        async def quote_exact_in(self, **kwargs):
+            calls.append(kwargs)
+            raise UniswapError("quote returned a zero output amount")
+
+    value, failure = await dex_positions._exit_value(
+        _pair(), Position(CHATGPT, "ChatGpt", 18, 8 * 10 ** 18), FakeChain.wallet_address,
+        NoRoute(), asyncio.Semaphore(3),
+    )
+    assert len(calls) == 1, "постоянную ошибку незачем повторять"
+    assert value is None and failure == "unavailable"
 
 
 def _pair(base_address=CHATGPT):

@@ -1,3 +1,4 @@
+{% set nav_active = "fomo" %}{% set nav_route = "/fomo" %}
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FOMO · Покупки и продажи лидеров</title>
@@ -81,8 +82,9 @@ tr.detail th{position:static;background:transparent}
 tr.detail tr:hover td{background:transparent}
 .legend{margin-top:10px;font-size:12px}
 </style></head><body><main class="wrap">
+{% include "_nav.html" %}
 <header class="top"><div><h1>Что торгует топ FOMO</h1><div id="cohort" class="muted">Топ-30 · лидерборд за 30 дней · все сети</div></div>
-<div class="row"><a id="positionsLink" class="button">Открытые позиции →</a><a id="chainLink" class="button">Лента Robinhood →</a><button id="refresh">Обновить</button></div></header>
+<div class="row"><button id="refresh">Обновить</button></div></header>
 <section class="panel notice"><div id="status">Загрузка…</div><p id="coverage"></p>
 <p class="muted">Выборка — текущий топ лидерборда на момент сбора. Покупка — полученный токен, продажа — потраченный; учитываются обе стороны обмена, включая стейблкоины. Переводы и сводки позиций не считаются сделками.</p>
 <details id="setup"><summary>Подключить автоматический сбор</summary><p>Один раз в терминале проекта: <code>make fomo-browser-install</code>.</p>
@@ -124,8 +126,6 @@ const open=new Set();
 const keyOf=c=>c.chain_id+':'+c.token_address;
 const label=c=>(c.symbol||c.name||c.token_address).toLowerCase();
 const value=(c,key)=>key==='label'?label(c):key==='participants'?c.traders.length:Number(c[key]);
-$('chainLink').href=BASE+'/fomo/chain';
-$('positionsLink').href=BASE+'/positions';
 $('command').textContent='FOMO_API_BASE='+location.origin+BASE+' make fomo-token';
 function traderRows(c){
  return `<table><thead><tr><th>Ранг / трейдер</th><th class="num">Куплено</th><th class="num">Продано</th>

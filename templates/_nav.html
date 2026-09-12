@@ -1,0 +1,62 @@
+{# Single menu for every page, included right after the page's `.wrap` opens.
+
+   Each page passes its own route as `nav_route` and its menu id as
+   `nav_active`. Links are written relative to whatever prefix the app is
+   served under: the pages already derive that prefix from `location.pathname`
+   (see the `BASE` constant in each page's script) because nothing tells the
+   server its mount point, and a hard-coded `/positions` breaks the moment the
+   app sits behind `location /grid/` in nginx. The script below derives the
+   same prefix once, from the page's own route, and rewrites every item. #}
+{% set nav_items = [
+  ('dashboard', '/',             'Профили'),
+  ('profile',   '/profiles/new', 'Новый профиль'),
+  ('positions', '/positions',    'Открытые позиции'),
+  ('history',   '/history',      'История сделок'),
+  ('fomo',      '/fomo',         'Топ FOMO'),
+  ('chain',     '/fomo/chain',   'Лента Robinhood'),
+  ('analysis',  '/analysis',     'Исследование монеты'),
+] %}
+<nav class="grid-nav" aria-label="Разделы">
+  <span class="grid-nav-brand">Grid Bot</span>
+  <ul class="grid-nav-list">
+    {% for id, href, label in nav_items %}
+    <li><a class="grid-nav-link{% if id == nav_active|default('') %} current{% endif %}"
+           data-nav="{{ href }}"
+           {% if id == nav_active|default('') %}aria-current="page"{% endif %}>{{ label }}</a></li>
+    {% endfor %}
+  </ul>
+</nav>
+<style>
+.grid-nav{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+ margin:0 0 18px;padding:8px 12px;border:1px solid var(--line,#273044);
+ border-radius:12px;background:var(--panel,#121722)}
+.grid-nav-brand{font-weight:750;letter-spacing:.2px;color:var(--text,#e6eaf2);
+ padding-right:12px;border-right:1px solid var(--line,#273044)}
+.grid-nav-list{display:flex;align-items:center;gap:4px;flex-wrap:wrap;
+ list-style:none;margin:0;padding:0}
+.grid-nav-link{display:block;padding:6px 11px;border-radius:8px;font-weight:600;
+ color:var(--muted,#8e9aaf);text-decoration:none;cursor:pointer;
+ border:1px solid transparent;white-space:nowrap;transition:.15s ease}
+.grid-nav-link:hover{color:var(--text,#e6eaf2);background:rgba(255,255,255,.04)}
+.grid-nav-link.current{color:var(--text,#e6eaf2);border-color:var(--accent,#6ea8fe);
+ background:var(--accent-bg,#172338)}
+@media(max-width:720px){
+ .grid-nav{gap:8px;padding:8px 10px}
+ .grid-nav-brand{border-right:0;padding-right:0;width:100%}
+ .grid-nav-link{padding:6px 9px;font-size:13px}
+}
+</style>
+<script>
+(function(){
+  // The page's own route, stripped off `location.pathname`, is the prefix the
+  // app is mounted under -- '' when it is served from the domain root.
+  var route = {{ (nav_route | default('/')) | tojson }};
+  var path = location.pathname.replace(/\/+$/, '');
+  var cut = route === '/' ? -1 : path.lastIndexOf(route);
+  var base = cut < 0 ? path : path.slice(0, cut);
+  document.querySelectorAll('.grid-nav-link').forEach(function(a){
+    var href = a.dataset.nav;
+    a.href = href === '/' ? (base || '/') : base + href;
+  });
+})();
+</script>

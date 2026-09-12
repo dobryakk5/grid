@@ -1,3 +1,4 @@
+{% set nav_active = "chain" %}{% set nav_route = "/fomo/chain" %}
 <!doctype html>
 <html lang="ru">
 <head>
@@ -49,6 +50,7 @@
 </head>
 <body>
 <div class="wrap">
+{% include "_nav.html" %}
   <header class="top">
     <h1>FOMO Smart Money</h1>
     <div class="row">
@@ -59,7 +61,6 @@
         <option value="168">за неделю</option>
       </select>
       <button id="refreshBtn">Обновить</button>
-      <a id="backLink" class="button" href="../">← К профилям</a>
     </div>
   </header>
 
@@ -415,7 +416,6 @@ $('copySnippetBtn').onclick = async () => {
 };
 $('hours').onchange = loadAll;
 
-$('backLink').href = BASE + '/';
 loadStatus();
 loadAll();
 </script>

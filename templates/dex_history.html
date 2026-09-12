@@ -1,3 +1,4 @@
+{% set nav_active = "history" %}{% set nav_route = "/history" %}
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>История сделок · Grid</title>
@@ -35,9 +36,10 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 .tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
 .tile .value{font-size:18px;font-weight:750}
 </style></head><body><main class="wrap">
+{% include "_nav.html" %}
 <header class="top"><div><h1>История сделок</h1>
 <div class="muted">Покупки и продажи на Robinhood Chain — и сетки, и поставленные вручную</div></div>
-<div><a class="button" href="#" id="positionsLink">Открытые позиции →</a> <button id="refresh">Обновить</button></div></header>
+<div><button id="refresh">Обновить</button></div></header>
 
 <section class="panel"><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
 <label>Показывать <select id="filter">
@@ -65,7 +67,6 @@ const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const num=(v,d=8)=>v==null?'—':Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
 const time=v=>v?new Date(v).toLocaleString('ru-RU'):'—';
 let orders=[];
-$('positionsLink').href=BASE+'/positions';
 
 async function api(path){
  // The wrapper in _auth.html carries the token and handles 401; adding an

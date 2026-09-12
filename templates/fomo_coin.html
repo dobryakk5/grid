@@ -1,3 +1,4 @@
+{% set nav_active = "chain" %}{% set nav_route = "/fomo/coin" %}
 <!doctype html>
 <html lang="ru">
 <head>
@@ -47,6 +48,7 @@
 </head>
 <body>
 <div class="wrap">
+{% include "_nav.html" %}
   <header class="top">
     <div>
       <h1 id="coinTitle">Монета</h1>
@@ -59,7 +61,6 @@
         <option value="24" selected>за сутки</option>
         <option value="168">за неделю</option>
       </select>
-      <a id="backLink" class="button" href="../">← К списку монет</a>
     </div>
   </header>
 
@@ -335,7 +336,6 @@ async function armLevel() {
 $('armBtn').onclick = armLevel;
 $('tradeSymbol').onchange = () => { updateQuoteLabel(); renderGate(); };
 $('tradeSide').onchange = updateQuoteLabel;
-$('backLink').href = BASE + '/fomo/chain';
 $('hours').onchange = load;
 load();
 </script>
