@@ -21,7 +21,15 @@ from app.core.security import AuthError, constant_time_equals, read_token
 
 __all__ = ["auth_configured", "require_operator", "require_trading", "bearer_of"]
 
-_UNAUTHORIZED = {"WWW-Authenticate": "Bearer"}
+# Deliberately no ``WWW-Authenticate`` header on our 401s.
+#
+# The pages fetch this API with JavaScript and handle 401 themselves, so a
+# challenge header buys nothing -- and it costs something real. The same origin
+# also sits behind nginx basic auth: when the browser holds cached Basic
+# credentials for it and then receives a fresh 401 carrying an auth challenge,
+# it treats those credentials as rejected, drops them, and re-opens nginx's
+# password dialog. Logging in to the app would then ask for the *server*
+# password again. Answering 401 with no challenge leaves that session alone.
 
 
 def auth_configured() -> bool:
@@ -41,7 +49,7 @@ def _identify(token: str) -> str:
     try:
         return str(read_token(settings.auth_secret, token).get("sub") or "operator")
     except AuthError as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc), _UNAUTHORIZED) from None
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from None
 
 
 async def require_operator(request: Request) -> str:
@@ -49,7 +57,7 @@ async def require_operator(request: Request) -> str:
         return "anonymous"
     token = bearer_of(request)
     if not token:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Требуется вход", _UNAUTHORIZED)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Требуется вход")
     return _identify(token)
 
 

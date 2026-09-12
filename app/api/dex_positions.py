@@ -19,12 +19,15 @@ from app.core.auth import require_trading
 from app.core.config import settings
 from app.db.models import ChainToken, DexIntent
 from app.db.session import SessionLocal
+import asyncio
+
 from app.dex.chain import ChainClient
+from app.dex.costbasis import Fill, cost_basis
 from app.dex.dynamic_tokens import load_dynamic_tokens
 from app.dex.intents import TERMINAL_STATUSES, IntentStatus
 from app.dex.positions import fraction_amount, limit_from_quote, open_positions
 from app.dex.repository import DexIntentRepository
-from app.dex.tokens import DexConfigError, resolve_pair, resolve_token
+from app.dex.tokens import DexConfigError, dynamic_key, resolve_pair, resolve_token
 from app.dex.uniswap import UniswapClient, UniswapError
 
 router = APIRouter(prefix="/api/dex")
@@ -70,26 +73,82 @@ async def _known_token(address: str) -> ChainToken:
 
 
 def _pair_for(symbol: str | None, address: str):
-    """The ``<SYMBOL>USDG`` pair, checked to be about *this* contract.
+    """The USDG pair for *this* contract, whatever the registry calls it.
 
-    Symbols are not unique -- the chain is full of tokens that call themselves
-    USDC -- so resolving by ticker and trusting the result is how a sale ends
-    up spending a different coin than the row the operator clicked. The
-    address is the identity; the ticker is only a lookup key.
+    Two naming schemes have to be tried, because the registry has two. Tokens
+    pinned by hand keep their bare ticker (``PONSUSDG``), while discovered ones
+    are keyed by ticker *and* address fragment (``CHATGPT-7EC1FFE0USDG``) --
+    deliberately, since this chain carries several contracts per ticker. Asking
+    for the bare name only would leave every discovered coin unpriceable and
+    unsellable, which is exactly what it did before this looked at both.
+
+    Whichever name resolves, the address decides: a pair whose base is not this
+    contract is refused rather than traded. The ticker is a lookup key; the
+    address is the identity.
     """
     if not symbol:
         raise HTTPException(422, "У токена нет тикера; продажа по адресу пока не поддерживается")
-    try:
-        pair = resolve_pair(f"{symbol.strip().upper()}{QUOTE_SYMBOL}")
-    except DexConfigError as exc:
-        raise HTTPException(422, str(exc)) from None
-    if (pair.base.address or "").lower() != address.lower():
+    plain = symbol.strip().upper()
+    names = [f"{plain}{QUOTE_SYMBOL}", f"{dynamic_key(plain, address)}{QUOTE_SYMBOL}"]
+    mismatched = None
+    for name in names:
+        try:
+            pair = resolve_pair(name)
+        except DexConfigError:
+            continue
+        if (pair.base.address or "").lower() == address.lower():
+            return pair
+        mismatched = pair
+    if mismatched is not None:
         raise HTTPException(
             409,
             f"Тикер {symbol} в реестре указывает на другой контракт "
-            f"({pair.base.address}), а не на {address}; продажа остановлена",
+            f"({mismatched.base.address}), а не на {address}; операция остановлена",
         )
-    return pair
+    raise HTTPException(422, f"Пара для {symbol} ({address}) не найдена среди торгуемых")
+
+
+async def _fills_by_symbol() -> dict[str, list[Fill]]:
+    """Confirmed swaps per pair, oldest first, in the pair's own terms."""
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(DexIntent).where(DexIntent.status == IntentStatus.FILLED)
+            .order_by(DexIntent.id)
+        )).scalars())
+    fills: dict[str, list[Fill]] = {}
+    for row in rows:
+        if row.filled_amount_in is None or row.filled_amount_out is None:
+            continue
+        base, quote = (
+            (row.filled_amount_out, row.filled_amount_in) if row.side == "Buy"
+            else (row.filled_amount_in, row.filled_amount_out)
+        )
+        fills.setdefault(row.symbol.upper(), []).append(Fill(
+            side=row.side, base_qty=base, quote_qty=quote,
+            gas_quote=row.gas_quote or Decimal(0),
+        ))
+    return fills
+
+
+async def _exit_value(pair, position, wallet) -> Decimal | None:
+    """What selling the whole holding would fetch right now, or ``None``.
+
+    A quote, not a mid price: it already carries the price impact of this size,
+    which is the number a position is actually worth to us. Best effort -- a
+    thin market or a router hiccup must not empty the page.
+    """
+    uniswap = UniswapClient()
+    try:
+        quote = await uniswap.quote_exact_in(
+            pair=pair, side="Sell",
+            amount_in_wei=int(position.amount.scaleb(position.decimals)),
+            swapper=wallet,
+        )
+        return Decimal(quote.amount_out).scaleb(-resolve_token(QUOTE_SYMBOL).decimals)
+    except (UniswapError, HTTPException, ValueError):
+        return None
+    finally:
+        await uniswap.close()
 
 
 @router.get("/positions")
@@ -104,8 +163,9 @@ async def positions() -> dict:
     finally:
         await chain.close()
 
+    fills = await _fills_by_symbol()
     quote_address = (resolve_token(QUOTE_SYMBOL).address or "").lower()
-    cash, rows = None, []
+    cash, rows, priced = None, [], []
     for position in held:
         entry = {
             "token_address": position.address, "symbol": position.symbol,
@@ -113,8 +173,42 @@ async def positions() -> dict:
         }
         if position.address.lower() == quote_address:
             cash = entry
-        else:
-            rows.append(entry)
+            continue
+        pair = None
+        if position.symbol:
+            try:
+                pair = _pair_for(position.symbol, position.address)
+            except HTTPException:
+                # Unknown or mismatched ticker: still list the holding, just
+                # without a price or a cost we would have to guess at.
+                pair = None
+        basis = cost_basis(fills.get(pair.symbol, []) if pair else [], position.amount)
+        entry.update({
+            "pair": pair.symbol if pair else None,
+            "covered_qty": str(basis.covered_qty),
+            "uncovered_qty": str(basis.uncovered_qty),
+            "unexplained_outflow": str(basis.unexplained_outflow),
+            "cost_quote": str(basis.cost_quote) if basis.covered_qty > 0 else None,
+            "average_price": str(basis.average_price) if basis.average_price is not None else None,
+            "basis_complete": basis.complete,
+        })
+        rows.append(entry)
+        if pair is not None:
+            priced.append((entry, pair, position, basis))
+
+    for (entry, _pair, position, basis), value in zip(
+        priced, await asyncio.gather(*(_exit_value(p, pos, wallet) for _e, p, pos, basis in priced))
+    ):
+        entry["value_quote"] = str(value) if value is not None else None
+        if value is None or basis.covered_qty <= 0:
+            entry["pnl_quote"] = entry["pnl_pct"] = None
+            continue
+        # Compare like with like: only the part of the holding we know the
+        # cost of, valued at the same price the whole holding was quoted at.
+        covered_value = value * basis.covered_qty / position.amount
+        pnl = covered_value - basis.cost_quote
+        entry["pnl_quote"] = str(pnl)
+        entry["pnl_pct"] = str(pnl / basis.cost_quote * 100) if basis.cost_quote > 0 else None
     return {
         "wallet": wallet,
         # Gas is paid in native ETH. Whether this is *enough* is not knowable

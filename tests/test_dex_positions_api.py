@@ -247,3 +247,21 @@ async def test_a_buy_below_the_minimum_order_never_reaches_the_chain(buyable):
                                    json={"quote_amount": "1"}, headers=AUTH)
     assert response.status_code == 422 and "Минимальный ордер" in response.text
     assert not buyable
+
+
+def test_pair_lookup_accepts_both_registry_naming_schemes(monkeypatch):
+    """Pinned tokens keep a bare ticker; discovered ones carry an address suffix."""
+    from app.dex import tokens as registry
+
+    registry.register_dynamic_token("ChatGpt", CHATGPT, 18)
+    pair = dex_positions._pair_for("ChatGpt", CHATGPT)
+    assert pair.base.address == CHATGPT
+    assert pair.symbol.endswith("USDG") and "CHATGPT" in pair.symbol
+
+
+def test_a_ticker_that_resolves_nowhere_is_a_422_not_a_crash():
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as raised:
+        dex_positions._pair_for("NOSUCHCOIN", "0x" + "11" * 20)
+    assert raised.value.status_code == 422

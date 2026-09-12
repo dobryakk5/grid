@@ -99,3 +99,13 @@ async def test_login_throttles_repeated_guesses(configured):
         from app.api import auth_routes
         auth_routes._attempts.clear()
         assert (await http.post("/api/auth/login", json={"password": "hunter2"})).status_code == 200
+
+
+async def test_our_401_carries_no_auth_challenge(configured):
+    # The same origin sits behind nginx basic auth. A challenge header here
+    # makes the browser drop its cached Basic credentials and re-prompt for
+    # the *server* password right after the operator logged in.
+    async with client() as http:
+        response = await http.get("/api/dex/pairs")
+    assert response.status_code == 401
+    assert "www-authenticate" not in response.headers
