@@ -102,6 +102,10 @@ async def test_the_card_joins_flow_market_contract_and_what_was_written(monkeypa
             async with Session() as session:
                 # The model reader is not configured in tests; rules do the work.
                 result = await refresh(session, now_ms=now_ms, http=http, use_llm=False)
+            # A second pass an hour later: two snapshots are what "изменилось с
+            # прошлого прохода" is computed from.
+            async with Session() as session:
+                await refresh(session, now_ms=now_ms + 3600_000, http=http, use_llm=False)
         assert result["tokens"] == 2
         assert result["market"] == 2          # DexScreener for Base, our tape for 4663
         assert result["security"] == 1        # GoPlus answered about one of them
@@ -138,6 +142,13 @@ async def test_the_card_joins_flow_market_contract_and_what_was_written(monkeypa
         assert any("выпуск новых монет" in line["text"] for line in risky)
         assert brett["catalysts"][0]["kinds"] == ["BUYBACK"]
         assert brett["catalysts"][0]["importance"] == "HIGH"
+        # Между проходами цена не менялась, а все сделки случились до первого
+        # снимка -- значит свежего притока нет, и это не то же самое, что «нет
+        # данных»: окно известно.
+        change = brett["movement"]
+        assert change["since_ms"] == now_ms and change["hours"] == 1.0
+        assert float(change["price_change_pct"]) == 0.0
+        assert float(change["net_usd"]) == 0.0 and change["trades"] == 0
 
         pons = cards[PONS]
         assert pons["market"]["source"] == "tape"

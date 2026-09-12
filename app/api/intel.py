@@ -15,6 +15,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Query
 from sqlalchemy import func, select, tuple_
+from sqlalchemy.orm import aliased
 
 from app.core.config import settings
 from app.db.models import (
@@ -25,6 +26,7 @@ from app.db.session import SessionLocal, database_target
 from app.api.fomo_activity import cohort_identities, token_names
 from app.intel import llm
 from app.intel.market import MarketFacts
+from app.intel.movement import movement
 from app.intel.refresh import refresh as run_refresh
 from app.intel.scoring import score
 
@@ -76,25 +78,33 @@ def _facts_from_snapshot(row) -> MarketFacts:
     )
 
 
-async def latest_snapshots(session, keys) -> dict:
-    """The newest snapshot per coin, whenever it was taken.
+async def recent_snapshots(session, keys, *, depth: int = 2) -> dict:
+    """Последние ``depth`` снимков по каждой монете, свежий первым.
 
-    Deliberately not filtered by age: an old reading is shown with its date so
-    the page can say "данные от вчера" rather than show an empty card.
+    Два, а не один: второй — это точка отсчёта для «что изменилось с прошлого
+    прохода». Возраст снимка не фильтруется намеренно — старое измерение
+    показывается со своей датой, а не прячется за пустой карточкой.
     """
     if not keys:
         return {}
-    newest = select(
-        TokenSnapshot.chain_id, TokenSnapshot.token_address,
-        func.max(TokenSnapshot.observed_at_ms).label("observed_at_ms"),
+    ranked = select(
+        TokenSnapshot,
+        func.row_number().over(
+            partition_by=(TokenSnapshot.chain_id, TokenSnapshot.token_address),
+            order_by=TokenSnapshot.observed_at_ms.desc(),
+        ).label("position"),
     ).where(
         tuple_(TokenSnapshot.chain_id, TokenSnapshot.token_address).in_(keys)
-    ).group_by(TokenSnapshot.chain_id, TokenSnapshot.token_address).subquery()
-    rows = (await session.execute(select(TokenSnapshot).join(newest, (
-        TokenSnapshot.chain_id == newest.c.chain_id)
-        & (TokenSnapshot.token_address == newest.c.token_address)
-        & (TokenSnapshot.observed_at_ms == newest.c.observed_at_ms)))).scalars()
-    return {(row.chain_id, row.token_address): row for row in rows}
+    ).subquery()
+    snapshot = aliased(TokenSnapshot, ranked)
+    rows = (await session.execute(
+        select(snapshot).where(ranked.c.position <= depth)
+        .order_by(snapshot.chain_id, snapshot.token_address, snapshot.observed_at_ms.desc())
+    )).scalars()
+    history: dict[tuple[int, str], list] = {}
+    for row in rows:
+        history.setdefault((row.chain_id, row.token_address), []).append(row)
+    return history
 
 
 def _security_facts(row) -> dict:
@@ -186,7 +196,7 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
             by_coin.setdefault((leg.chain_id, leg.token_address), []).append(leg)
         keys = list(by_coin)
         names = await token_names(session, set(keys))
-        snapshots = await latest_snapshots(session, keys)
+        history = await recent_snapshots(session, keys)
         security = {
             (row.chain_id, row.token_address): row
             for row in (await session.execute(select(TokenSecurity).where(
@@ -197,7 +207,9 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
 
     coins = []
     for key, coin_legs in by_coin.items():
-        snapshot = snapshots.get(key)
+        readings = history.get(key) or []
+        snapshot = readings[0] if readings else None
+        previous = readings[1] if len(readings) > 1 else None
         market = _facts_from_snapshot(snapshot) if snapshot is not None else None
         checked = security.get(key)
         facts = _security_facts(checked) if checked is not None else None
@@ -222,6 +234,9 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
                 "checked_at": checked.checked_at, "source": checked.source, "facts": checked.facts,
             } if checked is not None else None,
             "flow": {key_: value for key_, value in flow.items() if key_ != "traders"},
+            # Приток с предыдущего прохода: на суточном окне свежая покупка
+            # неотличима от вчерашней, а решают обычно именно свежие.
+            "movement": movement(snapshot, previous, coin_legs, notes),
             "traders": flow["traders"],
             "catalysts": notes,
             "scores": score(market=market, security=facts, flow=flow,

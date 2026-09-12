@@ -61,6 +61,7 @@ ul.why li.risk{color:var(--bad)}
   <label class="muted">сделки за <select id="hours">
    <option value="6">6 часов</option><option value="24" selected>сутки</option>
    <option value="72">3 дня</option><option value="168">неделю</option></select></label>
+  <button id="preset" aria-pressed="false">Отсеять мусор</button>
   <button id="collect" class="primary">Собрать данные</button>
   <button id="reload">Обновить</button>
  </div>
@@ -78,6 +79,7 @@ ul.why li.risk{color:var(--bad)}
   Это свод фактов, а не рекомендация покупать.
  </p>
  <p id="collected" class="muted" style="margin:8px 0 0"></p>
+<p id="filter" class="muted" style="margin:8px 0 0"></p>
 </section>
 
 <section class="panel" style="padding:0;overflow:hidden"><div class="table-wrap">
@@ -91,6 +93,7 @@ ul.why li.risk{color:var(--bad)}
  <th class="sortable num" data-sort="liquidity">Ликвидность</th>
  <th class="sortable num" data-sort="volume">Объём 24ч</th>
  <th class="sortable num" data-sort="change">6ч</th>
+ <th class="sortable num" data-sort="fresh" title="Что изменилось с предыдущего прохода сбора">С прошлого прохода</th>
  <th class="sortable num" data-sort="catalysts">Тезисы</th>
 </tr></thead><tbody id="rows"></tbody></table></div></section>
 </main>{% include "_auth.html" %}
@@ -104,6 +107,7 @@ const num=(v,d=2)=>v===null||v===undefined?'—':Number(v).toLocaleString('ru-RU
 const usd=v=>{
  if(v===null||v===undefined)return '—';
  const n=Number(v), a=Math.abs(n);
+ if(n===0)return '0 $';
  if(a>=1e9)return (n/1e9).toFixed(1)+' млрд $';
  if(a>=1e6)return (n/1e6).toFixed(1)+' млн $';
  if(a>=1e3)return (n/1e3).toFixed(1)+' тыс $';
@@ -111,6 +115,8 @@ const usd=v=>{
 };
 const pct=v=>v===null||v===undefined?'—':(Number(v)>0?'+':'')+Number(v).toFixed(1)+'%';
 const time=v=>v?new Date(v).toLocaleString('ru-RU'):'—';
+// Интервал между проходами обычно минуты, а не часы: «0.0 ч» ничего не говорит.
+const span=h=>h<1?`${Math.max(1,Math.round(h*60))} мин`:`${h.toFixed(1)} ч`;
 // Красный у риска и зелёный у остальных: у «много риска» и «много качества»
 // противоположный смысл, и одинаковая шкала читалась бы как одинаковая оценка.
 const tone=(v,invert)=>v===null||v===undefined?'var(--muted)'
@@ -119,6 +125,19 @@ const tone=(v,invert)=>v===null||v===undefined?'var(--muted)'
 
 let coins=[], collected={}, sequence=0;
 let sort={key:'momentum',dir:-1};
+let preset=false;
+
+// Пресет намеренно отсекает, а не ранжирует: он снимает с экрана то, что на
+// первых трёх шагах чтения таблицы отсеивается в любом случае. Пороги живут
+// здесь одним списком — и фильтр, и подпись под таблицей читают именно его,
+// поэтому разойтись они не могут.
+const PRESET=[
+ {text:'риск ≤ 35', ok:c=>c.scores.risk<=35},
+ {text:'ликвидность ≥ $200k', ok:c=>Number(c.market?.liquidity_usd??0)>=200000},
+ {text:'контракт проверен', ok:c=>!!c.security},
+ {text:'покупателей из топа ≥ 2', ok:c=>(c.flow.buyers||0)>=2},
+];
+const passes=c=>PRESET.every(rule=>rule.ok(c));
 const open=new Set();
 const keyOf=c=>c.chain_id+':'+c.token_address;
 const label=c=>(c.symbol||c.token_address).toLowerCase();
@@ -130,9 +149,41 @@ const value=(c,key)=>{
  if(key==='volume')return Number(c.market?.volume_h24_usd??-1);
  if(key==='change')return Number(c.market?.change_h6??-1e9);
  if(key==='catalysts')return c.catalysts.length;
+ // Неизвестное («проход был один») уходит вниз при любой сортировке, а не
+ // притворяется нулём между притоком и оттоком.
+ if(key==='fresh')return c.movement?Number(c.movement.net_usd):-Infinity;
  const score=c.scores[key];
  return score===null||score===undefined?-1:score;
 };
+
+function freshCell(c){
+ const m=c.movement;
+ if(!m)return '<span class="muted" title="Снимок рынка пока один — сравнивать не с чем">—</span>';
+ const net=Number(m.net_usd), price=m.price_change_pct===null?null:Number(m.price_change_pct);
+ const flow=m.trades?`<span class="${net>=0?'good':'bad'}">${net>0?'+':''}${usd(net)}</span>`
+  :'<span class="muted">без сделок</span>';
+ const moved=price===null?'':` <span class="muted">${pct(price)}</span>`;
+ const said=m.theses?` <span class="say">✎ ${m.theses}</span>`:'';
+ return `<span title="За ${span(m.hours)} с предыдущего прохода">${flow}${moved}${said}</span>`;
+}
+
+function movementCard(c){
+ const m=c.movement;
+ if(!m)return `<div class="card"><h3>С прошлого прохода</h3>
+ <p class="muted">Снимок рынка пока один. Сравнение появится после следующего прохода сбора.</p></div>`;
+ return `<div class="card"><h3>С прошлого прохода</h3>
+ <dl class="kv">
+  <dt>интервал</dt><dd>${span(m.hours)} · с ${time(m.since_ms)}</dd>
+  <dt>цена</dt><dd>${m.price_change_pct===null?'—':pct(Number(m.price_change_pct))}</dd>
+  <dt>ликвидность</dt><dd>${m.liquidity_change_pct===null?'—':pct(Number(m.liquidity_change_pct))}</dd>
+  <dt>топ купил / продал</dt><dd>${usd(m.buy_usd)} / ${usd(m.sell_usd)}</dd>
+  <dt>сделок топа</dt><dd>${m.trades||'—'}</dd>
+  <dt>новых тезисов</dt><dd>${m.theses||'—'}</dd>
+ </dl>
+ <p class="muted" style="font-size:12px;margin:8px 0 0">Сделки считаются по времени
+ совершения, но попадают сюда только после прохода сборщика FOMO: пустой приток
+ может означать «ещё не импортировано», а не «никто не торговал».</p></div>`;
+}
 
 function scoreCard(title,value,reasons,invert){
  const width=value===null||value===undefined?0:Math.max(2,Math.min(100,value));
@@ -242,7 +293,7 @@ function detail(c){
   ${scoreCard('Импульс',s.momentum,s.reasons.momentum,false)}
   ${scoreCard('Риск',s.risk,s.reasons.risk,true)}
  </div>
- <div class="cards">${marketCard(c)}${securityCard(c)}${tradersCard(c)}</div>
+ <div class="cards">${marketCard(c)}${securityCard(c)}${movementCard(c)}${tradersCard(c)}</div>
  ${thesisBlock(c)}`;
 }
 
@@ -261,16 +312,29 @@ function coinRow(c){
   <td class="num">${usd(c.market?.liquidity_usd)}</td>
   <td class="num">${usd(c.market?.volume_h24_usd)}</td>
   <td class="num ${Number(c.market?.change_h6||0)>=0?'good':'bad'}">${pct(c.market?.change_h6)}</td>
+  <td class="num">${freshCell(c)}</td>
   <td class="num">${c.catalysts.length||'—'}</td>
  </tr>
- ${shown?`<tr class="detail"><td colspan="10">${detail(c)}</td></tr>`:''}`;
+ ${shown?`<tr class="detail"><td colspan="11">${detail(c)}</td></tr>`:''}`;
 }
 
 function render(){
- const list=[...coins].sort((a,b)=>{const x=value(a,sort.key),y=value(b,sort.key);
+ const visible=preset?coins.filter(passes):coins;
+ const list=[...visible].sort((a,b)=>{const x=value(a,sort.key),y=value(b,sort.key);
   return (x<y?-1:x>y?1:0)*sort.dir;});
+ // Подпись показывает не только сколько осталось, но и что именно каждый
+ // порог убрал: «отсеяно 80» без причины — это чёрный ящик.
+ $('filter').innerHTML=preset
+  ? `Пресет: ${PRESET.map(rule=>`${esc(rule.text)} <span class="muted">(−${coins.filter(c=>!rule.ok(c)).length})</span>`).join(' · ')}`
+    + ` — показано ${visible.length} из ${coins.length}`
+  : `Кнопка «Отсеять мусор» скроет то, что отсеивается в любом случае: ${PRESET.map(r=>esc(r.text)).join(', ')}.`;
+ $('preset').setAttribute('aria-pressed',String(preset));
+ $('preset').classList.toggle('primary',preset);
+ $('preset').textContent=preset?'Показать все':'Отсеять мусор';
  $('rows').innerHTML=list.length?list.map(coinRow).join('')
-  :'<tr><td colspan="10" class="empty">Нет монет за выбранный период. Сначала соберите сделки топа на странице «Топ FOMO».</td></tr>';
+  :`<tr><td colspan="11" class="empty">${preset&&coins.length
+    ?'Ни одна монета не прошла пресет. Это тоже ответ: покупать не из чего.'
+    :'Нет монет за выбранный период. Сначала соберите сделки топа на странице «Топ FOMO».'}</td></tr>`;
  document.querySelectorAll('.coins th.sortable').forEach(th=>{
   const on=th.dataset.sort===sort.key;
   th.classList.toggle('sorted',on);
@@ -322,6 +386,7 @@ async function collect(){
 }
 
 $('reload').onclick=load; $('collect').onclick=collect; $('hours').onchange=load;
+$('preset').onclick=()=>{ preset=!preset; render(); };
 document.querySelectorAll('.coins th.sortable').forEach(th=>th.onclick=()=>{
  const key=th.dataset.sort;
  sort=sort.key===key?{key,dir:-sort.dir}:{key,dir:key==='label'?1:-1};
