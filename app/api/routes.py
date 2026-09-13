@@ -1806,6 +1806,8 @@ class LimitOrderPayload(BaseModel):
     # What you hand over: quote coin for a buy, base coin for a sell. Naming
     # it "amount" rather than "amount_quote" keeps that honest.
     amount: Decimal = Field(gt=0)
+    # Only meaningful for a buy; a sale is never gated on liquidity anyway.
+    ignore_liquidity: bool = False
 
 
 @router.post("/fomo/limit-order", dependencies=[Depends(require_trading)])
@@ -1828,19 +1830,19 @@ async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
     except DexConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # A sell hands over base tokens, a buy hands over quote. The floor is a
-    # quote-denominated notional either way, so a sell is measured at its own
-    # limit price rather than waved through.
-    if payload.side == "Buy":
-        amount_in_coin, notional = pair.quote_coin, payload.amount
-    else:
-        amount_in_coin, notional = pair.base_coin, payload.amount * payload.limit_price
-    if notional < settings.dex_min_order_quote:
+    # A sell hands over base tokens, a buy hands over quote.
+    buying = payload.side == "Buy"
+    amount_in_coin = pair.quote_coin if buying else pair.base_coin
+    # The floor applies to opening a position, never to closing one: a holding
+    # too small to be worth its gas is still a holding, and refusing to sell it
+    # strands it for good. Buying into that same size is a choice, and the floor
+    # is what stops it.
+    if buying and payload.amount < settings.dex_min_order_quote:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"minimum order is {settings.dex_min_order_quote} {pair.quote_coin}; "
-                f"this is worth about {notional} {pair.quote_coin}"
+                f"this is worth about {payload.amount} {pair.quote_coin}"
             ),
         )
 
@@ -1853,6 +1855,7 @@ async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
             amount_in=payload.amount,
             amount_in_coin=amount_in_coin,
             order_link_id=str(uuid4()),
+            ignore_liquidity_gate=payload.ignore_liquidity,
         )
         await session.commit()
         intent_id, link_id = intent.id, intent.order_link_id
@@ -1869,6 +1872,7 @@ async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
         "limit_price": str(payload.limit_price),
         "amount_in": str(payload.amount),
         "amount_in_coin": amount_in_coin,
+        "ignore_liquidity": payload.ignore_liquidity,
         "status": "WAITING",
         "dry_run": settings.dex_dry_run,
         "note": (
@@ -1926,13 +1930,15 @@ async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict
         except DexConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        notional = amount if intent.side == "Buy" else amount * limit_price
-        if notional < settings.dex_min_order_quote:
+        # Same asymmetry as arming: an edit may walk a *buy* under the floor,
+        # while a sell of any size stays allowed -- there is no size at which
+        # closing a position becomes the wrong thing to let someone do.
+        if intent.side == "Buy" and amount < settings.dex_min_order_quote:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"minimum order is {settings.dex_min_order_quote} {pair.quote_coin}; "
-                    f"this is worth about {notional} {pair.quote_coin}"
+                    f"this is worth about {amount} {pair.quote_coin}"
                 ),
             )
 

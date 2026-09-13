@@ -38,6 +38,8 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 .icons button svg{width:15px;height:15px;display:block}
 .icons .edit{color:var(--accent)}
 .icons .edit:hover{border-color:var(--accent)}
+.icons .copy{color:var(--muted)}
+.icons .copy:hover{border-color:var(--accent);color:var(--accent)}
 .icons .kill{color:var(--bad)}
 .icons .kill:hover{border-color:var(--bad);background:#2a1519}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;
@@ -45,6 +47,9 @@ dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);bo
 dialog::backdrop{background:rgba(0,0,0,.6)}
 dialog input{background:var(--panel2);color:var(--text);border:1px solid var(--line);
  border-radius:9px;padding:9px;width:100%;margin-top:4px}
+/* A checkbox must not inherit the full-width rule meant for the text fields. */
+.choice{display:flex;align-items:flex-start;gap:8px;margin-bottom:12px;cursor:pointer}
+.choice input[type=checkbox]{width:auto;margin:3px 0 0;flex:none}
 .field{display:block;margin-bottom:12px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
@@ -85,6 +90,19 @@ dialog input{background:var(--panel2);color:var(--text);border:1px solid var(--l
  <button type="button" id="editCancel">Отмена</button>
  <button type="submit" id="editSave">Сохранить</button></div></form></dialog>
 
+<dialog id="copy"><h2 style="margin:0 0 4px;font-size:17px" id="copyTitle">Повторить сделку</h2>
+<p class="muted" id="copyHint" style="margin:0 0 14px;font-size:12px"></p>
+<form id="copyForm">
+<label class="field">Цена лимита<input id="copyPrice" type="text" inputmode="decimal"></label>
+<label class="field">Объём <span class="muted" id="copyCoin"></span>
+ <input id="copyAmount" type="text" inputmode="decimal"></label>
+<label class="choice" id="copyLiqRow"><input type="checkbox" id="copyIgnoreLiq">
+ <span>без ликв — не проверять ликвидность и объём</span></label>
+<p class="bad" id="copyError" style="margin:0 0 10px"></p>
+<div style="display:flex;gap:10px;justify-content:flex-end">
+ <button type="button" id="copyCancel">Отмена</button>
+ <button type="submit" id="copySave">Взвести</button></div></form></dialog>
+
 {% include "_auth.html" %}
 <script>
 const BASE=location.pathname.replace(/\/history(\/.*)?$/,'');
@@ -110,11 +128,16 @@ async function api(path){
 const fomoSlugs={1:'ethereum',56:'bnb',143:'monad',1337:'hyperliquid',4663:'robinhood',
  8453:'base',1399811149:'solana'};
 function coin(o){
+ // The ticker, not the pair key: the address fragment in `AI-2E8C3116USDG`
+ // disambiguates contracts for the registry, and says nothing to a reader.
+ // The full key stays in the tooltip, since that is what the API is
+ // addressed by and what a bug report needs to quote.
+ const name=esc(o.display_symbol||o.symbol);
  const slug=fomoSlugs[o.chain_id];
- if(!slug||!o.token_address)return esc(o.symbol);
+ if(!slug||!o.token_address)return `<span title="${esc(o.symbol)}">${name}</span>`;
  const href=`https://fomo.family/tokens/${slug}/${encodeURIComponent(o.token_address)}`;
  return `<a class="tx" style="font:inherit" href="${esc(href)}" target="_blank"
-  rel="noopener noreferrer" title="Открыть монету на fomo.family">${esc(o.symbol)}</a>`;
+  rel="noopener noreferrer" title="${esc(o.symbol)} · открыть на fomo.family">${name}</a>`;
 }
 
 // Inline SVG rather than a glyph: ✎ and ✕ render at wildly different weights
@@ -123,18 +146,25 @@ const PENCIL='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-
  ' stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L6 12l-2.5.5L4 10z"/></svg>';
 const CROSS='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"'+
  ' stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+const COPY='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"'+
+ ' stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>'+
+ '<path d="M10.5 3.5H3.5a1 1 0 00-1 1v7"/></svg>';
 
 function actions(o){
- // A grid's own level is the grid's to move; the API refuses both actions on
- // one (409), so the row does not offer buttons that cannot work.
- if(o.source==='сетка')return '<span class="muted" title="Уровень принадлежит сетке">—</span>';
+ // Copying never touches the row it copies, so it is offered on every order --
+ // including a filled one, which is the case worth repeating most often.
+ const copy=`<button class="copy" data-copy="${o.id}" title="Повторить эту сделку новым уровнем">${COPY}</button>`;
+ // A grid's own level is the grid's to move; the API refuses to edit or cancel
+ // one (409), so the row does not offer buttons that cannot work. Copying it
+ // into a hand-placed level of your own is still fair game.
+ if(o.source==='сетка')return `<div class="icons">${copy}</div>`;
  // Past WAITING/BLOCKED a nonce may be reserved or a transaction signed, and
  // the API stops allowing either action -- the same window is shown here.
  const live=o.status==='WAITING'||o.status==='BLOCKED';
- if(!live)return '';
+ if(!live)return `<div class="icons">${copy}</div>`;
  const pencil=`<button class="edit" data-edit="${o.id}" title="Изменить цену или объём">${PENCIL}</button>`;
  const cross=`<button class="kill" data-cancel="${o.id}" title="Отменить уровень">${CROSS}</button>`;
- return `<div class="icons">${pencil}${cross}</div>`;
+ return `<div class="icons">${copy}${pencil}${cross}</div>`;
 }
 
 function render(){
@@ -158,7 +188,7 @@ function render(){
   <td class="num muted">${o.gas_quote?num(o.gas_quote,6)+' '+esc(o.gas_quote_coin||''):'—'}</td>
   <td>${o.tx_hash?`<a class="tx" target="_blank" rel="noopener noreferrer"
      href="https://robinhoodchain.blockscout.com/tx/${esc(o.tx_hash)}">${esc(o.tx_hash.slice(0,10))}…</a>`:'<span class="muted">—</span>'}</td>
-  <td>${o.open?actions(o):''}</td>
+  <td>${actions(o)}</td>
  </tr>`).join(''):'<tr><td colspan="11" class="empty">Пока ни одной сделки.</td></tr>';
 }
 
@@ -175,6 +205,8 @@ async function load(){
 let editing=null;
 
 $('rows').onclick=async event=>{
+ const duplicate=event.target.closest('button[data-copy]');
+ if(duplicate)return openCopy(duplicate.dataset.copy);
  const pencil=event.target.closest('button[data-edit]');
  if(pencil)return openEdit(pencil.dataset.edit);
  const button=event.target.closest('button[data-cancel]');
@@ -189,6 +221,52 @@ $('rows').onclick=async event=>{
   if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
   load();
  }catch(e){alert('Не отменён: '+e.message);button.disabled=false;}
+};
+
+let copying=null;
+
+function openCopy(id){
+ const order=orders.find(o=>String(o.id)===String(id));
+ if(!order)return;
+ copying=order;
+ const side=order.side==='Buy'?'Покупка':'Продажа';
+ $('copyTitle').textContent=`${side} ${order.display_symbol||order.symbol}`;
+ // Say what is being copied and what the original actually did: a level that
+ // filled at a different price than it asked for is the case where the
+ // operator most wants to choose between the two numbers.
+ $('copyHint').textContent=`Копия ордера #${order.id} (${order.status}). Новый уровень, `+
+  `старый не меняется.`+
+  (order.fill_price?` Оригинал исполнился по ${num(order.fill_price)}.`:'');
+ $('copyPrice').value=order.limit_price??'';
+ $('copyAmount').value=order.amount_in??'';
+ $('copyCoin').textContent=order.amount_in_coin?`(${order.amount_in_coin})`:'';
+ // A sale is never gated on liquidity, so the waiver is a buy-only choice.
+ $('copyLiqRow').style.display=order.side==='Buy'?'':'none';
+ $('copyIgnoreLiq').checked=order.side==='Buy'&&!!order.ignore_liquidity;
+ $('copyError').textContent='';
+ $('copy').showModal();
+}
+
+$('copyCancel').onclick=()=>{copying=null;$('copy').close();};
+
+$('copyForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(!copying)return;
+ $('copyError').textContent='';
+ const body={symbol:copying.symbol,side:copying.side,
+             limit_price:$('copyPrice').value.trim().replace(',','.'),
+             amount:$('copyAmount').value.trim().replace(',','.')};
+ if(!body.limit_price||!body.amount){$('copyError').textContent='Заполните цену и объём.';return;}
+ if(copying.side==='Buy'&&$('copyIgnoreLiq').checked)body.ignore_liquidity=true;
+ $('copySave').disabled=true;
+ try{
+  const response=await fetch(`${BASE}/api/fomo/limit-order`,
+   {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(result.detail||('HTTP '+response.status));
+  $('copy').close();copying=null;load();
+ }catch(e){$('copyError').textContent=e.message;}
+ finally{$('copySave').disabled=false;}
 };
 
 function openEdit(id){

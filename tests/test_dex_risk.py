@@ -62,3 +62,25 @@ def test_growing_liquidity_is_never_a_reason_to_block():
     baseline = snapshot(liquidity="5100000", volume="1100000")
     current = snapshot(liquidity="9000000", volume="9000000")
     assert evaluate(current, LIMITS, baseline=baseline).ok
+
+
+def test_waiving_liquidity_lets_a_thin_market_through():
+    """The point of the checkbox: a coin below both floors still executes."""
+    thin = snapshot(liquidity="900", volume="120")
+    assert not evaluate(thin, LIMITS).ok
+    assert evaluate(thin, LIMITS, ignore_liquidity=True).ok
+
+
+def test_waiving_liquidity_also_drops_the_collapse_comparison():
+    """Otherwise a waived level blocks anyway the moment the pool thins."""
+    armed = snapshot(liquidity="7500000", volume="8000000")
+    now = snapshot(liquidity="100000", volume="50000")
+    assert not evaluate(now, LIMITS, baseline=armed).ok
+    assert evaluate(now, LIMITS, baseline=armed, ignore_liquidity=True).ok
+
+
+def test_a_pool_with_no_price_is_refused_even_when_liquidity_is_waived():
+    """Not a thin market -- not a market. Nothing can execute against it."""
+    verdict = evaluate(snapshot(price="0"), LIMITS, ignore_liquidity=True)
+    assert not verdict.ok
+    assert any("non-positive price" in reason for reason in verdict.reasons)

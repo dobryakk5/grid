@@ -91,3 +91,14 @@ def test_eth_quoted_pools_match_by_address_now_that_weth_is_known():
     from app.dex.tokens import native_alias_addresses
 
     assert "0x0bd7d308f8e1639fab988df18a8011f41eacad73" in native_alias_addresses()
+
+
+def test_plain_symbol_drops_only_the_address_fragment():
+    from app.dex.tokens import plain_symbol
+
+    assert plain_symbol("ICOIN-5D6EF090") == "ICOIN"
+    assert plain_symbol("PONS") == "PONS"
+    # A dash is legal in a ticker; only an 8-hex tail is the registry's own
+    # disambiguator, and only that may be stripped.
+    assert plain_symbol("AI-AGENT") == "AI-AGENT"
+    assert plain_symbol("") == ""

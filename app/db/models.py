@@ -388,6 +388,11 @@ class DexIntent(Base):
     # compare against (see app/dex/risk.py).
     baseline_liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
     baseline_volume_h24_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 12), nullable=True)
+    # Set when the order was armed with the liquidity gate deliberately waived.
+    # Per-level rather than a setting: waiving the floors for one thin coin is
+    # a decision about that coin, and must not quietly widen to every level
+    # the worker touches afterwards.
+    ignore_liquidity_gate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     blocked_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

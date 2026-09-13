@@ -26,6 +26,7 @@ __all__ = [
     "dynamic_tokens",
     "register_dynamic_token",
     "NATIVE_ADDRESS",
+    "plain_symbol",
     "Token",
     "DexPair",
     "list_pairs",
@@ -236,6 +237,20 @@ def dynamic_key(symbol: str, address: str) -> str:
     # Upper-cased on purpose: resolve_pair() upper-cases the symbol it is
     # given, so a lower-case hex suffix here would never match its own key.
     return f"{clean}-{address.upper().removeprefix('0X')[:8]}"
+
+
+_DYNAMIC_SUFFIX_RE = re.compile(r"-[0-9A-F]{8}$")
+
+
+def plain_symbol(symbol: str) -> str:
+    """``ICOIN-5D6EF090`` -> ``ICOIN``: the ticker a human reads.
+
+    The address fragment exists so a *pair key* is unambiguous, which is a
+    property the registry needs and a reader does not. Strip it only for
+    display -- never to look a pair up again, since that is exactly the
+    ambiguity :func:`dynamic_key` was added to remove.
+    """
+    return _DYNAMIC_SUFFIX_RE.sub("", (symbol or "").strip().upper())
 
 
 def register_dynamic_token(symbol: str, address: str, decimals: int) -> str | None:

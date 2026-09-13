@@ -233,6 +233,9 @@ async def init_db() -> None:
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS gas_quote NUMERIC(38, 18)",
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS gas_quote_coin VARCHAR(24)",
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS native_quote_rate NUMERIC(38, 18)",
+            # Waiving the liquidity floors, recorded per level rather than globally.
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS ignore_liquidity_gate "
+            "BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS parent_intent_id INTEGER REFERENCES dex_intents(id) ON DELETE SET NULL",
             # v4 pool ids are 32 bytes, not a 20-byte address.
             "ALTER TABLE dex_price_observations ALTER COLUMN pair_address TYPE VARCHAR(80)",

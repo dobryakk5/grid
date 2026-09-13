@@ -199,7 +199,14 @@ async def execute_swap(
     progress = _Progress(repository, intent)
 
     snapshot = await market.snapshot(pair)
-    verdict = evaluate(snapshot)
+    # A sale is never gated on liquidity. The floors exist to stop us *entering*
+    # a market too thin to leave; applying them to the leaving is backwards, and
+    # backwards hardest in the case they were written for -- the price reached
+    # our level because the coin is dying, which is the moment the gate would
+    # fire and lock the position in. For a buy the waiver still has to be asked
+    # for, and it travels with the level that was armed with it.
+    waived = selling or (intent is not None and bool(intent.ignore_liquidity_gate))
+    verdict = evaluate(snapshot, ignore_liquidity=waived)
     if not verdict.ok:
         await progress.block("; ".join(verdict.reasons))
         return SwapOutcome(

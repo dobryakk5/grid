@@ -137,13 +137,18 @@ async def test_an_edit_cannot_walk_an_order_under_the_minimum(wired):
     assert wired["level"].amount_in == Decimal(100), "отказ обязан оставить уровень нетронутым"
 
 
-async def test_a_sell_is_measured_at_its_own_new_price(wired):
-    # 30 tokens at 0.2 is 6 USDG -- under the floor, even though 30 > 10.
+async def test_a_sell_is_never_refused_for_being_small(wired):
+    """30 tokens at 0.2 is 6 USDG, under the buy floor -- and allowed anyway.
+
+    There is no size at which closing a position becomes the wrong thing to
+    let someone do; the floor only guards the way in.
+    """
     wired["level"] = _Level(side="Sell", amount_in=Decimal(30), amount_in_coin="PONS")
     async with client() as http:
         response = await http.patch(
             "/api/fomo/limit-order/7", json={"limit_price": "0.2"}, headers=AUTH)
-    assert response.status_code == 422 and "minimum order" in response.text
+    assert response.status_code == 200, response.text
+    assert wired["level"].limit_price == Decimal("0.2")
 
 
 async def test_an_empty_edit_is_refused_rather_than_committed(wired):
@@ -151,3 +156,48 @@ async def test_an_empty_edit_is_refused_rather_than_committed(wired):
         response = await http.patch("/api/fomo/limit-order/7", json={}, headers=AUTH)
     assert response.status_code == 422
     assert not wired["committed"]
+
+
+async def test_arming_carries_the_liquidity_waiver_onto_the_new_level(wired, monkeypatch):
+    """What the copy button needs: a repeat of a waived buy is waived too.
+
+    Without this a copied order silently becomes one that sits in BLOCKED,
+    which is the confusion the checkbox exists to remove.
+    """
+    armed = []
+
+    class Repo:
+        def __init__(self, session):
+            pass
+
+        async def create_level(self, **kwargs):
+            armed.append(kwargs)
+            return type("Intent", (), {"id": 99, "order_link_id": "link"})()
+
+    monkeypatch.setattr(routes, "DexIntentRepository", Repo)
+    async with client() as http:
+        response = await http.post("/api/fomo/limit-order", headers=AUTH, json={
+            "symbol": "PONSUSDG", "side": "Buy", "limit_price": "0.5",
+            "amount": "100", "ignore_liquidity": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_liquidity"] is True
+    assert armed[0]["ignore_liquidity_gate"] is True
+
+
+async def test_arming_without_the_waiver_keeps_the_floors(wired, monkeypatch):
+    armed = []
+
+    class Repo:
+        def __init__(self, session):
+            pass
+
+        async def create_level(self, **kwargs):
+            armed.append(kwargs)
+            return type("Intent", (), {"id": 99, "order_link_id": "link"})()
+
+    monkeypatch.setattr(routes, "DexIntentRepository", Repo)
+    async with client() as http:
+        response = await http.post("/api/fomo/limit-order", headers=AUTH, json={
+            "symbol": "PONSUSDG", "side": "Buy", "limit_price": "0.5", "amount": "100"})
+    assert response.status_code == 200, response.text
+    assert armed[0]["ignore_liquidity_gate"] is False

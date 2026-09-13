@@ -27,7 +27,13 @@ from app.dex.dynamic_tokens import load_dynamic_tokens
 from app.dex.intents import TERMINAL_STATUSES, IntentStatus
 from app.dex.positions import fraction_amount, limit_from_quote, open_positions
 from app.dex.repository import DexIntentRepository
-from app.dex.tokens import DexConfigError, dynamic_key, resolve_pair, resolve_token
+from app.dex.tokens import (
+    DexConfigError,
+    dynamic_key,
+    plain_symbol,
+    resolve_pair,
+    resolve_token,
+)
 from app.dex.uniswap import UniswapClient, UniswapError
 
 router = APIRouter(prefix="/api/dex")
@@ -63,6 +69,11 @@ class BuyRequest(BaseModel):
 
     quote_amount: Decimal = Field(gt=0, max_digits=38, decimal_places=18)
     limit_price: Decimal | None = Field(default=None, gt=0, max_digits=38, decimal_places=18)
+    # Off unless asked for: the floors exist because a pool can be drained
+    # between arming a level and the price reaching it, and the two are usually
+    # the same event. Waiving them is a decision about one coin, so it is
+    # recorded on that order rather than applied to everything afterwards.
+    ignore_liquidity: bool = False
 
 
 async def _known_token(address: str) -> ChainToken:
@@ -376,12 +387,10 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
             await uniswap.close()
 
         proceeds = Decimal(quote.amount_out).scaleb(-resolve_token(QUOTE_SYMBOL).decimals)
-        if proceeds < settings.dex_min_order_quote:
-            raise HTTPException(
-                422,
-                f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}; "
-                f"эта доля стоит около {proceeds} {QUOTE_SYMBOL}",
-            )
+        # No minimum on the way out. The floor is there to stop us opening a
+        # position too small to be worth its gas; refusing to *close* one on
+        # the same grounds strands whatever is already held, and a dust
+        # position is exactly the one an operator most wants gone.
         limit = limit_from_quote(amount, proceeds, settings.dex_max_slippage_pct, side="Sell")
 
         # The router priced the gas for this exact swap; compare the wallet
@@ -396,19 +405,9 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
                 f"Не хватает нативного ETH на газ: нужно примерно "
                 f"{Decimal(gas_wei).scaleb(-18)}, на кошельке {native_balance}",
             )
-    else:
-        # A limit order is deliberately not quoted or gas-checked here: it may
-        # wait days, and both facts will have changed by the time it triggers.
-        # The worker re-checks them at execution. What the order is worth *if*
-        # it fills is known without the router, though, so the minimum still
-        # applies -- a level too small to be executable is not worth arming.
-        asked = amount * limit
-        if asked < settings.dex_min_order_quote:
-            raise HTTPException(
-                422,
-                f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}; "
-                f"эта доля по такой цене даёт около {asked} {QUOTE_SYMBOL}",
-            )
+    # A limit order is deliberately not quoted or gas-checked here: it may wait
+    # days, and both facts will have changed by the time it triggers. The worker
+    # re-checks them at execution, which is the only moment they mean anything.
 
     async with SessionLocal() as session:
         intent = await DexIntentRepository(session).create_level(
@@ -497,6 +496,7 @@ async def buy(payload: BuyRequest, address: str = ADDRESS) -> dict:
             symbol=pair.symbol, side="Buy", limit_price=limit,
             amount_in=payload.quote_amount, amount_in_coin=pair.quote_coin,
             order_link_id=str(uuid4()),
+            ignore_liquidity_gate=payload.ignore_liquidity,
         )
         await session.commit()
         intent_id = intent.id
@@ -506,6 +506,7 @@ async def buy(payload: BuyRequest, address: str = ADDRESS) -> dict:
         "order_type": "market" if payload.limit_price is None else "limit",
         "amount": str(payload.quote_amount), "amount_coin": pair.quote_coin,
         "limit_price": str(limit),
+        "ignore_liquidity": payload.ignore_liquidity,
         "quoted_receive": str(quoted_receive) if quoted_receive is not None else None,
         "status": "WAITING", "dry_run": settings.dex_dry_run,
         "note": (
@@ -546,11 +547,25 @@ async def orders(status: str = "all", limit: int = 200) -> dict:
     # beats a link to the wrong contract on a chain with several per ticker.
     await load_dynamic_tokens(SessionLocal)
     addresses: dict[str, str | None] = {}
+    display: dict[str, str] = {}
     for symbol in {row.symbol for row in rows}:
         try:
-            addresses[symbol] = resolve_pair(symbol).base.address
+            pair = resolve_pair(symbol)
         except DexConfigError:
             addresses[symbol] = None
+            # No pair to read the parts off, so recover them from the key's own
+            # shape: a quote suffix, and possibly an address fragment.
+            bare = symbol.upper()
+            quoted = ""
+            for candidate in ("USDG", "WETH", "ETH"):
+                if bare.endswith(candidate) and len(bare) > len(candidate):
+                    bare, quoted = bare[: -len(candidate)], candidate
+                    break
+            base = plain_symbol(bare)
+            display[symbol] = f"{base}-{quoted}" if quoted else base
+            continue
+        addresses[symbol] = pair.base.address
+        display[symbol] = f"{plain_symbol(pair.base.symbol)}-{pair.quote_coin}"
 
     def money(value):
         return None if value is None else str(value)
@@ -565,6 +580,11 @@ async def orders(status: str = "all", limit: int = 200) -> dict:
         "open": row.status not in TERMINAL_STATUSES,
         # A level with no profile was placed by hand, from a page like this one.
         "source": "сетка" if row.profile_id else "вручную",
+        # The ticker to show. ``symbol`` stays the pair key, because that is
+        # what every other endpoint is addressed by.
+        "display_symbol": display.get(row.symbol, row.symbol),
+        # Carried so a copy of this order can be armed the way this one was.
+        "ignore_liquidity": bool(row.ignore_liquidity_gate),
         "token_address": addresses.get(row.symbol),
         "chain_id": settings.rh_chain_id,
         "limit_price": money(row.limit_price),

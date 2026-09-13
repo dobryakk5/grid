@@ -54,7 +54,7 @@ dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:14px 0}
 .choice{display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;cursor:pointer}
 /* The page-wide `input` rule sets min-width for text fields; a radio inherits
    it and becomes a 220px box with a dot floating in the middle of it. */
-.choice input[type=radio]{margin:3px 0 0;flex:none;width:auto;min-width:0}
+.choice input[type=radio],.choice input[type=checkbox]{margin:3px 0 0;flex:none;width:auto;min-width:0}
 .field{display:block;margin-bottom:10px}
 .field input{width:100%;margin-top:4px}
 dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
@@ -95,6 +95,11 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
  <span>Лимиткой по цене, USDG за штуку
  <input id="buyLimit" type="text" inputmode="decimal" placeholder="например 4.20" disabled
   style="width:100%;margin-top:4px"></span></label>
+<label class="choice" style="margin-top:4px"><input type="checkbox" id="buyIgnoreLiq">
+ <span>без ликв — не проверять ликвидность и объём
+ <span class="muted" style="display:block;font-size:12px">Обычно уровень с тонкой монетой встаёт
+ в BLOCKED и не исполняется. С галочкой эти два гейта не применяются к этому ордеру.</span></span></label>
+<p class="warn" id="buyLiqWarn" style="margin:0 0 10px"></p>
 <p class="warn" id="buyWarn" style="margin:0 0 14px"></p>
 <p class="bad" id="buyError" style="margin:0 0 10px"></p>
 <div style="display:flex;gap:10px;justify-content:flex-end">
@@ -126,6 +131,9 @@ const BASE=location.pathname.replace(/\/positions(\/.*)?$/,'');
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num=(v,d=6)=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
+// `ICOIN-5D6EF090` -> `ICOIN`. The address fragment disambiguates contracts
+// for the registry; it means nothing in a sentence read by a person.
+const ticker=s=>String(s??'').replace(/-[0-9A-F]{8}$/,'');
 // A full 42-character address in a nowrap cell pushes the action buttons off
 // the right edge of the screen; the ends identify the contract and the whole
 // thing stays one hover away.
@@ -315,7 +323,7 @@ $('sellForm').onsubmit=async event=>{
    {method:'POST',body:JSON.stringify(body)});
   $('sell').close();
   alert(`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
-        `${result.amount} ${result.amount_coin} по лимиту ${result.limit_price} USDG за штуку.`+
+        `${result.amount} ${ticker(result.amount_coin)} по лимиту ${result.limit_price} USDG за штуку.`+
         (result.quoted_proceeds?`\nКотировка: ${result.quoted_proceeds} USDG.`:'')+`\n${result.note}`);
   pending=null;load();
  }catch(e){$('sellError').textContent=e.message;}
@@ -326,12 +334,22 @@ function openBuy(address,symbol){
  buying={address,symbol};
  $('buyIntro').textContent=symbol?`${symbol} · ${address}`:address;
  $('buyError').textContent='';$('buyAmount').value='';$('buyLimit').value='';
+ // Off on every open: a waiver granted to one coin must not be inherited by
+ // the next coin the operator happens to click.
+ $('buyIgnoreLiq').checked=false;$('buyLiqWarn').textContent='';
  $('buyForm').buyType.value='market';$('buyLimit').disabled=true;
  $('buyWarn').textContent=state.dry_run
   ?'DEX_DRY_RUN включён — сделка не будет подписана.'
   :'DEX_DRY_RUN выключен — воркер подпишет и отправит эту сделку.';
  $('buy').showModal();
 }
+// Waiving the floors is the one choice here that removes a protection rather
+// than setting a number, so it says out loud what it removes.
+$('buyIgnoreLiq').onchange=()=>{
+ $('buyLiqWarn').textContent=$('buyIgnoreLiq').checked
+  ? 'Гейты ликвидности и объёма сняты для этого ордера. Пул может опустеть до того, как цена дойдёт до уровня — обычно это одно и то же событие.'
+  : '';
+};
 [...document.querySelectorAll('input[name=buyType]')].forEach(radio=>radio.onchange=()=>{
  $('buyLimit').disabled=$('buyForm').buyType.value!=='limit';
  if(!$('buyLimit').disabled)$('buyLimit').focus();
@@ -352,14 +370,16 @@ $('buyForm').onsubmit=async event=>{
   if(!$('buyLimit').value.trim()){$('buyError').textContent='Укажите цену лимитки.';return;}
   body.limit_price=$('buyLimit').value.trim().replace(',','.');
  }
+ if($('buyIgnoreLiq').checked)body.ignore_liquidity=true;
  $('doBuy').disabled=true;
  try{
   const result=await api(`/api/dex/positions/${buying.address}/buy`,
    {method:'POST',body:JSON.stringify(body)});
   $('buy').close();
   alert(`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
-        `${result.amount} ${result.amount_coin} по лимиту ${result.limit_price} USDG за штуку.`+
-        (result.quoted_receive?`\nКотировка: ${result.quoted_receive}.`:'')+`\n${result.note}`);
+        `${result.amount} ${ticker(result.amount_coin)} по лимиту ${result.limit_price} USDG за штуку.`+
+        (result.quoted_receive?`\nКотировка: ${result.quoted_receive}.`:'')+
+        (result.ignore_liquidity?'\nГейты ликвидности и объёма сняты.':'')+`\n${result.note}`);
   buying=null;load();
  }catch(e){$('buyError').textContent=e.message;}
  finally{$('doBuy').disabled=false;}

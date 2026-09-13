@@ -119,7 +119,7 @@ def settings_defaults(monkeypatch):
 
 
 async def buy(*, chain=None, uniswap=None, market=None, limit="0.00025", amount="0.001",
-              dry_run=None, session=None):
+              dry_run=None, session=None, intent=None):
     return await execute_buy(
         session or (LiveSession() if dry_run is False else None),
         symbol="PONSETH",
@@ -129,6 +129,7 @@ async def buy(*, chain=None, uniswap=None, market=None, limit="0.00025", amount=
         uniswap=uniswap or FakeUniswap(),
         market=market or FakeMarket(),
         dry_run=dry_run,
+        intent=intent,
     )
 
 
@@ -139,6 +140,25 @@ async def test_a_dry_run_quotes_but_signs_nothing():
     assert outcome.status == "DRY_RUN"
     assert outcome.amount_out == Decimal("4.5")
     assert uniswap.calls == ["quote"]
+
+
+async def test_a_level_armed_without_the_liquidity_gate_trades_a_thin_pool():
+    """What the «без ликв» checkbox buys: the same pool, quoted instead of blocked."""
+    uniswap = FakeUniswap()
+    waived = type("Intent", (), {"ignore_liquidity_gate": True, "id": 1, "status": "WAITING"})()
+    outcome = await buy(uniswap=uniswap, market=FakeMarket(liquidity="100000"), intent=waived)
+
+    assert outcome.status != IntentStatus.BLOCKED, outcome.reason
+    assert uniswap.calls == ["quote"], "гейт снят -- котировка должна быть запрошена"
+
+
+async def test_a_level_without_the_waiver_still_blocks_on_the_same_pool():
+    """The waiver is per level: an ordinary one keeps its floors."""
+    ordinary = type("Intent", (), {"ignore_liquidity_gate": False, "id": 2, "status": "WAITING"})()
+    outcome = await buy(market=FakeMarket(liquidity="100000"), intent=ordinary)
+
+    assert outcome.status == IntentStatus.BLOCKED
+    assert "liquidity" in outcome.reason
 
 
 async def test_a_collapsing_pool_blocks_before_the_chain_is_touched():
@@ -318,6 +338,30 @@ async def sell(*, chain=None, uniswap=None, market=None, limit="0.00022",
         market=market or FakeMarket(price="0.00023"),
         dry_run=dry_run,
     )
+
+
+async def test_a_sale_is_never_blocked_by_a_drained_pool():
+    """The exit has no gate. Nothing else in this file matters more.
+
+    The floors exist to stop us entering a market too thin to leave. Firing
+    them on the way out locks the position in at exactly the moment the price
+    reached our level *because* the coin is dying -- the case they were
+    written for, turned against us.
+    """
+    uniswap = FakeUniswap(amount_out="23000000000000000")
+    outcome = await sell(uniswap=uniswap,
+                         market=FakeMarket(price="0.00023", liquidity="900", volume="120"))
+
+    assert outcome.status != IntentStatus.BLOCKED, outcome.reason
+    assert uniswap.calls == ["quote"], "продажа обязана быть котирована, а не отброшена"
+
+
+async def test_a_sale_is_still_refused_by_a_pool_that_cannot_price_itself():
+    """Not a thin market -- no market. There is nothing to execute against."""
+    outcome = await sell(market=FakeMarket(price="0", liquidity="900", volume="120"))
+
+    assert outcome.status == IntentStatus.BLOCKED
+    assert "non-positive price" in outcome.reason
 
 
 async def test_a_sell_quotes_when_the_price_rises_to_the_level():

@@ -51,10 +51,12 @@ class DexIntentRepository:
         expires_at: datetime | None = None,
         parent_intent_id: int | None = None,
         retry_count: int = 0,
+        ignore_liquidity_gate: bool = False,
     ) -> DexIntent:
         """Record a level that is now watching for its price."""
         intent = DexIntent(
             profile_id=profile_id,
+            ignore_liquidity_gate=ignore_liquidity_gate,
             order_link_id=order_link_id,
             symbol=symbol,
             side=side,

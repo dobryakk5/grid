@@ -57,29 +57,37 @@ def evaluate(
     limits: RiskLimits | None = None,
     *,
     baseline: MarketSnapshot | None = None,
+    ignore_liquidity: bool = False,
 ) -> RiskVerdict:
     """Absolute floors plus collapse-relative-to-baseline checks.
 
     ``baseline`` is the snapshot stored when the level was armed. Omit it and
     only the absolute floors apply.
+
+    ``ignore_liquidity`` drops every liquidity and volume check -- the floors
+    and the collapse comparisons alike -- for an order whose owner has said,
+    in as many words, that they are buying a thin coin on purpose. It does not
+    drop the price check: a pool that cannot quote a price is not a market with
+    poor liquidity, it is not a market, and no order can execute against it.
     """
     limits = limits or RiskLimits.from_settings()
     reasons: list[str] = []
 
-    if snapshot.token_liquidity_usd < limits.min_liquidity_usd:
-        reasons.append(
-            f"liquidity ${snapshot.token_liquidity_usd:,.0f} "
-            f"< floor ${limits.min_liquidity_usd:,.0f}"
-        )
-    if snapshot.token_volume_h24 < limits.min_volume_h24_usd:
-        reasons.append(
-            f"volume24h ${snapshot.token_volume_h24:,.0f} "
-            f"< floor ${limits.min_volume_h24_usd:,.0f}"
-        )
+    if not ignore_liquidity:
+        if snapshot.token_liquidity_usd < limits.min_liquidity_usd:
+            reasons.append(
+                f"liquidity ${snapshot.token_liquidity_usd:,.0f} "
+                f"< floor ${limits.min_liquidity_usd:,.0f}"
+            )
+        if snapshot.token_volume_h24 < limits.min_volume_h24_usd:
+            reasons.append(
+                f"volume24h ${snapshot.token_volume_h24:,.0f} "
+                f"< floor ${limits.min_volume_h24_usd:,.0f}"
+            )
     if snapshot.price_quote <= 0:
         reasons.append("pool reports a non-positive price")
 
-    if baseline is not None:
+    if baseline is not None and not ignore_liquidity:
         liquidity_drop = _drop_pct(
             baseline.token_liquidity_usd, snapshot.token_liquidity_usd
         )

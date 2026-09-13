@@ -133,15 +133,14 @@ async def test_a_limit_sale_is_armed_at_the_asked_price_without_a_quote(wired, m
     assert wired[0]["limit_price"] == Decimal("12.5")
 
 
-async def test_a_limit_sale_too_small_to_execute_is_refused(wired, monkeypatch):
-    # 2 tokens at 0.01 USDG is 0.02 USDG: the router would never fill it, and
-    # the quote that usually catches dust is not taken for a limit order.
+async def test_a_tiny_limit_sale_is_armed_rather_than_refused(wired, monkeypatch):
+    """2 tokens at 0.01 USDG is 0.02 USDG -- and still the owner's to place."""
     monkeypatch.setattr(dex_positions, "_pair_for", lambda symbol, address: _pair())
     async with client() as http:
         response = await http.post(f"/api/dex/positions/{CHATGPT}/sell",
                                    json={"percent": 25, "limit_price": "0.01"}, headers=AUTH)
-    assert response.status_code == 422 and "Минимальный ордер" in response.text
-    assert not wired
+    assert response.status_code == 200, response.text
+    assert wired[0]["limit_price"] == Decimal("0.01")
 
 
 async def test_a_ticker_pointing_at_another_contract_stops_the_sale(wired, monkeypatch):
@@ -164,7 +163,13 @@ async def test_a_position_the_wallet_does_not_hold_is_not_sellable(wired):
     assert not wired
 
 
-async def test_dust_below_the_minimum_order_is_refused(wired, monkeypatch):
+async def test_dust_is_sellable_however_little_it_is_worth(wired, monkeypatch):
+    """Nothing may stand between a holding and the door.
+
+    The minimum order exists to stop a position being *opened* too small to be
+    worth its gas. Applied to a sale it strands the dust it was meant to
+    prevent -- and dust is what an operator most wants gone.
+    """
     monkeypatch.setattr(dex_positions, "_pair_for", lambda symbol, address: _pair())
     monkeypatch.setattr(dex_positions, "UniswapClient",
                         lambda: FakeUniswap(type("Q", (), {"amount_out": 1_000_000,
@@ -172,8 +177,8 @@ async def test_dust_below_the_minimum_order_is_refused(wired, monkeypatch):
     async with client() as http:
         response = await http.post(f"/api/dex/positions/{CHATGPT}/sell",
                                    json={"percent": 25}, headers=AUTH)
-    assert response.status_code == 422 and "Минимальный ордер" in response.text
-    assert not wired
+    assert response.status_code == 200, response.text
+    assert wired and wired[0]["side"] == "Sell"
 
 
 async def test_a_wallet_that_cannot_pay_the_gas_arms_nothing(wired, monkeypatch):
@@ -397,3 +402,24 @@ def test_a_ticker_that_resolves_nowhere_is_a_422_not_a_crash():
     with pytest.raises(HTTPException) as raised:
         dex_positions._pair_for("NOSUCHCOIN", "0x" + "11" * 20)
     assert raised.value.status_code == 422
+
+
+async def test_a_buy_keeps_the_liquidity_gate_unless_it_is_waived(buyable):
+    """Default off: the floors are what make a drained pool refuse to fill."""
+    async with client() as http:
+        response = await http.post(f"/api/dex/positions/{CHATGPT}/buy",
+                                   json={"quote_amount": "40"}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_liquidity"] is False
+    assert buyable[0]["ignore_liquidity_gate"] is False
+
+
+async def test_a_waived_buy_records_the_waiver_on_the_level(buyable):
+    """Per level, so the worker applies it to this order and no other."""
+    async with client() as http:
+        response = await http.post(
+            f"/api/dex/positions/{CHATGPT}/buy",
+            json={"quote_amount": "40", "ignore_liquidity": True}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_liquidity"] is True
+    assert buyable[0]["ignore_liquidity_gate"] is True

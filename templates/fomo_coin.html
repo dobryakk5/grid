@@ -267,9 +267,14 @@ function renderGate() {
     ? `<span class="muted">ликвидность ${fmtUsd(h.liquidity_usd)} (порог ${fmtUsd(h.min_liquidity_usd)}), `
       + `объём 24ч ${fmtUsd(h.volume_h24_usd)} (порог ${fmtUsd(h.min_volume_h24_usd)})</span>`
     : '';
+  // Selling is never gated on liquidity, so promising a sell it will sit in
+  // BLOCKED would be a lie -- and the most discouraging kind, told to someone
+  // trying to get out of a coin these very numbers say is dying.
+  const outcome = $('tradeSide').value === 'Sell'
+    ? '<span class="good">Продажу это не задерживает — выход гейтами не ограничен.</span>'
+    : '<span class="muted">Уровень поставить можно — он встанет в BLOCKED и будет перепроверяться, пока монета не дорастёт.</span>';
   $('gateStatus').innerHTML =
-    `<span class="bad">✗ не проходит: ${h.reasons.map(esc).join('; ')}</span><br>${detail}`
-    + `<br><span class="muted">Уровень поставить можно — он встанет в BLOCKED и будет перепроверяться, пока монета не дорастёт.</span>`;
+    `<span class="bad">✗ не проходит: ${h.reasons.map(esc).join('; ')}</span><br>${detail}<br>${outcome}`;
 }
 
 function updateQuoteLabel() {
@@ -317,7 +322,7 @@ async function armLevel() {
     : '';
   const word = side === 'Buy' ? 'покупку' : 'продажу';
   const gate = PAIR_HEALTH[symbol];
-  const blocked = gate && !gate.ok
+  const blocked = gate && !gate.ok && side !== 'Sell'
     ? `\n\nПара не проходит риск-гейты (${gate.reasons.join('; ')}).\nУровень встанет в BLOCKED и не исполнится, пока это не изменится.`
     : '';
   if (!confirm(`Взвести ${word} ${symbol}\nпо цене ${limit_price}\nна ${amount_quote} ${$('quoteCoin').textContent}?${blocked}${warning}`)) return;
@@ -335,7 +340,7 @@ async function armLevel() {
 
 $('armBtn').onclick = armLevel;
 $('tradeSymbol').onchange = () => { updateQuoteLabel(); renderGate(); };
-$('tradeSide').onchange = updateQuoteLabel;
+$('tradeSide').onchange = () => { updateQuoteLabel(); renderGate(); };
 $('hours').onchange = load;
 load();
 </script>
