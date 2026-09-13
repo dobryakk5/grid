@@ -42,6 +42,7 @@ class _Level:
         self.limit_price = Decimal("0.5")
         self.amount_in = Decimal(100)
         self.amount_in_coin = "USDG"
+        self.ignore_liquidity_gate = False
         self.__dict__.update(kw)
 
 
@@ -201,3 +202,35 @@ async def test_arming_without_the_waiver_keeps_the_floors(wired, monkeypatch):
             "symbol": "PONSUSDG", "side": "Buy", "limit_price": "0.5", "amount": "100"})
     assert response.status_code == 200, response.text
     assert armed[0]["ignore_liquidity_gate"] is False
+
+
+async def test_an_edit_can_waive_the_liquidity_floors(wired):
+    async with client() as http:
+        response = await http.patch("/api/fomo/limit-order/7",
+                                    json={"ignore_liquidity": True}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_liquidity"] is True
+    assert wired["level"].ignore_liquidity_gate is True
+
+
+async def test_an_edit_can_put_the_floors_back(wired):
+    wired["level"] = _Level(ignore_liquidity_gate=True)
+    async with client() as http:
+        response = await http.patch("/api/fomo/limit-order/7",
+                                    json={"ignore_liquidity": False}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert wired["level"].ignore_liquidity_gate is False
+
+
+async def test_editing_the_price_alone_leaves_an_existing_waiver_alone(wired):
+    """Absent is not False: moving the price must not re-arm the floors.
+
+    A level placed deliberately without them would otherwise start sitting in
+    BLOCKED after an edit that said nothing about liquidity at all.
+    """
+    wired["level"] = _Level(ignore_liquidity_gate=True)
+    async with client() as http:
+        response = await http.patch("/api/fomo/limit-order/7",
+                                    json={"limit_price": "0.6"}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert wired["level"].ignore_liquidity_gate is True

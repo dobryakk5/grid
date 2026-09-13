@@ -79,29 +79,21 @@ dialog input{background:var(--panel2);color:var(--text);border:1px solid var(--l
 </div></section>
 <p class="muted" id="note"></p>
 
-<dialog id="edit"><h2 style="margin:0 0 4px;font-size:17px" id="editTitle">Правка уровня</h2>
-<p class="muted" id="editHint" style="margin:0 0 14px;font-size:12px"></p>
-<form id="editForm">
-<label class="field">Цена лимита<input id="editPrice" type="text" inputmode="decimal"></label>
-<label class="field">Объём <span class="muted" id="editCoin"></span>
- <input id="editAmount" type="text" inputmode="decimal"></label>
-<p class="bad" id="editError" style="margin:0 0 10px"></p>
-<div style="display:flex;gap:10px;justify-content:flex-end">
- <button type="button" id="editCancel">Отмена</button>
- <button type="submit" id="editSave">Сохранить</button></div></form></dialog>
-
-<dialog id="copy"><h2 style="margin:0 0 4px;font-size:17px" id="copyTitle">Повторить сделку</h2>
-<p class="muted" id="copyHint" style="margin:0 0 14px;font-size:12px"></p>
-<form id="copyForm">
-<label class="field">Цена лимита<input id="copyPrice" type="text" inputmode="decimal"></label>
-<label class="field">Объём <span class="muted" id="copyCoin"></span>
- <input id="copyAmount" type="text" inputmode="decimal"></label>
-<label class="choice" id="copyLiqRow"><input type="checkbox" id="copyIgnoreLiq">
+<!-- One form for both jobs. Editing a level and repeating a trade ask for the
+     same three things; two dialogs meant two places for a field to be added to
+     and one of them to be forgotten. -->
+<dialog id="level"><h2 style="margin:0 0 4px;font-size:17px" id="levelTitle"></h2>
+<p class="muted" id="levelHint" style="margin:0 0 14px;font-size:12px"></p>
+<form id="levelForm">
+<label class="field">Цена лимита<input id="levelPrice" type="text" inputmode="decimal"></label>
+<label class="field">Объём <span class="muted" id="levelCoin"></span>
+ <input id="levelAmount" type="text" inputmode="decimal"></label>
+<label class="choice" id="levelLiqRow"><input type="checkbox" id="levelIgnoreLiq">
  <span>без ликв — не проверять ликвидность и объём</span></label>
-<p class="bad" id="copyError" style="margin:0 0 10px"></p>
+<p class="bad" id="levelError" style="margin:0 0 10px"></p>
 <div style="display:flex;gap:10px;justify-content:flex-end">
- <button type="button" id="copyCancel">Отмена</button>
- <button type="submit" id="copySave">Взвести</button></div></form></dialog>
+ <button type="button" id="levelCancel">Отмена</button>
+ <button type="submit" id="levelSave"></button></div></form></dialog>
 
 {% include "_auth.html" %}
 <script>
@@ -206,9 +198,9 @@ let editing=null;
 
 $('rows').onclick=async event=>{
  const duplicate=event.target.closest('button[data-copy]');
- if(duplicate)return openCopy(duplicate.dataset.copy);
+ if(duplicate)return openLevel('copy',duplicate.dataset.copy);
  const pencil=event.target.closest('button[data-edit]');
- if(pencil)return openEdit(pencil.dataset.edit);
+ if(pencil)return openLevel('edit',pencil.dataset.edit);
  const button=event.target.closest('button[data-cancel]');
  if(!button)return;
  const id=button.dataset.cancel;
@@ -223,86 +215,68 @@ $('rows').onclick=async event=>{
  }catch(e){alert('Не отменён: '+e.message);button.disabled=false;}
 };
 
-let copying=null;
+// Both jobs fill the same form: edit moves an existing level, copy arms a new
+// one from an old order's numbers. Only the verbs and the endpoint differ.
+let pending=null;
 
-function openCopy(id){
+// `100.000000000000000000` is what a NUMERIC(38,18) column reads back as, and
+// it is unusable in an input -- the cursor lands eighteen places from the
+// number the operator came to change. Trailing zeros carry no information
+// here; the value is exact either way.
+function trim(value){
+ const text=String(value??'').trim();
+ if(!text.includes('.'))return text;
+ return text.replace(/0+$/,'').replace(/\.$/,'');
+}
+
+function openLevel(mode,id){
  const order=orders.find(o=>String(o.id)===String(id));
  if(!order)return;
- copying=order;
+ pending={mode,order};
  const side=order.side==='Buy'?'Покупка':'Продажа';
- $('copyTitle').textContent=`${side} ${order.display_symbol||order.symbol}`;
- // Say what is being copied and what the original actually did: a level that
- // filled at a different price than it asked for is the case where the
- // operator most wants to choose between the two numbers.
- $('copyHint').textContent=`Копия ордера #${order.id} (${order.status}). Новый уровень, `+
-  `старый не меняется.`+
-  (order.fill_price?` Оригинал исполнился по ${num(order.fill_price)}.`:'');
- $('copyPrice').value=order.limit_price??'';
- $('copyAmount').value=order.amount_in??'';
- $('copyCoin').textContent=order.amount_in_coin?`(${order.amount_in_coin})`:'';
+ const name=order.display_symbol||order.symbol;
+ $('levelTitle').textContent=`${mode==='edit'?'Правка':'Копия'} · ${side} ${name}`;
+ $('levelHint').textContent=mode==='edit'
+  ? `Уровень #${order.id}, статус ${order.status}. `+
+    'Сторона и пара остаются прежними — для другой монеты нужен новый уровень.'
+  : `Копия ордера #${order.id} (${order.status}). Новый уровень, старый не меняется.`+
+    (order.fill_price?` Оригинал исполнился по ${num(order.fill_price)}.`:'');
+ $('levelSave').textContent=mode==='edit'?'Сохранить':'Взвести';
+ $('levelPrice').value=trim(order.limit_price);
+ $('levelAmount').value=trim(order.amount_in);
+ $('levelCoin').textContent=order.amount_in_coin?`(${order.amount_in_coin})`:'';
  // A sale is never gated on liquidity, so the waiver is a buy-only choice.
- $('copyLiqRow').style.display=order.side==='Buy'?'':'none';
- $('copyIgnoreLiq').checked=order.side==='Buy'&&!!order.ignore_liquidity;
- $('copyError').textContent='';
- $('copy').showModal();
+ $('levelLiqRow').style.display=order.side==='Buy'?'':'none';
+ $('levelIgnoreLiq').checked=order.side==='Buy'&&!!order.ignore_liquidity;
+ $('levelError').textContent='';
+ $('level').showModal();
 }
 
-$('copyCancel').onclick=()=>{copying=null;$('copy').close();};
+$('levelCancel').onclick=()=>{pending=null;$('level').close();};
 
-$('copyForm').onsubmit=async event=>{
+$('levelForm').onsubmit=async event=>{
  event.preventDefault();
- if(!copying)return;
- $('copyError').textContent='';
- const body={symbol:copying.symbol,side:copying.side,
-             limit_price:$('copyPrice').value.trim().replace(',','.'),
-             amount:$('copyAmount').value.trim().replace(',','.')};
- if(!body.limit_price||!body.amount){$('copyError').textContent='Заполните цену и объём.';return;}
- if(copying.side==='Buy'&&$('copyIgnoreLiq').checked)body.ignore_liquidity=true;
- $('copySave').disabled=true;
+ if(!pending)return;
+ $('levelError').textContent='';
+ const price=$('levelPrice').value.trim().replace(',','.');
+ const amount=$('levelAmount').value.trim().replace(',','.');
+ if(!price||!amount){$('levelError').textContent='Заполните цену и объём.';return;}
+ const {mode,order}=pending;
+ const waived=order.side==='Buy'&&$('levelIgnoreLiq').checked;
+ const request=mode==='edit'
+  ? {url:`${BASE}/api/fomo/limit-order/${order.id}`,method:'PATCH',
+     body:{limit_price:price,amount,ignore_liquidity:waived}}
+  : {url:`${BASE}/api/fomo/limit-order`,method:'POST',
+     body:{symbol:order.symbol,side:order.side,limit_price:price,amount,ignore_liquidity:waived}};
+ $('levelSave').disabled=true;
  try{
-  const response=await fetch(`${BASE}/api/fomo/limit-order`,
-   {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const response=await fetch(request.url,{method:request.method,
+   headers:{'Content-Type':'application/json'},body:JSON.stringify(request.body)});
   const result=await response.json().catch(()=>({}));
   if(!response.ok)throw new Error(result.detail||('HTTP '+response.status));
-  $('copy').close();copying=null;load();
- }catch(e){$('copyError').textContent=e.message;}
- finally{$('copySave').disabled=false;}
-};
-
-function openEdit(id){
- const order=orders.find(o=>String(o.id)===String(id));
- if(!order)return;
- editing=order;
- $('editTitle').textContent=`${order.side==='Buy'?'Покупка':'Продажа'} ${order.symbol}`;
- $('editHint').textContent=`Уровень #${order.id}, статус ${order.status}. `+
-  'Изменится только цена и объём — сторона и пара остаются прежними.';
- // Plain values, not the ru-RU formatting the table uses: these go back to a
- // Decimal field, which does not read spaces as thousands separators.
- $('editPrice').value=order.limit_price??'';
- $('editAmount').value=order.amount_in??'';
- $('editCoin').textContent=order.amount_in_coin?`(${order.amount_in_coin})`:'';
- $('editError').textContent='';
- $('edit').showModal();
-}
-
-$('editCancel').onclick=()=>{editing=null;$('edit').close();};
-
-$('editForm').onsubmit=async event=>{
- event.preventDefault();
- if(!editing)return;
- $('editError').textContent='';
- const body={limit_price:$('editPrice').value.trim().replace(',','.'),
-             amount:$('editAmount').value.trim().replace(',','.')};
- if(!body.limit_price||!body.amount){$('editError').textContent='Заполните цену и объём.';return;}
- $('editSave').disabled=true;
- try{
-  const response=await fetch(`${BASE}/api/fomo/limit-order/${editing.id}`,
-   {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const result=await response.json().catch(()=>({}));
-  if(!response.ok)throw new Error(result.detail||('HTTP '+response.status));
-  $('edit').close();editing=null;load();
- }catch(e){$('editError').textContent=e.message;}
- finally{$('editSave').disabled=false;}
+  $('level').close();pending=null;load();
+ }catch(e){$('levelError').textContent=e.message;}
+ finally{$('levelSave').disabled=false;}
 };
 
 $('refresh').onclick=load;$('filter').onchange=load;

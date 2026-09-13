@@ -1894,6 +1894,10 @@ class LimitOrderEdit(BaseModel):
 
     limit_price: Decimal | None = Field(default=None, gt=0)
     amount: Decimal | None = Field(default=None, gt=0)
+    # Tri-state on purpose: absent leaves the level's own waiver alone, so an
+    # edit of the price cannot silently re-arm the floors on a level that was
+    # placed without them.
+    ignore_liquidity: bool | None = None
 
 
 @router.patch("/fomo/limit-order/{intent_id}", dependencies=[Depends(require_trading)])
@@ -1908,7 +1912,7 @@ async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict
     The minimum-order floor is re-checked against the *new* numbers, because
     the edit can walk an order under it just as easily as arming one can.
     """
-    if payload.limit_price is None and payload.amount is None:
+    if payload.limit_price is None and payload.amount is None and payload.ignore_liquidity is None:
         raise HTTPException(status_code=422, detail="nothing to change")
 
     await load_dynamic_tokens(SessionLocal)
@@ -1944,7 +1948,10 @@ async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict
 
         intent.limit_price = limit_price
         intent.amount_in = amount
+        if payload.ignore_liquidity is not None:
+            intent.ignore_liquidity_gate = payload.ignore_liquidity
         symbol, side, status = intent.symbol, intent.side, intent.status
+        waived = bool(intent.ignore_liquidity_gate)
         await session.commit()
 
     logger.info(
@@ -1957,6 +1964,7 @@ async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict
         "side": side,
         "limit_price": str(limit_price),
         "amount_in": str(amount),
+        "ignore_liquidity": waived,
         "status": status,
     }
 
