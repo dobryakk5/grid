@@ -540,6 +540,18 @@ async def orders(status: str = "all", limit: int = 200) -> dict:
     async with SessionLocal() as session:
         rows = list((await session.execute(query)).scalars())
 
+    # The pair symbol is all the row stores, but a link to the coin needs its
+    # contract. Resolved once per distinct symbol rather than per row, and left
+    # None where the registry no longer knows the pair -- an unlinked ticker
+    # beats a link to the wrong contract on a chain with several per ticker.
+    await load_dynamic_tokens(SessionLocal)
+    addresses: dict[str, str | None] = {}
+    for symbol in {row.symbol for row in rows}:
+        try:
+            addresses[symbol] = resolve_pair(symbol).base.address
+        except DexConfigError:
+            addresses[symbol] = None
+
     def money(value):
         return None if value is None else str(value)
 
@@ -553,6 +565,8 @@ async def orders(status: str = "all", limit: int = 200) -> dict:
         "open": row.status not in TERMINAL_STATUSES,
         # A level with no profile was placed by hand, from a page like this one.
         "source": "сетка" if row.profile_id else "вручную",
+        "token_address": addresses.get(row.symbol),
+        "chain_id": settings.rh_chain_id,
         "limit_price": money(row.limit_price),
         "amount_in": money(row.amount_in),
         "amount_in_coin": row.amount_in_coin,

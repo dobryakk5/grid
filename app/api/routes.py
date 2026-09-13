@@ -1879,6 +1879,82 @@ async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
     }
 
 
+class LimitOrderEdit(BaseModel):
+    """A new price and/or size for a level that has not started executing.
+
+    Deliberately cannot change ``symbol`` or ``side``: that is not an edit of
+    this order but a different order, and pretending otherwise would keep the
+    original's id, baseline snapshot and audit trail while trading something
+    else entirely. Cancel and arm a new one for that.
+    """
+
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    amount: Decimal | None = Field(default=None, gt=0)
+
+
+@router.patch("/fomo/limit-order/{intent_id}", dependencies=[Depends(require_trading)])
+async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict:
+    """Move a waiting level's price or size without losing the level.
+
+    The guards are the cancel endpoint's, for the same reasons: a grid's own
+    level is not a button's to touch, and past ``WAITING``/``BLOCKED`` a nonce
+    may be reserved or a transaction already signed -- editing the row then
+    would describe something different from what the chain is about to do.
+
+    The minimum-order floor is re-checked against the *new* numbers, because
+    the edit can walk an order under it just as easily as arming one can.
+    """
+    if payload.limit_price is None and payload.amount is None:
+        raise HTTPException(status_code=422, detail="nothing to change")
+
+    await load_dynamic_tokens(SessionLocal)
+    async with SessionLocal() as session:
+        intent = await session.get(DexIntent, intent_id)
+        if intent is None:
+            raise HTTPException(status_code=404, detail="level not found")
+        if intent.profile_id is not None:
+            raise HTTPException(status_code=409, detail="this level belongs to a grid profile")
+        if intent.status not in ("WAITING", "BLOCKED"):
+            raise HTTPException(
+                status_code=409, detail=f"level is {intent.status}, too late to edit"
+            )
+
+        limit_price = payload.limit_price if payload.limit_price is not None else intent.limit_price
+        amount = payload.amount if payload.amount is not None else intent.amount_in
+        try:
+            pair = resolve_pair(intent.symbol)
+        except DexConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        notional = amount if intent.side == "Buy" else amount * limit_price
+        if notional < settings.dex_min_order_quote:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"minimum order is {settings.dex_min_order_quote} {pair.quote_coin}; "
+                    f"this is worth about {notional} {pair.quote_coin}"
+                ),
+            )
+
+        intent.limit_price = limit_price
+        intent.amount_in = amount
+        symbol, side, status = intent.symbol, intent.side, intent.status
+        await session.commit()
+
+    logger.info(
+        "manual limit %s edited: %s %s at %s (intent %s)",
+        side, amount, symbol, limit_price, intent_id,
+    )
+    return {
+        "intent_id": intent_id,
+        "symbol": symbol,
+        "side": side,
+        "limit_price": str(limit_price),
+        "amount_in": str(amount),
+        "status": status,
+    }
+
+
 @router.post("/fomo/limit-order/{intent_id}/cancel", dependencies=[Depends(require_trading)])
 async def fomo_limit_order_cancel(intent_id: int) -> dict:
     async with SessionLocal() as session:

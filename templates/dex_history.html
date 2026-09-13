@@ -31,6 +31,21 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 .tx{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);text-decoration:none}
 .tx:hover{text-decoration:underline}
 .empty{padding:22px 8px;text-align:center;color:var(--muted)}
+/* Two icons in a table cell: square, quiet until hovered, and far enough
+   apart that the destructive one is not hit while aiming for the other. */
+.icons{display:flex;gap:8px}
+.icons button{padding:6px;border-radius:8px;line-height:0;background:#171d2a}
+.icons button svg{width:15px;height:15px;display:block}
+.icons .edit{color:var(--accent)}
+.icons .edit:hover{border-color:var(--accent)}
+.icons .kill{color:var(--bad)}
+.icons .kill:hover{border-color:var(--bad);background:#2a1519}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;
+ padding:20px;max-width:420px}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dialog input{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+ border-radius:9px;padding:9px;width:100%;margin-top:4px}
+.field{display:block;margin-bottom:12px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .tile .label{font-size:11px;color:var(--muted);margin-bottom:4px}
@@ -59,6 +74,17 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 </div></section>
 <p class="muted" id="note"></p>
 
+<dialog id="edit"><h2 style="margin:0 0 4px;font-size:17px" id="editTitle">Правка уровня</h2>
+<p class="muted" id="editHint" style="margin:0 0 14px;font-size:12px"></p>
+<form id="editForm">
+<label class="field">Цена лимита<input id="editPrice" type="text" inputmode="decimal"></label>
+<label class="field">Объём <span class="muted" id="editCoin"></span>
+ <input id="editAmount" type="text" inputmode="decimal"></label>
+<p class="bad" id="editError" style="margin:0 0 10px"></p>
+<div style="display:flex;gap:10px;justify-content:flex-end">
+ <button type="button" id="editCancel">Отмена</button>
+ <button type="submit" id="editSave">Сохранить</button></div></form></dialog>
+
 {% include "_auth.html" %}
 <script>
 const BASE=location.pathname.replace(/\/history(\/.*)?$/,'');
@@ -78,6 +104,39 @@ async function api(path){
  return body;
 }
 
+// FOMO's own URL slugs, the same map the activity page uses -- it writes
+// `bnb` where DexScreener writes `bsc`, so this cannot be derived from the
+// chain name. A chain missing here gets no link rather than a 404.
+const fomoSlugs={1:'ethereum',56:'bnb',143:'monad',1337:'hyperliquid',4663:'robinhood',
+ 8453:'base',1399811149:'solana'};
+function coin(o){
+ const slug=fomoSlugs[o.chain_id];
+ if(!slug||!o.token_address)return esc(o.symbol);
+ const href=`https://fomo.family/tokens/${slug}/${encodeURIComponent(o.token_address)}`;
+ return `<a class="tx" style="font:inherit" href="${esc(href)}" target="_blank"
+  rel="noopener noreferrer" title="Открыть монету на fomo.family">${esc(o.symbol)}</a>`;
+}
+
+// Inline SVG rather than a glyph: ✎ and ✕ render at wildly different weights
+// across platforms, and one of these two buttons destroys an order.
+const PENCIL='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"'+
+ ' stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L6 12l-2.5.5L4 10z"/></svg>';
+const CROSS='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"'+
+ ' stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+
+function actions(o){
+ // A grid's own level is the grid's to move; the API refuses both actions on
+ // one (409), so the row does not offer buttons that cannot work.
+ if(o.source==='сетка')return '<span class="muted" title="Уровень принадлежит сетке">—</span>';
+ // Past WAITING/BLOCKED a nonce may be reserved or a transaction signed, and
+ // the API stops allowing either action -- the same window is shown here.
+ const live=o.status==='WAITING'||o.status==='BLOCKED';
+ if(!live)return '';
+ const pencil=`<button class="edit" data-edit="${o.id}" title="Изменить цену или объём">${PENCIL}</button>`;
+ const cross=`<button class="kill" data-cancel="${o.id}" title="Отменить уровень">${CROSS}</button>`;
+ return `<div class="icons">${pencil}${cross}</div>`;
+}
+
 function render(){
  const filled=orders.filter(o=>o.status==='FILLED');
  const open=orders.filter(o=>o.open);
@@ -88,7 +147,7 @@ function render(){
  $('summary').textContent=`${orders.length} записей`;
  $('rows').innerHTML=orders.length?orders.map(o=>`<tr>
   <td class="muted">${time(o.created_at)}</td>
-  <td><b>${esc(o.symbol)}</b><div class="muted" style="font-size:11px">${esc(o.source)}</div></td>
+  <td><b>${coin(o)}</b><div class="muted" style="font-size:11px">${esc(o.source)}</div></td>
   <td><span class="tag ${o.side==='Buy'?'buy':'sell'}">${o.side==='Buy'?'покупка':'продажа'}</span></td>
   <td><span class="tag ${o.open?'open':''}">${esc(o.status)}</span>${
     o.reason?`<div class="muted" style="font-size:11px;white-space:normal;max-width:260px">${esc(o.reason)}</div>`:''}</td>
@@ -99,7 +158,7 @@ function render(){
   <td class="num muted">${o.gas_quote?num(o.gas_quote,6)+' '+esc(o.gas_quote_coin||''):'—'}</td>
   <td>${o.tx_hash?`<a class="tx" target="_blank" rel="noopener noreferrer"
      href="https://robinhoodchain.blockscout.com/tx/${esc(o.tx_hash)}">${esc(o.tx_hash.slice(0,10))}…</a>`:'<span class="muted">—</span>'}</td>
-  <td>${o.open?`<button data-cancel="${o.id}">Отменить</button>`:''}</td>
+  <td>${o.open?actions(o):''}</td>
  </tr>`).join(''):'<tr><td colspan="11" class="empty">Пока ни одной сделки.</td></tr>';
 }
 
@@ -113,7 +172,11 @@ async function load(){
  finally{$('refresh').disabled=false;}
 }
 
+let editing=null;
+
 $('rows').onclick=async event=>{
+ const pencil=event.target.closest('button[data-edit]');
+ if(pencil)return openEdit(pencil.dataset.edit);
  const button=event.target.closest('button[data-cancel]');
  if(!button)return;
  const id=button.dataset.cancel;
@@ -126,6 +189,42 @@ $('rows').onclick=async event=>{
   if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
   load();
  }catch(e){alert('Не отменён: '+e.message);button.disabled=false;}
+};
+
+function openEdit(id){
+ const order=orders.find(o=>String(o.id)===String(id));
+ if(!order)return;
+ editing=order;
+ $('editTitle').textContent=`${order.side==='Buy'?'Покупка':'Продажа'} ${order.symbol}`;
+ $('editHint').textContent=`Уровень #${order.id}, статус ${order.status}. `+
+  'Изменится только цена и объём — сторона и пара остаются прежними.';
+ // Plain values, not the ru-RU formatting the table uses: these go back to a
+ // Decimal field, which does not read spaces as thousands separators.
+ $('editPrice').value=order.limit_price??'';
+ $('editAmount').value=order.amount_in??'';
+ $('editCoin').textContent=order.amount_in_coin?`(${order.amount_in_coin})`:'';
+ $('editError').textContent='';
+ $('edit').showModal();
+}
+
+$('editCancel').onclick=()=>{editing=null;$('edit').close();};
+
+$('editForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(!editing)return;
+ $('editError').textContent='';
+ const body={limit_price:$('editPrice').value.trim().replace(',','.'),
+             amount:$('editAmount').value.trim().replace(',','.')};
+ if(!body.limit_price||!body.amount){$('editError').textContent='Заполните цену и объём.';return;}
+ $('editSave').disabled=true;
+ try{
+  const response=await fetch(`${BASE}/api/fomo/limit-order/${editing.id}`,
+   {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(result.detail||('HTTP '+response.status));
+  $('edit').close();editing=null;load();
+ }catch(e){$('editError').textContent=e.message;}
+ finally{$('editSave').disabled=false;}
 };
 
 $('refresh').onclick=load;$('filter').onchange=load;
