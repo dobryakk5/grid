@@ -183,6 +183,16 @@ class Settings(BaseSettings):
     # Contract properties change rarely and cost a request each; holders and
     # taxes do drift, so this is a day, not a week.
     intel_security_ttl_hours: float = 24.0
+    # The same GoPlus answer also carries the holder count -- and that is a
+    # measurement, not a property of the contract. Its own, much shorter TTL is
+    # therefore the sampling rate of the holder history: at a day there is no
+    # second point inside an hour, so "держателей за час" could never exist.
+    # The two are not independent, because one request answers both: a coin is
+    # re-asked about once the *shorter* of the two has passed. An hour keeps
+    # the 1h/6h/24h deltas answerable at roughly a hundred requests a day,
+    # comfortably inside what GoPlus serves anonymously. Raise it to sample
+    # less often, at the cost of the narrow windows.
+    intel_holders_ttl_hours: float = 1.0
     # Coins refreshed in one pass, most recently traded by the cohort first.
     intel_max_tokens: int = 120
 

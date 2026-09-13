@@ -24,7 +24,9 @@ button:hover{border-color:#3a4660} button:disabled{opacity:.55;cursor:default}
 .badge{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 .empty{padding:20px 8px;text-align:center;color:var(--muted)}
 .table-wrap{overflow-x:auto}
-table.coins{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:1080px}
+table.coins{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:1540px}
+.sub{display:block;font-size:11px;font-weight:400;margin-top:2px;color:var(--muted)}
+.sub.good{color:var(--good)} .sub.bad{color:var(--bad)}
 .coins th{position:sticky;top:0;z-index:2;background:var(--panel);white-space:nowrap;text-align:left;
  color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
 .coins th,.coins td{border-bottom:1px solid var(--line2);padding:9px 12px;vertical-align:middle}
@@ -45,6 +47,12 @@ ul.why{margin:0;padding-left:18px;color:var(--muted);font-size:12px;line-height:
 ul.why li.risk{color:var(--bad)}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px}
 .kv dt{color:var(--muted)} .kv dd{margin:0;font-variant-numeric:tabular-nums}
+table.mini{width:100%;font-size:12px;border-collapse:collapse;font-variant-numeric:tabular-nums}
+table.mini th{text-align:left;color:var(--muted);font-weight:600;padding:3px 6px 3px 0;font-size:11px}
+table.mini td{padding:3px 6px 3px 0;white-space:nowrap}
+table.mini th.num,table.mini td.num{text-align:right;padding-right:0}
+.flowbars{display:block;width:100%;height:52px;margin:4px 0 2px}
+.flowbars .zero{stroke:var(--line);stroke-width:1}
 .pills{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
 .say{border:1px solid var(--line);border-radius:999px;padding:2px 7px;font-size:10px;color:var(--warn)}
 .thesis{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:10px 12px;margin-top:8px}
@@ -78,6 +86,14 @@ ul.why li.risk{color:var(--bad)}
   «неизвестно» считается отдельно и не выдаётся за «в порядке».
   Это свод фактов, а не рекомендация покупать.
  </p>
+ <p class="muted" style="margin:8px 0 0">
+  Почти каждая колонка — это цифра и под ней та же цифра в окне поуже, потому что
+  одно значение за сутки не отличает оживающую монету от вчерашней. Сильный вывод
+  складывается, когда узкие окна согласны друг с другом: ликвидность есть,
+  объём за час не умер, покупателей несколько, а держателей за сутки стало
+  заметно больше. Одна покупка при мёртвом объёме не доказывает ничего — и на
+  этом экране теперь видно, что именно она не доказывает.
+ </p>
  <p id="collected" class="muted" style="margin:8px 0 0"></p>
 <p id="filter" class="muted" style="margin:8px 0 0"></p>
 </section>
@@ -89,10 +105,13 @@ ul.why li.risk{color:var(--bad)}
  <th class="sortable num" data-sort="momentum">Импульс</th>
  <th class="sortable num" data-sort="risk">Риск</th>
  <th>Поток топа</th>
- <th class="sortable num" data-sort="net">Нетто топа</th>
+ <th class="sortable num" data-sort="net" title="Нетто топа за выбранное окно, снизу — за 6 часов">Нетто топа</th>
+ <th class="sortable num" data-sort="mcap" title="Капитализация, снизу — доля обращения от FDV">Капитализация</th>
  <th class="sortable num" data-sort="liquidity">Ликвидность</th>
- <th class="sortable num" data-sort="volume">Объём 24ч</th>
- <th class="sortable num" data-sort="change">6ч</th>
+ <th class="sortable num" data-sort="volume" title="Объём за сутки, снизу — за 6 часов и за час">Объём</th>
+ <th class="sortable num" data-sort="trades" title="Покупки / продажи рынка за сутки, снизу — за час">Сделки</th>
+ <th class="sortable num" data-sort="holders" title="Держателей сейчас, снизу — прирост за сутки">Держатели</th>
+ <th class="sortable num" data-sort="change" title="Цена за сутки, снизу — за час и за 6 часов">Цена</th>
  <th class="sortable num" data-sort="fresh" title="Что изменилось с предыдущего прохода сбора">С прошлого прохода</th>
  <th class="sortable num" data-sort="catalysts">Тезисы</th>
 </tr></thead><tbody id="rows"></tbody></table></div></section>
@@ -142,12 +161,18 @@ const open=new Set();
 const keyOf=c=>c.chain_id+':'+c.token_address;
 const label=c=>(c.symbol||c.token_address).toLowerCase();
 const netOf=c=>Number(c.flow.buy_usd||0)-Number(c.flow.sell_usd||0);
+const dayHolders=c=>c.holders&&c.holders.windows?c.holders.windows['24']:null;
 const value=(c,key)=>{
  if(key==='label')return label(c);
  if(key==='net')return netOf(c);
+ if(key==='mcap')return Number(c.market?.market_cap_usd??-1);
  if(key==='liquidity')return Number(c.market?.liquidity_usd??-1);
  if(key==='volume')return Number(c.market?.volume_h24_usd??-1);
- if(key==='change')return Number(c.market?.change_h6??-1e9);
+ if(key==='trades')return Number(c.market?.buys_h24??-1)+Number(c.market?.sells_h24??0);
+ // Сортировка по держателям — это сортировка по приросту, а не по их числу:
+ // «у кого их больше» отвечает капитализация, а накопление видно только в дельте.
+ if(key==='holders')return dayHolders(c)?Number(dayHolders(c).change_pct??0):-Infinity;
+ if(key==='change')return Number(c.market?.change_h24??-1e9);
  if(key==='catalysts')return c.catalysts.length;
  // Неизвестное («проход был один») уходит вниз при любой сортировке, а не
  // притворяется нулём между притоком и оттоком.
@@ -205,14 +230,39 @@ function marketCard(c){
  const m=c.market;
  if(!m)return `<div class="card"><h3>Рынок</h3><p class="muted">Данных нет: нажмите «Собрать данные».</p></div>`;
  const tape=m.source==='tape';
+ const cap=m.circulating_pct;
+ // Отношение объёма к ликвидности стоит прямо под обеими цифрами: $190k
+ // оборота — это разное событие в пуле на $82k и в пуле на $8m, а порознь эти
+ // две строки заставляют считать в уме.
+ const turn=m.liquidity_usd&&Number(m.liquidity_usd)>0&&m.volume_h24_usd!==null
+  ?(Number(m.volume_h24_usd)/Number(m.liquidity_usd)).toFixed(1)+'×':null;
+ const count=value=>value===null||value===undefined?'—':num(value,0);
  return `<div class="card"><h3>Рынок</h3>
  <dl class="kv">
   <dt>цена</dt><dd>${usd(m.price_usd)}</dd>
   <dt>изм. 1ч / 6ч / 24ч</dt><dd>${pct(m.change_h1)} / ${pct(m.change_h6)} / ${pct(m.change_h24)}</dd>
-  <dt>капитализация</dt><dd>${usd(m.market_cap_usd)}${m.fdv_usd?` <span class="muted">FDV ${usd(m.fdv_usd)}</span>`:''}</dd>
-  <dt>ликвидность</dt><dd>${usd(m.liquidity_usd)}</dd>
-  <dt>объём 24ч / 6ч</dt><dd>${usd(m.volume_h24_usd)} / ${usd(m.volume_h6_usd)}</dd>
-  <dt>сделок 24ч</dt><dd>${m.buys_h24??'—'} покупок / ${m.sells_h24??'—'} продаж</dd>
+  <dt>капитализация</dt><dd>${usd(m.market_cap_usd)}</dd>
+  <dt>FDV</dt><dd>${usd(m.fdv_usd)}${cap!==null&&cap!==undefined
+    ? ` <span class="muted">в обращении ${Number(cap).toFixed(0)}%</span>`
+    : (m.market_cap_usd&&m.fdv_usd?' <span class="muted">доля не считается: цифры расходятся</span>':'')}</dd>
+  <dt>ликвидность</dt><dd>${usd(m.liquidity_usd)}${turn?` <span class="muted">оборот ${turn}</span>`:''}</dd>
+ </dl>
+ <table class="mini" style="margin-top:10px">
+ <thead><tr><th>окно</th><th class="num">объём</th><th class="num">покупок</th><th class="num">продаж</th><th class="num">доля покупок</th></tr></thead>
+ <tbody>${[['24ч',m.volume_h24_usd,m.buys_h24,m.sells_h24],
+           ['6ч',m.volume_h6_usd,m.buys_h6,m.sells_h6],
+           ['1ч',m.volume_h1_usd,m.buys_h1,m.sells_h1]].map(([name,vol,buys,sells])=>{
+  const total=(buys??null)===null?null:Number(buys)+Number(sells||0);
+  const share=total?Number(buys)/total*100:null;
+  return `<tr><td>${name}</td><td class="num">${usd(vol)}</td>
+   <td class="num">${count(buys)}</td>
+   <td class="num">${count(sells)}</td>
+   <td class="num ${share===null?'muted':share>=50?'good':'bad'}">${share===null?'—':share.toFixed(0)+'%'}</td></tr>`;
+ }).join('')}</tbody></table>
+ <p class="muted" style="font-size:12px;margin:8px 0 0">Рынок отдаёт число сделок по сторонам,
+ но не деньги по сторонам: покупок и продаж <b>в долларах</b> в этом источнике нет ни для одного
+ окна. Долларовый раздел есть только у топа — его сделки мы читаем сами, и он в карточке «Деньги топа».</p>
+ <dl class="kv" style="margin-top:8px">
   <dt>рынку</dt><dd>${m.pair_created_at_ms?Math.round((Date.now()-m.pair_created_at_ms)/86400000)+' дн.':'—'}</dd>
   <dt>снято</dt><dd>${time(m.observed_at_ms)}</dd>
  </dl>
@@ -220,6 +270,101 @@ function marketCard(c){
  объём и число сделок только по отслеживаемым кошелькам, ликвидность и капитализация неизвестны.
  Скринеры эту сеть не индексируют.</p>`
  :'<p class="muted" style="font-size:12px;margin:8px 0 0">Источник — DexScreener, весь рынок монеты.</p>'}</div>`;
+}
+
+function holdersCard(c){
+ const f=(c.security&&c.security.facts)||{};
+ // До второго замера дельт нет, но само число уже известно из проверки
+ // контракта — показывать «—» там, где ответ есть, значит врать об охвате.
+ const h=c.holders||(f.holder_count?{holder_count:Number(f.holder_count),windows:{},samples:0,
+  first_at_ms:null,top10_percent:f.top10_percent,top10_percent_free:f.top10_percent_free}:null);
+ if(!h)return `<div class="card"><h3>Держатели</h3>
+ <p class="muted">Замеров ещё нет. Число держателей приходит вместе с проверкой контракта,
+ и первая дельта появится через проход после первого замера.</p></div>`;
+ const rows=[1,6,24].map(hours=>{
+  const w=h.windows[String(hours)];
+  if(!w)return `<tr><td>${hours}ч</td><td class="num muted" colspan="3">нет базы</td></tr>`;
+  const cls=w.change>0?'good':w.change<0?'bad':'muted';
+  const drift=w.top10_free_change;
+  return `<tr><td>${hours}ч</td>
+   <td class="num ${cls}">${w.change>0?'+':''}${num(w.change,0)}</td>
+   <td class="num ${cls}">${pct(w.change_pct)}</td>
+   <td class="num muted">${drift===null||drift===undefined?'—'
+     :(drift>0?'+':'')+Number(drift).toFixed(1)+' п.п.'}</td></tr>`;
+ }).join('');
+ // Настоящий интервал важнее подписи окна: замеры идут по TTL проверки
+ // контракта, и опорная точка для «24ч» вполне может оказаться 30-часовой.
+ const spans=[1,6,24].map(hours=>h.windows[String(hours)])
+  .filter(Boolean).map(w=>`${w.hours}ч = ${span(w.actual_hours)}`);
+ return `<div class="card"><h3>Держатели</h3>
+ <div class="score"><b>${num(h.holder_count,0)}</b><span class="muted">адресов</span></div>
+ <table class="mini">
+ <thead><tr><th>окно</th><th class="num">прирост</th><th class="num">%</th>
+  <th class="num" title="Насколько выросла свободная доля топ-10 за то же окно">топ-10</th></tr></thead>
+ <tbody>${rows}</tbody></table>
+ <dl class="kv" style="margin-top:8px">
+  <dt>у топ-10</dt><dd>${h.top10_percent?Number(h.top10_percent).toFixed(1)+'%':'—'}
+   ${h.top10_percent_free?`<span class="muted">свободных ${Number(h.top10_percent_free).toFixed(1)}%</span>`:''}</dd>
+  <dt>замеров</dt><dd>${h.samples||'—'}
+   <span class="muted">${h.first_at_ms?'с '+time(h.first_at_ms):'история ещё не пишется'}</span></dd>
+ </dl>
+ ${spans.length?`<p class="muted" style="font-size:12px;margin:8px 0 0">Фактические интервалы: ${spans.join(', ')}.
+ Опорной точкой берётся ближайший замер <i>не позже</i> границы окна, поэтому интервал бывает шире подписи,
+ и тогда здесь стоит настоящий.</p>`:''}
+ <p class="muted" style="font-size:12px;margin:8px 0 0">Новых держателей нельзя нарисовать объёмом:
+ деньги можно гонять между двумя кошельками сколько угодно, число адресов от этого не растёт.</p></div>`;
+}
+
+// Столбики вверх и вниз от нуля, общая шкала на весь ряд. Масштаб намеренно
+// свой у каждой монеты: это ряд про «ровно или всплеском», а не про то, чей
+// приток больше — на общий масштаб ответила бы колонка «Нетто топа».
+function flowBars(series){
+ if(!series||!series.length)return '';
+ const scale=Math.max(...series.map(b=>Math.abs(Number(b.net_usd))),1);
+ const step=100/series.length;
+ const bars=series.map((b,i)=>{
+  const value=Number(b.net_usd);
+  const height=Math.max(Math.abs(value)/scale*46, value?1.5:0.6);
+  const fill=value>0?'var(--good)':value<0?'var(--bad)':'var(--line)';
+  return `<rect x="${(i*step+step*0.15).toFixed(2)}" y="${(value>=0?50-height:50).toFixed(2)}"
+   width="${(step*0.7).toFixed(2)}" height="${height.toFixed(2)}" fill="${fill}"
+   ><title>${time(b.from_ms)} — ${time(b.to_ms)}: нетто ${usd(value)}, сделок ${b.trades}</title></rect>`;
+ }).join('');
+ return `<svg class="flowbars" viewBox="0 0 100 100" preserveAspectRatio="none" role="img"
+  aria-label="Нетто топа по корзинам">${bars}
+  <line class="zero" x1="0" y1="50" x2="100" y2="50" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function flowCard(c){
+ const windows=c.flow_windows||{};
+ const rows=(collected.flow_windows||[1,6,24,72]).map(hours=>{
+  const w=windows[String(hours)];
+  if(!w)return '';
+  const net=Number(w.net_usd);
+  return `<tr><td>${hours}ч</td>
+   <td class="num good">${w.buy_usd?usd(w.buy_usd):'—'}</td>
+   <td class="num bad">${w.sell_usd?usd(w.sell_usd):'—'}</td>
+   <td class="num ${net>0?'good':net<0?'bad':'muted'}">${w.trades?(net>0?'+':'')+usd(net):'—'}</td>
+   <td class="num">${w.buyers} / ${w.sellers}</td>
+   <td class="num muted">${w.trades||'—'}</td></tr>`;
+ }).join('');
+ const series=c.flow_series||[];
+ const depth=collected.history_hours||72;
+ const unpriced=windows['72']?windows['72'].unpriced:0;
+ return `<div class="card"><h3>Деньги топа</h3>
+ <table class="mini">
+ <thead><tr><th>окно</th><th class="num">купили</th><th class="num">продали</th>
+  <th class="num">нетто</th><th class="num" title="Покупателей / продавцов">людей</th>
+  <th class="num">сделок</th></tr></thead>
+ <tbody>${rows}</tbody></table>
+ ${flowBars(series)}
+ <p class="muted" style="font-size:12px;margin:2px 0 0">Нетто по корзинам за ${depth} ч, слева направо.
+ Одна покупка вчера и четыре подряд за сутки дают одну и ту же сумму в строке «24ч»,
+ но это разные новости — ряд показывает, какая из двух.</p>
+ ${unpriced?`<p class="muted" style="font-size:12px;margin:6px 0 0">${unpriced} сторон сделок без USD-оценки:
+ они посчитаны в «сделках», но не в деньгах.</p>`:''}
+ <p class="muted" style="font-size:12px;margin:6px 0 0">Окна вложенные: «24ч» включает «6ч» и «1ч».
+ Покупатели и продавцы считаются по сторонам с оценкой в долларах — так же, как в шапке карточки.</p></div>`;
 }
 
 const DANGER_KEYS=['honeypot','cannot_sell_all','cannot_buy','mintable','freezable','closable',
@@ -248,11 +393,10 @@ function securityCard(c){
  ${bad.length?`<ul class="why">${bad.map(t=>`<li class="risk">${esc(t)}</li>`).join('')}</ul>`
   :'<p class="good" style="margin:0 0 8px">Опасных свойств не найдено.</p>'}
  <dl class="kv" style="margin-top:8px">
-  <dt>держателей</dt><dd>${f.holder_count?num(f.holder_count,0):'—'}</dd>
-  <dt>топ-10</dt><dd>${f.top10_percent?Number(f.top10_percent).toFixed(1)+'%':'—'}
-   ${f.top10_percent_free?`<span class="muted">свободных ${Number(f.top10_percent_free).toFixed(1)}%</span>`:''}</dd>
   <dt>проверено</dt><dd>${time(c.security.checked_at)} <span class="muted">${esc(c.security.source)}</span></dd>
  </dl>
+ <p class="muted" style="font-size:12px;margin:6px 0 0">Держатели и топ-10 — в соседней карточке:
+ это измерения, и у них есть история.</p>
  ${unknown.length?`<p class="muted" style="font-size:12px;margin:8px 0 0">Не удалось определить: ${unknown.length} свойств.</p>`:''}</div>`;
 }
 
@@ -293,12 +437,78 @@ function detail(c){
   ${scoreCard('Импульс',s.momentum,s.reasons.momentum,false)}
   ${scoreCard('Риск',s.risk,s.reasons.risk,true)}
  </div>
- <div class="cards">${marketCard(c)}${securityCard(c)}${movementCard(c)}${tradersCard(c)}</div>
+ <div class="cards">${marketCard(c)}${holdersCard(c)}${flowCard(c)}${securityCard(c)}${movementCard(c)}${tradersCard(c)}</div>
  ${thesisBlock(c)}`;
 }
 
+// Каждая ячейка — цифра и под ней та же цифра в более узком окне. Это не
+// украшение: $190k объёма за сутки при мёртвом последнем часе и те же $190k с
+// растущим часом — разные монеты, а одна колонка «объём 24ч» показывает их
+// одинаково. Узкое окно стоит под широким, чтобы взгляд сначала брал масштаб.
+function netCell(c){
+ // Под нетто за выбранное окно — нетто за окно поуже. Когда выбраны сами
+ // шесть часов, вторая строка съезжает на час: повторять ту же цифру дважды
+ // значит занимать место и ничего не сказать.
+ const net=netOf(c), narrow=Number($('hours').value)<=6?'1':'6';
+ const w=c.flow_windows&&c.flow_windows[narrow];
+ const sub=!w?'—':w.trades?`${narrow}ч ${Number(w.net_usd)>0?'+':''}${usd(w.net_usd)}`:`${narrow}ч тихо`;
+ return `<span class="${net>=0?'good':'bad'}">${usd(net)}</span><span class="sub">${sub}</span>`;
+}
+
+function capCell(c){
+ const m=c.market;
+ if(!m||m.market_cap_usd===null||m.market_cap_usd===undefined)return '<span class="muted">—</span>';
+ // Доля обращения показывается только когда две цифры не спорят: API отдаёт её
+ // тем же правилом, по которому её считает оценка качества.
+ const share=m.circulating_pct;
+ return `${usd(m.market_cap_usd)}<span class="sub">${share!==null&&share!==undefined
+  ?`${Number(share).toFixed(0)}% от FDV`:(m.fdv_usd?`FDV ${usd(m.fdv_usd)}`:'FDV неизвестен')}</span>`;
+}
+
+function volumeCell(c){
+ const m=c.market;
+ if(!m)return '<span class="muted">—</span>';
+ const parts=[];
+ if(m.volume_h6_usd!==null&&m.volume_h6_usd!==undefined)parts.push('6ч '+usd(m.volume_h6_usd));
+ if(m.volume_h1_usd!==null&&m.volume_h1_usd!==undefined)parts.push('1ч '+usd(m.volume_h1_usd));
+ return `${usd(m.volume_h24_usd)}<span class="sub">${parts.join(' · ')||'узких окон нет'}</span>`;
+}
+
+function tradesCell(c){
+ const m=c.market;
+ if(!m||m.buys_h24===null||m.buys_h24===undefined)return '<span class="muted">—</span>';
+ const buys=Number(m.buys_h24), sells=Number(m.sells_h24||0);
+ const share=buys+sells?buys/(buys+sells):null;
+ const hour=m.buys_h1===null||m.buys_h1===undefined?'за час неизвестно'
+  :`1ч ${num(m.buys_h1,0)} / ${num(m.sells_h1,0)}`;
+ return `<span class="${share===null?'':share>=0.5?'good':'bad'}">${num(buys,0)} / ${num(sells,0)}</span>`
+  +`<span class="sub">${hour}</span>`;
+}
+
+function holdersCell(c){
+ const h=c.holders;
+ if(!h)return '<span class="muted" title="Держатели ещё не замерялись">—</span>';
+ const day=h.windows['24'];
+ if(!day)return `${num(h.holder_count,0)}<span class="sub" title="Нужна вторая точка не свежее суточной границы">`
+  +`${h.samples<2?'один замер':'базы за сутки нет'}</span>`;
+ const cls=day.change>0?'good':day.change<0?'bad':'';
+ return `${num(h.holder_count,0)}<span class="sub ${cls}" title="За ${span(day.actual_hours)}">`
+  +`${day.change>0?'+':''}${num(day.change,0)} (${pct(day.change_pct)})</span>`;
+}
+
+function priceCell(c){
+ const m=c.market;
+ if(!m)return '<span class="muted">—</span>';
+ const day=m.change_h24;
+ const parts=[];
+ if(m.change_h1!==null&&m.change_h1!==undefined)parts.push('1ч '+pct(m.change_h1));
+ if(m.change_h6!==null&&m.change_h6!==undefined)parts.push('6ч '+pct(m.change_h6));
+ return `<span class="${Number(day||0)>=0?'good':'bad'}">${pct(day)}</span>`
+  +`<span class="sub">${parts.join(' · ')||'узких окон нет'}</span>`;
+}
+
 function coinRow(c){
- const key=keyOf(c), shown=open.has(key), s=c.scores, net=netOf(c);
+ const key=keyOf(c), shown=open.has(key), s=c.scores;
  const title=c.symbol||(c.token_address.slice(0,10)+'…');
  return `<tr class="coin${shown?' open':''}" data-key="${esc(key)}">
   <td><span class="chev">▶</span> <b>${esc(title)}</b>
@@ -308,14 +518,17 @@ function coinRow(c){
   <td class="num" style="color:${tone(s.momentum,false)}">${s.momentum??'—'}</td>
   <td class="num" style="color:${tone(s.risk,true)}">${s.risk}</td>
   <td>${esc(s.signal)}</td>
-  <td class="num ${net>=0?'good':'bad'}">${usd(net)}</td>
+  <td class="num">${netCell(c)}</td>
+  <td class="num">${capCell(c)}</td>
   <td class="num">${usd(c.market?.liquidity_usd)}</td>
-  <td class="num">${usd(c.market?.volume_h24_usd)}</td>
-  <td class="num ${Number(c.market?.change_h6||0)>=0?'good':'bad'}">${pct(c.market?.change_h6)}</td>
+  <td class="num">${volumeCell(c)}</td>
+  <td class="num">${tradesCell(c)}</td>
+  <td class="num">${holdersCell(c)}</td>
+  <td class="num">${priceCell(c)}</td>
   <td class="num">${freshCell(c)}</td>
   <td class="num">${c.catalysts.length||'—'}</td>
  </tr>
- ${shown?`<tr class="detail"><td colspan="11">${detail(c)}</td></tr>`:''}`;
+ ${shown?`<tr class="detail"><td colspan="14">${detail(c)}</td></tr>`:''}`;
 }
 
 function render(){
@@ -332,7 +545,7 @@ function render(){
  $('preset').classList.toggle('primary',preset);
  $('preset').textContent=preset?'Показать все':'Отсеять мусор';
  $('rows').innerHTML=list.length?list.map(coinRow).join('')
-  :`<tr><td colspan="11" class="empty">${preset&&coins.length
+  :`<tr><td colspan="14" class="empty">${preset&&coins.length
     ?'Ни одна монета не прошла пресет. Это тоже ответ: покупать не из чего.'
     :'Нет монет за выбранный период. Сначала соберите сделки топа на странице «Топ FOMO».'}</td></tr>`;
  document.querySelectorAll('.coins th.sortable').forEach(th=>{

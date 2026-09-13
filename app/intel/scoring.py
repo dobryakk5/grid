@@ -144,7 +144,23 @@ def quality(market, security, *, now_ms: int) -> tuple[int | None, list[str], in
     return value, reasons, unknown
 
 
-def momentum(market, flow, catalysts, *, now_ms: int) -> tuple[int | None, list[str], str]:
+def _holder_window(holders, *, prefer=(6, 24, 1)) -> dict | None:
+    """Первое окно из ``prefer``, у которого вообще есть вторая точка.
+
+    Шесть часов впереди суток намеренно: импульс отвечает на «что происходит
+    сейчас», и суточная дельта на этот вопрос отвечает вчерашней новостью. Но
+    окно, для которого базы нет, не подменяется соседним молча — вместе с
+    цифрой уходит и подпись, за сколько часов она на самом деле набрана.
+    """
+    windows = (holders or {}).get("windows") or {}
+    for hours in prefer:
+        window = windows.get(str(hours))
+        if window:
+            return window
+    return None
+
+
+def momentum(market, flow, catalysts, *, now_ms: int, holders=None) -> tuple[int | None, list[str], str]:
     """What is happening right now, with the cohort's own money weighted first.
 
     The cohort's flow leads because it is the one number here that is measured
@@ -202,6 +218,23 @@ def momentum(market, flow, catalysts, *, now_ms: int) -> tuple[int | None, list[
         price_share = min(_ramp(change_h6, -20, 30), _ramp(200 - change_h6, 0, 100))
         reasons.append(f"цена за 6 ч {change_h6:+.1f}%")
 
+    # Новые держатели -- единственная здешняя цифра, которую нельзя нарисовать
+    # объёмом: деньги гоняются по кругу между двумя кошельками, а количество
+    # адресов от этого не растёт. Поэтому она стоит рядом с потоком, а не
+    # вместо него.
+    holders_share = None
+    window = _holder_window(holders)
+    if window and window.get("change_pct") is not None:
+        hours = window["hours"]
+        # Порог соразмерен окну: +3% держателей за шесть часов и +3% за сутки --
+        # разные события, и одна шкала на оба ранжировала бы их одинаково.
+        ceiling = Decimal(3) if hours <= 6 else Decimal(10)
+        holders_share = _ramp(Decimal(str(window["change_pct"])), 0, ceiling)
+        reasons.append(
+            f"держателей за {window['actual_hours']:.0f} ч {window['change']:+}"
+            f" ({window['change_pct']:+.1f}%)"
+        )
+
     fresh = [item for item in catalysts if now_ms - int(item.get("created_at_ms") or 0) <= DAY_MS]
     catalyst_share = None
     if fresh:
@@ -216,6 +249,7 @@ def momentum(market, flow, catalysts, *, now_ms: int) -> tuple[int | None, list[
         (Decimal(15), market_share),
         (Decimal(10), accel_share),
         (Decimal(10), price_share),
+        (Decimal(15), holders_share),
         (Decimal(10), catalyst_share),
     ])
     signal = "тихо"
@@ -229,7 +263,7 @@ def momentum(market, flow, catalysts, *, now_ms: int) -> tuple[int | None, list[
     return value, reasons, signal
 
 
-def risk(market, security, flow, *, now_ms: int) -> tuple[int, list[dict], int]:
+def risk(market, security, flow, *, now_ms: int, holders=None) -> tuple[int, list[dict], int]:
     """Higher is worse. Unknown is its own penalty, deliberately.
 
     A coin nobody could check is not a safe coin. The penalty for "unchecked"
@@ -305,6 +339,21 @@ def risk(market, security, flow, *, now_ms: int) -> tuple[int, list[dict], int]:
         points += Decimal(12)
         note(f"топ продаёт больше, чем покупает ({_money(sell_usd - buy_usd)} нетто)", Decimal(12))
 
+    # Держатели, уходящие на растущей цене, -- это раздача, и на карточке она
+    # иначе выглядит как импульс: цена вверх, объём есть, поток топа плюсовой.
+    day = ((holders or {}).get("windows") or {}).get("24")
+    if day and day.get("change_pct") is not None:
+        drift = Decimal(str(day["change_pct"]))
+        if drift <= -2:
+            points += Decimal(12)
+            note(f"держателей за {day['actual_hours']:.0f} ч {day['change']:+}"
+                 f" ({drift:+.1f}%)", Decimal(12))
+        concentration = day.get("top10_free_change")
+        if concentration is not None and Decimal(str(concentration)) >= 5:
+            points += Decimal(10)
+            note(f"свободная доля топ-10 выросла на {Decimal(str(concentration)):+.1f} п.п.",
+                 Decimal(10))
+
     change_h24 = _number(getattr(market, "change_h24", None))
     if change_h24 is not None and change_h24 >= 100:
         points += Decimal(10)
@@ -313,13 +362,16 @@ def risk(market, security, flow, *, now_ms: int) -> tuple[int, list[dict], int]:
     return int(min(points, Decimal(100))), reasons, unknown
 
 
-def score(*, market=None, security=None, flow=None, catalysts=None, now_ms: int) -> dict:
+def score(*, market=None, security=None, flow=None, catalysts=None, holders=None,
+          now_ms: int) -> dict:
     """The card's three numbers, their reasons, and how much was unknown."""
     flow = flow or {}
     catalysts = catalysts or []
     quality_value, quality_reasons, quality_unknown = quality(market, security, now_ms=now_ms)
-    momentum_value, momentum_reasons, signal = momentum(market, flow, catalysts, now_ms=now_ms)
-    risk_value, risk_reasons, risk_unknown = risk(market, security, flow, now_ms=now_ms)
+    momentum_value, momentum_reasons, signal = momentum(market, flow, catalysts,
+                                                        now_ms=now_ms, holders=holders)
+    risk_value, risk_reasons, risk_unknown = risk(market, security, flow,
+                                                  now_ms=now_ms, holders=holders)
     return {
         "quality": quality_value,
         "momentum": momentum_value,

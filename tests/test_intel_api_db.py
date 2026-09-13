@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.api import intel as intel_api
 from app.db.models import (
     Base, ChainSwap, FomoActivityLeg, FomoLeaderboardState, FomoThesis, FomoToken,
-    FomoTrader, ThesisEvent, TokenSecurity, TokenSnapshot,
+    FomoTrader, ThesisEvent, TokenHolderSample, TokenSecurity, TokenSnapshot,
 )
 from app.intel.refresh import refresh
 
 TABLES = [FomoActivityLeg, FomoLeaderboardState, FomoThesis, FomoToken, FomoTrader,
-          ThesisEvent, TokenSecurity, TokenSnapshot, ChainSwap]
+          ThesisEvent, TokenHolderSample, TokenSecurity, TokenSnapshot, ChainSwap]
 
 BRETT = "0xbrett"
 PONS = "0xpons"
@@ -31,8 +31,9 @@ DEX_PAIR = {
     "baseToken": {"address": BRETT, "symbol": "BRETT", "name": "Brett"},
     "quoteToken": {"address": "0xusdc", "symbol": "USDC"},
     "priceUsd": "0.0049", "liquidity": {"usd": 2_300_000},
-    "volume": {"h24": 870_000, "h6": 300_000},
-    "txns": {"h24": {"buys": 692, "sells": 838}},
+    "volume": {"h24": 870_000, "h6": 300_000, "h1": 41_000},
+    "txns": {"h24": {"buys": 692, "sells": 838}, "h6": {"buys": 210, "sells": 190},
+             "h1": {"buys": 31, "sells": 18}},
     "priceChange": {"h1": -0.6, "h6": -1.2, "h24": 1.0},
     "marketCap": 48_800_000, "fdv": 48_800_000, "pairCreatedAt": 1_700_000_000_000,
 }
@@ -102,10 +103,14 @@ async def test_the_card_joins_flow_market_contract_and_what_was_written(monkeypa
             async with Session() as session:
                 # The model reader is not configured in tests; rules do the work.
                 result = await refresh(session, now_ms=now_ms, http=http, use_llm=False)
-            # A second pass an hour later: two snapshots are what "изменилось с
-            # прошлого прохода" is computed from.
+            # A second pass two hours later: two snapshots are what "изменилось
+            # с прошлого прохода" is computed from, and two holder samples are
+            # what a holder delta is computed from. Two hours rather than one
+            # because the contract TTL is an hour, and a coin asked about again
+            # at exactly the TTL is not yet stale.
+            GOPLUS["holder_count"] = "903500"
             async with Session() as session:
-                await refresh(session, now_ms=now_ms + 3600_000, http=http, use_llm=False)
+                await refresh(session, now_ms=now_ms + 2 * hour, http=http, use_llm=False)
         assert result["tokens"] == 2
         assert result["market"] == 2          # DexScreener for Base, our tape for 4663
         assert result["security"] == 1        # GoPlus answered about one of them
@@ -146,9 +151,40 @@ async def test_the_card_joins_flow_market_contract_and_what_was_written(monkeypa
         # снимка -- значит свежего притока нет, и это не то же самое, что «нет
         # данных»: окно известно.
         change = brett["movement"]
-        assert change["since_ms"] == now_ms and change["hours"] == 1.0
+        assert change["since_ms"] == now_ms and change["hours"] == 2.0
         assert float(change["price_change_pct"]) == 0.0
         assert float(change["net_usd"]) == 0.0 and change["trades"] == 0
+
+        # Узкие окна доезжают до страницы, а не теряются в снимке.
+        market = brett["market"]
+        assert float(market["volume_h1_usd"]) == 41_000
+        assert (market["buys_h6"], market["sells_h6"]) == (210, 190)
+        assert (market["buys_h1"], market["sells_h1"]) == (31, 18)
+        # Капитализация равна FDV -- значит в обращении всё, и это считается.
+        assert float(market["circulating_pct"]) == 100.0
+
+        # Держатели -- историей: второй ответ GoPlus не затёр первый, и часовая
+        # дельта появилась ровно из двух замеров.
+        trend = brett["holders"]
+        assert trend["holder_count"] == 903_500 and trend["samples"] == 2
+        hour_window = trend["windows"]["1"]
+        # Окно подписано часом, а интервал настоящий -- два: замеры идут по TTL
+        # проверки контракта, и ближе точки просто нет.
+        assert hour_window["change"] == 220 and hour_window["actual_hours"] == 2.0
+        # Шести- и суточного окна нет: история началась два часа назад, и
+        # подменять её часовой цифрой нельзя.
+        assert trend["windows"]["6"] is None and trend["windows"]["24"] is None
+        assert any("держателей за 2 ч +220" in line
+                   for line in brett["scores"]["reasons"]["momentum"])
+
+        # Деньги топа окнами: сутки включают шесть часов, а не стоят рядом.
+        windows = brett["flow_windows"]
+        assert float(windows["6"]["net_usd"]) == 16_000 and windows["6"]["trades"] == 3
+        assert float(windows["24"]["net_usd"]) == 16_000
+        assert windows["1"]["trades"] == 0
+        # Ряд за 72 часа корзинами по шесть часов, пустые корзины сохранены.
+        assert len(brett["flow_series"]) == 12
+        assert sum(bucket["trades"] for bucket in brett["flow_series"]) == 3
 
         pons = cards[PONS]
         assert pons["market"]["source"] == "tape"

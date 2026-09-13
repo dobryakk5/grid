@@ -667,8 +667,13 @@ class TokenSnapshot(Base):
     liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
     volume_h24_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
     volume_h6_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
+    volume_h1_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6), nullable=True)
     buys_h24: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sells_h24: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    buys_h6: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sells_h6: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    buys_h1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sells_h1: Mapped[int | None] = mapped_column(Integer, nullable=True)
     change_m5: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     change_h1: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     change_h6: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
@@ -703,6 +708,35 @@ class TokenSecurity(Base):
     # provider's raw answer stays in `raw` so a re-reading never needs a refetch.
     facts: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class TokenHolderSample(Base):
+    """Держателей у монеты на момент замера — историей, а не одним числом.
+
+    ``token_security`` хранит ровно одну строку на монету и перезаписывается,
+    потому что право эмиссии — свойство контракта, а не измерение. Число
+    держателей — наоборот: это именно измерение, и вопрос «сколько их стало за
+    час» без второй точки не имеет ответа. Поэтому каждый ответ GoPlus, в
+    котором держатели названы, дополнительно ложится сюда отдельной строкой.
+
+    Распределение хранится рядом с числом намеренно: «+300 держателей» и
+    «топ-10 при этом набрали ещё 6%» — это одно событие, и читать их порознь
+    значит видеть приток там, где идёт концентрация.
+    """
+
+    __tablename__ = "token_holder_samples"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_address: Mapped[str] = mapped_column(String(128), primary_key=True)
+    observed_at_ms: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="goplus")
+    holder_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    top10_percent: Mapped[Decimal | None] = mapped_column(Numeric(9, 4), nullable=True)
+    top10_percent_free: Mapped[Decimal | None] = mapped_column(Numeric(9, 4), nullable=True)
+
+    __table_args__ = (
+        Index("ix_token_holder_samples_token_time", "chain_id", "token_address", "observed_at_ms"),
+    )
 
 
 class ThesisEvent(Base):

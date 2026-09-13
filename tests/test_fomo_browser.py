@@ -21,7 +21,11 @@ class Page:
         return next(self.responses)
 
 
-async def test_collects_only_selected_top_thirty_and_sends_no_credentials_to_grid():
+async def test_collects_only_selected_top_thirty_and_sends_no_credentials_to_grid(monkeypatch):
+    from app.core.config import settings
+    # Grid gets its own service token; the FOMO session must never follow it.
+    monkeypatch.delenv("GRID_API_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "auth_service_token", "grid-service-token")
     page = Page([
         {"status": 200, "data": {"leaderboard": [
             {"id": "bob", "rank": 2, "userHandle": "bob"},
@@ -49,7 +53,10 @@ async def test_collects_only_selected_top_thirty_and_sends_no_credentials_to_gri
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         await import_activity(http, "http://localhost:9000/grid", payload)
     assert str(captured[0].url) == "http://localhost:9000/grid/api/fomo/activity/import"
+    assert captured[0].headers["x-grid-token"] == "grid-service-token"
+    # The Authorization slot stays free for nginx's basic auth in front.
     assert "authorization" not in captured[0].headers
+    assert "keep-in-browser" not in str(dict(captured[0].headers))
     assert "keep-in-browser" not in captured[0].content.decode()
     assert "must-not-export" not in json.dumps(payload)
 
@@ -144,20 +151,66 @@ async def test_check_api_reports_the_database_the_server_writes_to():
 
 
 def test_collector_sends_its_service_token_only_when_it_has_one(monkeypatch):
+    from app.core.config import settings
     from app.fomo.browser import api_headers
     monkeypatch.delenv("GRID_API_TOKEN", raising=False)
+    monkeypatch.delenv("GRID_BASIC_AUTH", raising=False)
+    monkeypatch.setattr(settings, "auth_service_token", "")
     assert api_headers() == {}
     monkeypatch.setenv("GRID_API_TOKEN", "  svc  ")
-    assert api_headers() == {"Authorization": "Bearer svc"}
+    # Never in Authorization: that slot belongs to whatever guards the API.
+    assert api_headers() == {"X-Grid-Token": "svc"}
+
+
+def test_basic_auth_credentials_go_where_nginx_expects_them(monkeypatch):
+    from app.fomo.browser import api_headers
+    monkeypatch.setenv("GRID_API_TOKEN", "svc")
+    monkeypatch.setenv("GRID_BASIC_AUTH", "user:secret")
+    headers = api_headers()
+    assert headers["Authorization"] == "Basic dXNlcjpzZWNyZXQ="
+    assert headers["X-Grid-Token"] == "svc"
+
+
+async def test_a_basic_auth_wall_is_not_reported_as_a_wrong_token(monkeypatch):
+    """Two failures, one status code, opposite fixes -- so say which one it is."""
+    monkeypatch.setenv("GRID_API_TOKEN", "svc")
+
+    def nginx(request):
+        return httpx.Response(401, headers={"WWW-Authenticate": 'Basic realm="Mini Grid Bot"'})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(nginx)) as http:
+        with pytest.raises(BrowserSyncError, match="basic-auth"):
+            await check_api(http, "https://lebedeve.ru/grid")
+
+    def app_refuses(request):
+        return httpx.Response(401, json={"detail": "Требуется вход"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(app_refuses)) as http:
+        with pytest.raises(BrowserSyncError, match="AUTH_SERVICE_TOKEN"):
+            await check_api(http, "https://lebedeve.ru/grid")
+
+
+def test_the_token_already_in_env_file_is_used_without_retyping_it(monkeypatch):
+    """The secret is on disk already; asking for it again only risks history."""
+    from app.core.config import settings
+    from app.fomo.browser import api_headers
+    monkeypatch.delenv("GRID_API_TOKEN", raising=False)
+    monkeypatch.delenv("GRID_BASIC_AUTH", raising=False)
+    monkeypatch.setattr(settings, "auth_service_token", " from-dotenv ")
+    assert api_headers() == {"X-Grid-Token": "from-dotenv"}
+    # An explicit variable still wins: that is how one laptop reaches a server
+    # whose token is not the one in its own .env.
+    monkeypatch.setenv("GRID_API_TOKEN", "for-another-server")
+    assert api_headers() == {"X-Grid-Token": "for-another-server"}
 
 
 async def test_a_401_from_grid_names_the_variable_to_set(monkeypatch):
     monkeypatch.setenv("GRID_API_TOKEN", "stale")
 
     async def handle(request):
-        assert request.headers["authorization"] == "Bearer stale"
+        assert request.headers["x-grid-token"] == "stale"
         return httpx.Response(401, json={"detail": "Требуется вход"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
-        with pytest.raises(BrowserSyncError, match="GRID_API_TOKEN"):
+        with pytest.raises(BrowserSyncError, match="AUTH_SERVICE_TOKEN"):
             await check_api(http, "http://localhost:9000")

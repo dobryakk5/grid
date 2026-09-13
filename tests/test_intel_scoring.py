@@ -118,3 +118,64 @@ def test_a_circulating_share_above_the_full_supply_is_dropped_not_shown():
                                fdv_usd=Decimal("9300000000")),
                  security=SAFE, flow=BUYING, now_ms=NOW)
     assert not any("от FDV" in line for line in card["reasons"]["quality"])
+
+
+def holders(**windows):
+    """Готовый ``holder_trend`` с указанными окнами; остальные — без базы."""
+    return {"holder_count": 392, "samples": 9, "observed_at_ms": NOW, "first_at_ms": NOW - DAY,
+            "top10_percent": Decimal("34"), "top10_percent_free": Decimal("21"),
+            "windows": {key: windows.get(key) for key in ("1", "6", "24")}}
+
+
+def window(change, pct, *, hours, top10_free_change=None):
+    return {"hours": hours, "actual_hours": float(hours), "from_ms": NOW - hours * 3600_000,
+            "from_count": 392 - change, "change": change, "change_pct": pct,
+            "top10_free_change": top10_free_change}
+
+
+def test_new_holders_lift_momentum_because_volume_cannot_fake_them():
+    quiet = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                  holders=holders(**{"6": window(1, 0.3, hours=6)}))
+    growing = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                    holders=holders(**{"6": window(22, 6.0, hours=6)}))
+    assert growing["momentum"] > quiet["momentum"]
+    assert any("держателей" in line for line in growing["reasons"]["momentum"])
+
+
+def test_holders_nobody_has_measured_twice_change_no_score_at_all():
+    blind = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW)
+    empty = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW, holders=holders())
+    # Окно без второй точки снимает свой вес со знаменателя, а не приносит ноль:
+    # «мы не мерили» не должно ранжироваться ниже, чем «мерили, и не растёт».
+    assert empty["momentum"] == blind["momentum"]
+    assert not any("держателей" in line for line in empty["reasons"]["momentum"])
+
+
+def test_six_hours_speaks_for_momentum_before_the_day_does():
+    card = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                 holders=holders(**{"6": window(22, 6.0, hours=6),
+                                    "24": window(-9, -2.2, hours=24)}))
+    # Импульс отвечает на «что сейчас», поэтому берёт шесть часов; суточный
+    # отток при этом не теряется — его забирает риск.
+    assert any("за 6 ч +22" in line for line in card["reasons"]["momentum"])
+    assert any("за 24 ч -9" in line["text"] for line in card["reasons"]["risk"])
+
+
+def test_holders_leaving_on_a_rising_price_is_counted_as_risk():
+    steady = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                   holders=holders(**{"24": window(4, 1.0, hours=24)}))
+    draining = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                     holders=holders(**{"24": window(-40, -9.3, hours=24)}))
+    assert draining["risk"] > steady["risk"]
+
+
+def test_a_top10_that_grew_while_holders_did_is_its_own_finding():
+    spread = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                   holders=holders(**{"24": window(34, 9.5, hours=24, top10_free_change=0.4)}))
+    concentrating = score(market=market(), security=SAFE, flow=BUYING, now_ms=NOW,
+                          holders=holders(**{"24": window(34, 9.5, hours=24,
+                                                          top10_free_change=7.0)}))
+    # Тот же приток адресов, но доля топ-10 выросла на 7 п.п. -- это не то же
+    # самое накопление, и одинаковый риск у этих двух случаев был бы враньём.
+    assert concentrating["risk"] > spread["risk"]
+    assert any("топ-10" in line["text"] for line in concentrating["reasons"]["risk"])

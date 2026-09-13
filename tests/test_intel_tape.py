@@ -39,6 +39,28 @@ def test_only_the_window_counts_and_six_hours_is_measured_separately():
     assert facts.buys_h24 == 2
 
 
+def test_the_narrow_windows_are_counted_off_the_same_rows():
+    facts = aggregate_tape([
+        swap(block_time_ms=NOW - 20 * HOUR, value_usd=Decimal("100")),
+        swap(block_time_ms=NOW - 3 * HOUR, value_usd=Decimal("40")),
+        swap(block_time_ms=NOW - HOUR // 2, value_usd=Decimal("25")),
+        swap(block_time_ms=NOW - HOUR // 3, side="SELL", value_usd=Decimal("15")),
+    ], chain_id=4663, now_ms=NOW)[(4663, "0xpons")]
+    assert facts.volume_h6_usd == Decimal("80") and facts.volume_h1_usd == Decimal("40")
+    assert (facts.buys_h6, facts.sells_h6) == (2, 1)
+    assert (facts.buys_h1, facts.sells_h1) == (1, 1)
+
+
+def test_a_silent_hour_is_measured_as_silent_rather_than_left_unknown():
+    facts = aggregate_tape([
+        swap(block_time_ms=NOW - 20 * HOUR, value_usd=Decimal("100")),
+    ], chain_id=4663, now_ms=NOW)[(4663, "0xpons")]
+    # Ноль здесь -- результат просмотра ленты, а не пробел: ставить None значило
+    # бы сказать «мы не знаем» там, где мы как раз посмотрели и не нашли сделок.
+    assert (facts.buys_h1, facts.sells_h1) == (0, 0)
+    assert facts.volume_h1_usd is None
+
+
 def test_an_unpriced_swap_is_still_a_trade_but_not_volume():
     facts = aggregate_tape([
         swap(value_usd=None), swap(side="SELL", value_usd=Decimal("200")),

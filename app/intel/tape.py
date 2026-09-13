@@ -49,22 +49,31 @@ def aggregate_tape(rows, *, chain_id: int, now_ms: int, hours: int = 24) -> dict
     """
     window_start = now_ms - hours * HOUR_MS
     six_hours_ago = now_ms - 6 * HOUR_MS
+    one_hour_ago = now_ms - HOUR_MS
     coins: dict[str, dict] = {}
     for row in rows:
         if row.block_time_ms < window_start:
             continue
         coin = coins.setdefault(row.token_address.lower(), {
-            "buys": 0, "sells": 0, "volume": Decimal(0), "volume_6h": Decimal(0),
+            "buys": 0, "sells": 0, "buys_6h": 0, "sells_6h": 0, "buys_1h": 0, "sells_1h": 0,
+            "volume": Decimal(0), "volume_6h": Decimal(0), "volume_1h": Decimal(0),
             "priced": [], "symbol": None, "unpriced": 0,
         })
         coin["symbol"] = coin["symbol"] or row.symbol
-        coin["buys" if row.side == "BUY" else "sells"] += 1
+        side = "buys" if row.side == "BUY" else "sells"
+        coin[side] += 1
+        if row.block_time_ms >= six_hours_ago:
+            coin[side + "_6h"] += 1
+        if row.block_time_ms >= one_hour_ago:
+            coin[side + "_1h"] += 1
         if row.value_usd is None:
             coin["unpriced"] += 1
         else:
             coin["volume"] += abs(Decimal(row.value_usd))
             if row.block_time_ms >= six_hours_ago:
                 coin["volume_6h"] += abs(Decimal(row.value_usd))
+            if row.block_time_ms >= one_hour_ago:
+                coin["volume_1h"] += abs(Decimal(row.value_usd))
         price = _usd_price(row)
         if price is not None and price > 0:
             coin["priced"].append((row.block_time_ms, price))
@@ -84,8 +93,15 @@ def aggregate_tape(rows, *, chain_id: int, now_ms: int, hours: int = 24) -> dict
             # tape watches wallets, not pools or supply.
             volume_h24_usd=coin["volume"] or None,
             volume_h6_usd=coin["volume_6h"] or None,
+            volume_h1_usd=coin["volume_1h"] or None,
             buys_h24=coin["buys"],
             sells_h24=coin["sells"],
+            # Нули здесь — измерение, а не пробел: за последний час лента
+            # действительно не видела ни одной сделки по этой монете.
+            buys_h6=coin["buys_6h"],
+            sells_h6=coin["sells_6h"],
+            buys_h1=coin["buys_1h"],
+            sells_h1=coin["sells_1h"],
             change_h24=change,
             symbol=coin["symbol"],
         )

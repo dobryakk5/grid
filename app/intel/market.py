@@ -42,8 +42,13 @@ class MarketFacts:
     liquidity_usd: Decimal | None = None
     volume_h24_usd: Decimal | None = None
     volume_h6_usd: Decimal | None = None
+    volume_h1_usd: Decimal | None = None
     buys_h24: int | None = None
     sells_h24: int | None = None
+    buys_h6: int | None = None
+    sells_h6: int | None = None
+    buys_h1: int | None = None
+    sells_h1: int | None = None
     change_m5: Decimal | None = None
     change_h1: Decimal | None = None
     change_h6: Decimal | None = None
@@ -112,8 +117,7 @@ def parse_market(pairs, chain_id: int, address: str) -> MarketFacts | None:
     liquidity = [_decimal(_side(pair, "liquidity").get("usd")) for pair in pools]
     volume_24 = [_decimal(_side(pair, "volume").get("h24")) for pair in pools]
     volume_6 = [_decimal(_side(pair, "volume").get("h6")) for pair in pools]
-    buys = [_int(_side(_side(pair, "txns"), "h24").get("buys")) for pair in pools]
-    sells = [_int(_side(_side(pair, "txns"), "h24").get("sells")) for pair in pools]
+    volume_1 = [_decimal(_side(pair, "volume").get("h1")) for pair in pools]
     created = [_int(pair.get("pairCreatedAt")) for pair in pools]
     change = _side(deepest, "priceChange")
     symbol = base.get("symbol")
@@ -122,6 +126,16 @@ def parse_market(pairs, chain_id: int, address: str) -> MarketFacts | None:
     def total(values):
         known = [value for value in values if value is not None]
         return sum(known) if known else None
+
+    def trades(window: str, side: str):
+        """Trade counts for one window, summed over every pool.
+
+        DexScreener reports counts per window but no per-side *volume*: there
+        is no `buy_usd`/`sell_usd` in the feed. So the market's pressure is
+        readable only as a count ratio here, and the dollar split exists just
+        for the cohort, whose swaps this project measures itself.
+        """
+        return total([_int(_side(_side(pair, "txns"), window).get(side)) for pair in pools])
 
     return MarketFacts(
         chain_id=chain_id,
@@ -133,8 +147,13 @@ def parse_market(pairs, chain_id: int, address: str) -> MarketFacts | None:
         liquidity_usd=total(liquidity),
         volume_h24_usd=total(volume_24),
         volume_h6_usd=total(volume_6),
-        buys_h24=total(buys),
-        sells_h24=total(sells),
+        volume_h1_usd=total(volume_1),
+        buys_h24=trades("h24", "buys"),
+        sells_h24=trades("h24", "sells"),
+        buys_h6=trades("h6", "buys"),
+        sells_h6=trades("h6", "sells"),
+        buys_h1=trades("h1", "buys"),
+        sells_h1=trades("h1", "sells"),
         change_m5=_decimal(change.get("m5")),
         change_h1=_decimal(change.get("h1")),
         change_h6=_decimal(change.get("h6")),

@@ -7,12 +7,15 @@ fake page/transport, without a browser or a FOMO account.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import time
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
+from app.core.auth import OPERATOR_TOKEN_HEADER
+from app.core.config import settings
 from app.fomo.activity import SWAP_FIELDS, normalize_swap, swap_rows
 from app.fomo.schema import normalize_leaderboard
 from app.fomo.theses import public_thesis, thesis_rows
@@ -65,14 +68,28 @@ def validate_base(value: str) -> str:
 
 
 def api_headers() -> dict:
-    """Bearer for the Grid API, or nothing when it has no auth configured.
+    """What the collector puts on a request to the Grid API.
 
-    The collector is a machine caller with no password prompt, so it carries
-    ``AUTH_SERVICE_TOKEN`` (as ``GRID_API_TOKEN``) rather than logging in.
-    Empty is fine and stays fine: an API with no auth configured accepts it.
+    The service token goes in ``X-Grid-Token``, not ``Authorization`` -- for the
+    same reason the pages do it (see ``app.core.auth``): the API commonly sits
+    behind nginx ``auth_basic``, and a ``Bearer`` in the ``Authorization`` slot
+    is not a Basic credential, so nginx answers 401 and the app never sees the
+    request at all. Leaving that slot free is what lets both layers coexist.
+
+    Token sources, in order: ``GRID_API_TOKEN`` from the environment (how a
+    laptop reaches a server whose token differs from its own ``.env``), then
+    ``AUTH_SERVICE_TOKEN`` from the project's settings.
+
+    ``GRID_BASIC_AUTH=user:password`` fills the nginx side when there is one.
+    An SSH tunnel to the API port does the same job without a password on the
+    command line, and is the better habit.
     """
-    token = os.environ.get("GRID_API_TOKEN", "").strip()
-    return {"Authorization": f"Bearer {token}"} if token else {}
+    token = os.environ.get("GRID_API_TOKEN", "").strip() or settings.auth_service_token.strip()
+    headers = {OPERATOR_TOKEN_HEADER: token} if token else {}
+    basic = os.environ.get("GRID_BASIC_AUTH", "").strip()
+    if basic:
+        headers["Authorization"] = "Basic " + base64.b64encode(basic.encode()).decode()
+    return headers
 
 
 async def local_json(http, method: str, url: str, **kwargs):
@@ -84,9 +101,18 @@ async def local_json(http, method: str, url: str, **kwargs):
             "API недоступен. Проверьте FOMO_API_BASE и запустите API/SSH-туннель."
         ) from None
     if response.status_code in (401, 403):
+        # Two different failures wear the same status code, and the fix for one
+        # is useless for the other -- the challenge header says which is which.
+        if response.headers.get("www-authenticate", "").lower().startswith("basic"):
+            raise BrowserSyncError(
+                f"Запрос не дошёл до Grid API: {urlsplit(url).netloc} закрыт "
+                "basic-auth (nginx). Либо GRID_BASIC_AUTH=логин:пароль, либо "
+                "SSH-туннель к порту API и FOMO_API_BASE=http://127.0.0.1:9000."
+            )
         raise BrowserSyncError(
-            "Grid API требует авторизации: передайте GRID_API_TOKEN="
-            "<AUTH_SERVICE_TOKEN из .env сервера>"
+            "Grid API не принял токен. AUTH_SERVICE_TOKEN в .env (или "
+            "GRID_API_TOKEN в окружении) должен совпадать с AUTH_SERVICE_TOKEN "
+            "того сервера, куда идёт импорт."
         )
     if not response.is_success:
         raise BrowserSyncError(f"Grid API: HTTP {response.status_code} ({method} {urlsplit(url).path})")

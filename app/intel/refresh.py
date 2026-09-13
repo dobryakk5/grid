@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.core.config import settings
 from app.db.models import (
     FomoActivityLeg, FomoLeaderboardState, FomoThesis, FomoToken, ThesisEvent,
-    TokenSecurity, TokenSnapshot,
+    TokenHolderSample, TokenSecurity, TokenSnapshot,
 )
 from app.intel import llm
 from app.intel.events import classify
@@ -101,11 +101,26 @@ async def store_names(session, facts) -> int:
     return len(rows)
 
 
-async def stale_security(session, keys) -> list:
-    """Coins whose contract answer is missing or older than the TTL."""
+async def stale_security(session, keys, *, now_ms: int | None = None) -> list:
+    """Coins whose contract answer is missing or older than the TTL.
+
+    Two TTLs, one request. Contract properties are worth re-asking about once a
+    day; the holder count riding in the same answer is a measurement and is
+    worth re-asking about hourly, because a delta needs two points and there is
+    no second point inside an hour otherwise. Since one call answers both, the
+    shorter of the two decides -- asking twice for the same payload would cost
+    a request and learn nothing.
+
+    Reads the pass's own clock rather than the wall clock, like everything else
+    here, so "когда мы спрашивали в прошлый раз" means the same thing to this
+    check and to the samples it produces.
+    """
     if not keys:
         return []
-    fresh_after = datetime.now(timezone.utc) - timedelta(hours=settings.intel_security_ttl_hours)
+    now = datetime.fromtimestamp(now_ms / 1000, timezone.utc) if now_ms is not None \
+        else datetime.now(timezone.utc)
+    fresh_after = now - timedelta(hours=min(settings.intel_security_ttl_hours,
+                                            settings.intel_holders_ttl_hours))
     known = {
         (row.chain_id, row.token_address): row.checked_at
         for row in (await session.execute(select(TokenSecurity).where(
@@ -116,10 +131,11 @@ async def stale_security(session, keys) -> list:
             if known.get(key) is None or known[key] < fresh_after]
 
 
-async def store_security(session, results) -> int:
+async def store_security(session, results, *, now_ms: int | None = None) -> int:
     if not results:
         return 0
-    now = datetime.now(timezone.utc)
+    now = datetime.fromtimestamp(now_ms / 1000, timezone.utc) if now_ms is not None \
+        else datetime.now(timezone.utc)
     rows = [{"chain_id": chain_id, "token_address": address, "source": "goplus",
              "checked_at": now, "facts": {k: str(v) if v is not None else None
                                           for k, v in facts.items()},
@@ -132,7 +148,34 @@ async def store_security(session, results) -> int:
             set_={key: getattr(statement.excluded, key)
                   for key in ("source", "checked_at", "facts", "raw")},
         ))
+    await store_holders(session, results, now_ms=now_ms or int(now.timestamp() * 1000))
     await session.commit()
+    return len(rows)
+
+
+async def store_holders(session, results, *, now_ms: int) -> int:
+    """Тот же ответ GoPlus, но числом держателей — в историю, а не поверх.
+
+    Строка ``token_security`` перезаписывается: право эмиссии — свойство
+    контракта. Держатели перезаписываться не должны, иначе вопрос «сколько их
+    прибавилось за час» навсегда остаётся без ответа. Поэтому каждый ответ, в
+    котором держатели названы, дополнительно ложится отдельным замером.
+
+    Идемпотентно по ``(монета, момент)``: повтор прохода в ту же миллисекунду
+    не создаёт вторую точку и не ломает дельты.
+    """
+    rows = [{"chain_id": chain_id, "token_address": address, "observed_at_ms": now_ms,
+             "source": "goplus", "holder_count": facts["holder_count"],
+             "top10_percent": facts.get("top10_percent"),
+             "top10_percent_free": facts.get("top10_percent_free")}
+            for (chain_id, address), (facts, _raw) in results.items()
+            if facts.get("holder_count")]
+    if not rows:
+        return 0
+    for start in range(0, len(rows), 500):
+        await session.execute(insert(TokenHolderSample)
+                              .values(rows[start:start + 500])
+                              .on_conflict_do_nothing())
     return len(rows)
 
 
@@ -226,9 +269,10 @@ async def refresh(session, *, period: str = "30d", hours: int = 24, now_ms: int,
         result["market"] = await store_market(session, facts, now_ms=now_ms)
         result["named"] = await store_names(session, facts)
 
-        wanted = await stale_security(session, keys)
+        wanted = await stale_security(session, keys, now_ms=now_ms)
         if wanted:
-            result["security"] = await store_security(session, await check_tokens(http, wanted))
+            result["security"] = await store_security(
+                session, await check_tokens(http, wanted), now_ms=now_ms)
     except Exception:
         # A pass is a refresh, not a transaction: whatever was collected before
         # the failure is already committed and useful.

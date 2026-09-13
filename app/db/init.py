@@ -253,6 +253,13 @@ async def init_db() -> None:
                     ALTER TABLE chain_swaps ADD PRIMARY KEY (tx_hash, wallet_address, token_address);
                 END IF;
             END $$;""",
+            # Narrower market windows, added after the card first shipped: an
+            # hour of volume separates "оживает" from "торговалось вчера".
+            "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS volume_h1_usd NUMERIC(38, 6)",
+            "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS buys_h6 INTEGER",
+            "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS sells_h6 INTEGER",
+            "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS buys_h1 INTEGER",
+            "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS sells_h1 INTEGER",
         ):
             await conn.execute(text(statement))
 

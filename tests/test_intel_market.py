@@ -12,8 +12,9 @@ def pair(**overrides):
         "baseToken": {"address": "0xCoIn", "symbol": "COIN", "name": "Coin"},
         "quoteToken": {"address": "0xusdc", "symbol": "USDC"},
         "priceUsd": "0.004", "liquidity": {"usd": 300_000},
-        "volume": {"h24": 1_000_000, "h6": 400_000},
-        "txns": {"h24": {"buys": 900, "sells": 600}},
+        "volume": {"h24": 1_000_000, "h6": 400_000, "h1": 90_000},
+        "txns": {"h24": {"buys": 900, "sells": 600}, "h6": {"buys": 300, "sells": 180},
+                 "h1": {"buys": 52, "sells": 30}},
         "priceChange": {"m5": 0.4, "h1": 2, "h6": 8, "h24": 12},
         "marketCap": 4_100_000, "fdv": 5_000_000, "pairCreatedAt": 1_700_000_000_000,
         **overrides,
@@ -22,7 +23,8 @@ def pair(**overrides):
 
 def test_depth_decides_price_while_the_whole_footprint_is_summed():
     thin = pair(pairAddress="0xthin", liquidity={"usd": 1_000}, priceUsd="0.009",
-                volume={"h24": 50_000, "h6": 10_000}, txns={"h24": {"buys": 10, "sells": 5}},
+                volume={"h24": 50_000, "h6": 10_000, "h1": 2_000},
+                txns={"h24": {"buys": 10, "sells": 5}, "h1": {"buys": 3, "sells": 1}},
                 priceChange={"h6": 400}, pairCreatedAt=1_800_000_000_000)
     facts = parse_market([thin, pair()], 8453, "0xcoin")
     # The deep pool speaks for price and momentum; the decoy still counts as
@@ -31,6 +33,11 @@ def test_depth_decides_price_while_the_whole_footprint_is_summed():
     assert facts.liquidity_usd == Decimal("301000")
     assert facts.volume_h24_usd == Decimal("1050000")
     assert (facts.buys_h24, facts.sells_h24) == (910, 605)
+    assert facts.volume_h1_usd == Decimal("92000")
+    # Узкие окна суммируются так же, как суточное: пул без строки за 6 часов
+    # просто ничего в неё не вносит, а не обнуляет её для всей монеты.
+    assert (facts.buys_h1, facts.sells_h1) == (55, 31)
+    assert (facts.buys_h6, facts.sells_h6) == (300, 180)
     assert facts.pools == 2
     # The oldest pool is the coin's age; a newer pool is a migration.
     assert facts.pair_created_at_ms == 1_700_000_000_000

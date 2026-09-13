@@ -20,11 +20,12 @@ from sqlalchemy.orm import aliased
 from app.core.config import settings
 from app.db.models import (
     FomoActivityLeg, FomoLeaderboardState, FomoThesis, FomoToken, ThesisEvent,
-    TokenSecurity, TokenSnapshot,
+    TokenHolderSample, TokenSecurity, TokenSnapshot,
 )
 from app.db.session import SessionLocal, database_target
 from app.api.fomo_activity import cohort_identities, token_names
 from app.intel import llm
+from app.intel.history import FLOW_WINDOWS, flow_series, flow_windows, holder_trend
 from app.intel.market import MarketFacts
 from app.intel.movement import movement
 from app.intel.refresh import refresh as run_refresh
@@ -33,6 +34,13 @@ from app.intel.scoring import score
 router = APIRouter(prefix="/api/intel")
 
 HOUR_MS = 3600_000
+#: Как далеко назад читается поток топа независимо от выбранного окна.
+#: Три дня — минимум, на котором «покупают подряд» отличается от «купили раз».
+HISTORY_HOURS = 72
+#: Сколько истории держателей поднимается ради суточной дельты. С запасом:
+#: опорной точке для «за 24 часа» разрешено быть старше 24 часов, и тогда
+#: интервал показывается настоящий, а не заявленный.
+HOLDER_HISTORY_HOURS = 48
 
 
 def _now_ms() -> int:
@@ -67,12 +75,73 @@ def flow_of(legs, identities) -> dict:
     return flow
 
 
+def _market_row(snapshot) -> dict | None:
+    """Снимок рынка как его читает страница — включая узкие окна.
+
+    Час стоит рядом с шестью и сутками не для полноты: объём за сутки при
+    мёртвом последнем часе и тот же объём с растущим часом — это две разные
+    монеты, а одна колонка «объём 24ч» показывает их одинаково.
+    """
+    if snapshot is None:
+        return None
+    row = {
+        "source": snapshot.source, "observed_at_ms": snapshot.observed_at_ms,
+        "price_usd": snapshot.price_usd, "market_cap_usd": snapshot.market_cap_usd,
+        "fdv_usd": snapshot.fdv_usd, "liquidity_usd": snapshot.liquidity_usd,
+        "volume_h24_usd": snapshot.volume_h24_usd, "volume_h6_usd": snapshot.volume_h6_usd,
+        "volume_h1_usd": snapshot.volume_h1_usd,
+        "buys_h24": snapshot.buys_h24, "sells_h24": snapshot.sells_h24,
+        "buys_h6": snapshot.buys_h6, "sells_h6": snapshot.sells_h6,
+        "buys_h1": snapshot.buys_h1, "sells_h1": snapshot.sells_h1,
+        "change_h1": snapshot.change_h1, "change_h6": snapshot.change_h6,
+        "change_h24": snapshot.change_h24,
+        "pair_created_at_ms": snapshot.pair_created_at_ms,
+    }
+    return {**row, "circulating_pct": circulating_pct(row)}
+
+
+def circulating_pct(market) -> Decimal | None:
+    """Доля обращения от FDV, и только когда две цифры не спорят друг с другом.
+
+    Тот же отбор, что и в ``scoring.quality``: DexScreener считает FDV по пулу,
+    а капитализацию по токену, поэтому пара может дать «в обращении 130%». Это
+    расхождение двух чисел, а не факт о предложении, и показывать его нельзя —
+    иначе экран и оценка сказали бы разное об одной монете.
+    """
+    if market is None:
+        return None
+    cap, fdv = market.get("market_cap_usd"), market.get("fdv_usd")
+    if not cap or not fdv or Decimal(fdv) <= 0:
+        return None
+    cap, fdv = Decimal(cap), Decimal(fdv)
+    if cap > fdv * Decimal("1.05"):
+        return None
+    return min(cap / fdv, Decimal(1)) * 100
+
+
+async def holder_samples(session, keys, *, since_ms: int) -> dict:
+    """Замеры держателей по каждой монете, от старого к свежему."""
+    if not keys:
+        return {}
+    rows = (await session.execute(select(TokenHolderSample).where(
+        tuple_(TokenHolderSample.chain_id, TokenHolderSample.token_address).in_(keys),
+        TokenHolderSample.observed_at_ms >= since_ms,
+    ).order_by(TokenHolderSample.observed_at_ms))).scalars()
+    history: dict[tuple[int, str], list] = {}
+    for row in rows:
+        history.setdefault((row.chain_id, row.token_address), []).append(row)
+    return history
+
+
 def _facts_from_snapshot(row) -> MarketFacts:
     return MarketFacts(
         chain_id=row.chain_id, token_address=row.token_address, source=row.source,
         price_usd=row.price_usd, market_cap_usd=row.market_cap_usd, fdv_usd=row.fdv_usd,
         liquidity_usd=row.liquidity_usd, volume_h24_usd=row.volume_h24_usd,
-        volume_h6_usd=row.volume_h6_usd, buys_h24=row.buys_h24, sells_h24=row.sells_h24,
+        volume_h6_usd=row.volume_h6_usd, volume_h1_usd=row.volume_h1_usd,
+        buys_h24=row.buys_h24, sells_h24=row.sells_h24,
+        buys_h6=row.buys_h6, sells_h6=row.sells_h6,
+        buys_h1=row.buys_h1, sells_h1=row.sells_h1,
         change_m5=row.change_m5, change_h1=row.change_h1, change_h6=row.change_h6,
         change_h24=row.change_h24, pair_created_at_ms=row.pair_created_at_ms, pools=row.pools,
     )
@@ -186,17 +255,28 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
         if cohort is None:
             return {"cohort": None, "coins": [], "database": database_target()}
         identities = await cohort_identities(session, cohort)
+        # Сделки читаются за окно пошире выбранного: колонки отвечают «сколько
+        # за окно», а ряд под ними — «как это накапливалось». Список монет при
+        # этом по-прежнему задаёт именно выбранное окно, иначе кнопка «6 часов»
+        # показывала бы монеты, которых никто не трогал пятые сутки.
+        span_hours = max(hours, HISTORY_HOURS)
         legs = list((await session.execute(select(FomoActivityLeg).where(
             FomoActivityLeg.period == period,
             FomoActivityLeg.user_id.in_(identities),
-            FomoActivityLeg.occurred_at_ms >= cutoff,
+            FomoActivityLeg.occurred_at_ms >= now_ms - span_hours * HOUR_MS,
         ))).scalars())
         by_coin: dict[tuple[int, str], list] = {}
+        seen: dict[tuple[int, str], list] = {}
         for leg in legs:
-            by_coin.setdefault((leg.chain_id, leg.token_address), []).append(leg)
+            key = (leg.chain_id, leg.token_address)
+            seen.setdefault(key, []).append(leg)
+            if leg.occurred_at_ms >= cutoff:
+                by_coin.setdefault(key, []).append(leg)
         keys = list(by_coin)
         names = await token_names(session, set(keys))
         history = await recent_snapshots(session, keys)
+        holders = await holder_samples(
+            session, keys, since_ms=now_ms - HOLDER_HISTORY_HOURS * HOUR_MS)
         security = {
             (row.chain_id, row.token_address): row
             for row in (await session.execute(select(TokenSecurity).where(
@@ -214,33 +294,31 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
         checked = security.get(key)
         facts = _security_facts(checked) if checked is not None else None
         flow = flow_of(coin_legs, identities)
+        window_legs = seen.get(key, coin_legs)
+        trend = holder_trend(holders.get(key, []))
         notes = catalysts.get(key, [])
         symbol = next((leg.symbol for leg in coin_legs if leg.symbol), None) \
             or names.get(key, (None, None))[0]
         coins.append({
             "chain_id": key[0], "token_address": key[1],
             "symbol": symbol, "name": names.get(key, (None, None))[1],
-            "market": {
-                "source": snapshot.source, "observed_at_ms": snapshot.observed_at_ms,
-                "price_usd": snapshot.price_usd, "market_cap_usd": snapshot.market_cap_usd,
-                "fdv_usd": snapshot.fdv_usd, "liquidity_usd": snapshot.liquidity_usd,
-                "volume_h24_usd": snapshot.volume_h24_usd, "volume_h6_usd": snapshot.volume_h6_usd,
-                "buys_h24": snapshot.buys_h24, "sells_h24": snapshot.sells_h24,
-                "change_h1": snapshot.change_h1, "change_h6": snapshot.change_h6,
-                "change_h24": snapshot.change_h24,
-                "pair_created_at_ms": snapshot.pair_created_at_ms,
-            } if snapshot is not None else None,
+            "market": _market_row(snapshot),
             "security": {
                 "checked_at": checked.checked_at, "source": checked.source, "facts": checked.facts,
             } if checked is not None else None,
             "flow": {key_: value for key_, value in flow.items() if key_ != "traders"},
+            # Те же деньги, но окнами и рядом: сумма за сутки не отличает
+            # четыре покупки подряд от одной вчерашней, а решают именно они.
+            "flow_windows": flow_windows(window_legs, now_ms=now_ms),
+            "flow_series": flow_series(window_legs, now_ms=now_ms, hours=HISTORY_HOURS),
+            "holders": trend,
             # Приток с предыдущего прохода: на суточном окне свежая покупка
             # неотличима от вчерашней, а решают обычно именно свежие.
             "movement": movement(snapshot, previous, coin_legs, notes),
             "traders": flow["traders"],
             "catalysts": notes,
-            "scores": score(market=market, security=facts, flow=flow,
-                            catalysts=notes, now_ms=now_ms),
+            "scores": score(market=market, security=facts, flow=flow, catalysts=notes,
+                            holders=trend, now_ms=now_ms),
         })
     # Momentum first, because the list answers "что происходит сейчас"; risk and
     # quality travel with every row so the sort never hides them.
@@ -255,6 +333,13 @@ async def candidates(period: Literal["24h", "7d", "30d"] = "30d",
         # a provider named in .env with no key behind it reads as off.
         "collected": {"market_observed_at_ms": freshest,
                       "stale_after_seconds": settings.intel_market_ttl_seconds,
+                      # Окна потока и глубина ряда приходят с данными, а не
+                      # зашиты в страницу: подпись «за 72 часа» под графиком
+                      # обязана меняться вместе с тем, что реально посчитано.
+                      "flow_windows": list(FLOW_WINDOWS),
+                      "history_hours": HISTORY_HOURS,
+                      "holders_sampled_every_hours": min(settings.intel_security_ttl_hours,
+                                                         settings.intel_holders_ttl_hours),
                       "llm_reader": f"{settings.intel_llm_provider} · {settings.intel_llm_model}"
                       if llm.available() else None},
         "coins": coins[:limit],
