@@ -347,6 +347,9 @@ async def positions() -> dict:
         "positions": rows,
         "dry_run": settings.dex_dry_run,
         "quote_symbol": QUOTE_SYMBOL,
+        # So the page can link a holding to the coin's page on fomo.family,
+        # whose URLs are keyed by chain slug and contract.
+        "chain_id": settings.rh_chain_id,
     }
 
 

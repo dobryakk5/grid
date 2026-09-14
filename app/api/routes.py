@@ -1981,9 +1981,14 @@ async def fomo_limit_order_cancel(intent_id: int) -> dict:
             # Past WAITING a nonce may be reserved or a transaction signed;
             # cancelling there is the DEX worker's business, not a button's.
             raise HTTPException(status_code=409, detail=f"level is {intent.status}, too late to cancel")
-        intent.status = "CANCELLED"
+        # Deleted, not marked CANCELLED. A level that never left WAITING or
+        # BLOCKED touched no chain and produced no trade, so there is no history
+        # in it to keep -- only a row that clutters the list it was removed
+        # from. Every status that *did* reach the chain is refused above, so
+        # nothing with a transaction behind it can be deleted here.
+        await session.delete(intent)
         await session.commit()
-    return {"intent_id": intent_id, "status": "CANCELLED"}
+    return {"intent_id": intent_id, "status": "DELETED"}
 
 
 @router.get("/fomo/leaders")

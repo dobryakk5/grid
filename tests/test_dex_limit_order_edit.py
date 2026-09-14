@@ -60,7 +60,7 @@ def wired(monkeypatch):
 
     monkeypatch.setattr(routes, "load_dynamic_tokens", no_dynamic_load)
 
-    state = {"level": _Level(), "committed": False}
+    state = {"level": _Level(), "committed": False, "deleted": []}
 
     class Session:
         async def __aenter__(self):
@@ -71,6 +71,9 @@ def wired(monkeypatch):
 
         async def get(self, _model, _id):
             return state["level"]
+
+        async def delete(self, obj):
+            state["deleted"].append(obj)
 
         async def commit(self):
             state["committed"] = True
@@ -234,3 +237,25 @@ async def test_editing_the_price_alone_leaves_an_existing_waiver_alone(wired):
                                     json={"limit_price": "0.6"}, headers=AUTH)
     assert response.status_code == 200, response.text
     assert wired["level"].ignore_liquidity_gate is True
+
+
+async def test_cancelling_removes_the_level_rather_than_marking_it(wired):
+    """A level that never reached the chain leaves no history to keep.
+
+    Marking it CANCELLED left a row in the list the operator had just asked to
+    be rid of, which is the whole reason the button exists.
+    """
+    async with client() as http:
+        response = await http.post("/api/fomo/limit-order/7/cancel", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "DELETED"
+    assert wired["deleted"] == [wired["level"]]
+    assert wired["level"].status == "WAITING", "статус не переписывается -- строки больше нет"
+
+
+async def test_a_level_that_reached_the_chain_is_never_deleted(wired):
+    """Anything past BLOCKED may have a signed transaction behind it."""
+    wired["level"] = _Level(status="FILLED")
+    async with client() as http:
+        response = await http.post("/api/fomo/limit-order/7/cancel", headers=AUTH)
+    assert response.status_code == 409 and "too late" in response.text

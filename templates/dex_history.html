@@ -155,7 +155,7 @@ function actions(o){
  const live=o.status==='WAITING'||o.status==='BLOCKED';
  if(!live)return `<div class="icons">${copy}</div>`;
  const pencil=`<button class="edit" data-edit="${o.id}" title="Изменить цену или объём">${PENCIL}</button>`;
- const cross=`<button class="kill" data-cancel="${o.id}" title="Отменить уровень">${CROSS}</button>`;
+ const cross=`<button class="kill" data-cancel="${o.id}" title="Удалить уровень">${CROSS}</button>`;
  return `<div class="icons">${copy}${pencil}${cross}</div>`;
 }
 
@@ -204,7 +204,7 @@ $('rows').onclick=async event=>{
  const button=event.target.closest('button[data-cancel]');
  if(!button)return;
  const id=button.dataset.cancel;
- if(!confirm(`Отменить ордер ${id}? Уровень перестанет ждать цену.`))return;
+ if(!confirm(`Удалить ордер ${id}? Уровень перестанет ждать цену и исчезнет из списка.`))return;
  button.disabled=true;
  try{
   const response=await fetch(`${BASE}/api/fomo/limit-order/${id}/cancel`,
@@ -212,7 +212,7 @@ $('rows').onclick=async event=>{
   const body=await response.json().catch(()=>({}));
   if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
   load();
- }catch(e){alert('Не отменён: '+e.message);button.disabled=false;}
+ }catch(e){alert('Не удалён: '+e.message);button.disabled=false;}
 };
 
 // Both jobs fill the same form: edit moves an existing level, copy arms a new

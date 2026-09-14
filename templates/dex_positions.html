@@ -26,6 +26,8 @@ th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line2);ver
 th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .addr{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
+a.coin{color:var(--accent);text-decoration:none}
+a.coin:hover{text-decoration:underline}
 .actions{display:flex;gap:6px;justify-content:flex-end}
 .actions button{padding:6px 12px;font-size:12px;letter-spacing:.04em}
 .actions .buy{border-color:#2f6b46;background:#16281f;color:#9ee7bd}
@@ -134,6 +136,20 @@ const num=(v,d=6)=>Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
 // `ICOIN-5D6EF090` -> `ICOIN`. The address fragment disambiguates contracts
 // for the registry; it means nothing in a sentence read by a person.
 const ticker=s=>String(s??'').replace(/-[0-9A-F]{8}$/,'');
+// FOMO's own URL slugs, the same map the other pages use -- it writes `bnb`
+// where DexScreener writes `bsc`, so this cannot be derived from the chain
+// name. A chain missing here gets no link rather than a 404.
+const fomoSlugs={1:'ethereum',56:'bnb',143:'monad',1337:'hyperliquid',4663:'robinhood',
+ 8453:'base',1399811149:'solana'};
+function coinLink(p){
+ const name=esc(p.symbol||'без тикера');
+ const slug=fomoSlugs[state.chain_id];
+ if(!slug||!p.token_address)return name;
+ const href=`https://fomo.family/tokens/${slug}/${encodeURIComponent(p.token_address)}`;
+ return `<a class="coin" href="${esc(href)}" target="_blank" rel="noopener noreferrer"
+  title="Открыть монету на fomo.family">${name}</a>`;
+}
+
 // A full 42-character address in a nowrap cell pushes the action buttons off
 // the right edge of the screen; the ends identify the contract and the whole
 // thing stays one hover away.
@@ -178,6 +194,13 @@ function noQuote(p){
   ? '<span class="warn" title="Роутер не ответил на запрос котировки. Нажмите «Обновить».">роутер не ответил</span>'
   : '<span class="muted" title="Роутер не нашёл маршрута для продажи этого объёма">нет котировки</span>';
 }
+// Whole USDG. The sixth decimal of what a position is worth is noise next to
+// the slippage its exit will actually pay, and it made the column hard to scan
+// for the thing it is read for -- which holdings are large. The exact figure
+// stays one hover away.
+function worth(value){
+ return `<span title="${esc(num(value,6))} USDG">${num(value,0)}</span>`;
+}
 function pnl(p){
  if(p.pnl_quote==null)return '<span class="muted">—</span>';
  const value=Number(p.pnl_quote), sign=value>=0?'+':'−';
@@ -198,11 +221,11 @@ function render(){
   <div class="tile"><div class="label">Открытых позиций</div><div class="value">${state.positions.length}</div></div>
   <div class="tile"><div class="label">Кошелёк</div><div class="value addr">${esc(state.wallet||'')}</div></div>`;
  $('rows').innerHTML=state.positions.length?state.positions.map(p=>`<tr>
-  <td><b>${esc(p.symbol||'без тикера')}</b><div class="addr" title="${esc(p.token_address)}">${short(p.token_address)}</div></td>
+  <td><b>${coinLink(p)}</b><div class="addr" title="${esc(p.token_address)}">${short(p.token_address)}</div></td>
   <td class="num">${num(p.amount,8)}</td>
   <td class="num">${p.average_price?num(p.average_price,8):unknown(p)}</td>
   <td class="num">${p.cost_quote?num(p.cost_quote,6):'—'}</td>
-  <td class="num">${p.value_quote!=null?num(p.value_quote,6):noQuote(p)}</td>
+  <td class="num">${p.value_quote!=null?worth(p.value_quote):noQuote(p)}</td>
   <td class="num">${pnl(p)}</td>
   <td><div class="actions">
    <button class="buy" data-buy="${esc(p.token_address)}">BUY</button>
