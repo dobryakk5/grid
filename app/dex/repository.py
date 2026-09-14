@@ -122,6 +122,17 @@ class DexIntentRepository:
             + timedelta(seconds=settings.dex_blocked_retry_seconds),
         )
 
+    async def missed(self, intent: DexIntent, reason: str) -> DexIntent:
+        """The price came and the wallet could not pay for it.
+
+        No ``blocked_until``: this does not clear on a timer the way a risk
+        gate does. It clears when someone tops the wallet up, so the level
+        keeps watching and keeps saying what happened until then.
+        """
+        return await self.transition(
+            intent, IntentStatus.MISSED, blocked_reason=reason[:255], blocked_until=None
+        )
+
     async def fail(self, intent: DexIntent, reason: str) -> DexIntent:
         return await self.transition(
             intent, IntentStatus.FAILED, last_error=reason[:500]

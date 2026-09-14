@@ -205,13 +205,18 @@ async def test_a_quote_worse_than_the_limit_does_not_become_a_market_order():
     assert uniswap.calls == ["quote"]
 
 
-async def test_an_underfunded_wallet_blocks_a_live_swap_before_quoting():
+async def test_an_underfunded_wallet_misses_a_live_swap_before_quoting():
+    """MISSED, not BLOCKED: the market was fine, the wallet was empty.
+
+    The two say different things to whoever reads the row -- one clears itself
+    when liquidity returns, the other clears when money is put in.
+    """
     uniswap = FakeUniswap()
     outcome = await buy(
         chain=FakeChain(balance="0.0001"), uniswap=uniswap, dry_run=False
     )
 
-    assert outcome.status == IntentStatus.BLOCKED
+    assert outcome.status == IntentStatus.MISSED
     assert "wallet holds" in outcome.reason
     assert uniswap.calls == []
 
@@ -430,7 +435,7 @@ async def test_a_live_swap_still_stops_at_an_empty_wallet():
     uniswap = FakeUniswap()
     outcome = await buy(chain=FakeChain(balance="0"), uniswap=uniswap, dry_run=False)
 
-    assert outcome.status == IntentStatus.BLOCKED
+    assert outcome.status == IntentStatus.MISSED
     assert uniswap.calls == []
 
 
@@ -518,3 +523,44 @@ async def test_a_database_without_the_schema_fails_the_preflight_too():
     assert session.rolled_back
     assert uniswap.calls == []
     assert chain.calls == []
+
+
+async def test_a_missed_level_keeps_its_label_when_the_price_walks_away():
+    """The bug this status exists for.
+
+    The level was standing at MISSED; the price then left the band, and the
+    walk-back to WAITING erased every trace that its moment had come and gone.
+    The row then read as though nothing had ever happened to it.
+    """
+    from app.dex.execution import _Progress
+
+    moved = []
+
+    class Repo:
+        async def transition(self, intent, target, **fields):
+            moved.append(target)
+            intent.status = target
+            return intent
+
+    intent = type("Intent", (), {"status": IntentStatus.MISSED})()
+    await _Progress(Repo(), intent).stand_down()
+
+    assert moved == [], "MISSED не должен затираться уходом цены"
+    assert intent.status == IntentStatus.MISSED
+
+
+async def test_a_level_that_was_merely_waiting_still_stands_down():
+    from app.dex.execution import _Progress
+
+    moved = []
+
+    class Repo:
+        async def transition(self, intent, target, **fields):
+            moved.append(target)
+            intent.status = target
+            return intent
+
+    intent = type("Intent", (), {"status": IntentStatus.TRIGGERED})()
+    await _Progress(Repo(), intent).stand_down()
+
+    assert moved == [IntentStatus.WAITING]

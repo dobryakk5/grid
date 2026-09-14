@@ -28,6 +28,10 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 .tag{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
 .tag.buy{color:var(--good);border-color:#2c5c43} .tag.sell{color:var(--bad);border-color:#5c2c34}
 .tag.open{color:var(--warn);border-color:#5c522c}
+/* MISSED is the one status the operator can act on directly -- it says the
+   wallet was short, not that the market was -- so it does not share the
+   generic "still open" amber. */
+.tag.missed{color:#ff9f6b;border-color:#6b3f2c;background:#2a1a14}
 .tx{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);text-decoration:none}
 .tx:hover{text-decoration:underline}
 .empty{padding:22px 8px;text-align:center;color:var(--muted)}
@@ -152,7 +156,7 @@ function actions(o){
  if(o.source==='сетка')return `<div class="icons">${copy}</div>`;
  // Past WAITING/BLOCKED a nonce may be reserved or a transaction signed, and
  // the API stops allowing either action -- the same window is shown here.
- const live=o.status==='WAITING'||o.status==='BLOCKED';
+ const live=o.status==='WAITING'||o.status==='BLOCKED'||o.status==='MISSED';
  if(!live)return `<div class="icons">${copy}</div>`;
  const pencil=`<button class="edit" data-edit="${o.id}" title="Изменить цену или объём">${PENCIL}</button>`;
  const cross=`<button class="kill" data-cancel="${o.id}" title="Удалить уровень">${CROSS}</button>`;
@@ -171,7 +175,9 @@ function render(){
   <td class="muted">${time(o.created_at)}</td>
   <td><b>${coin(o)}</b><div class="muted" style="font-size:11px">${esc(o.source)}</div></td>
   <td><span class="tag ${o.side==='Buy'?'buy':'sell'}">${o.side==='Buy'?'покупка':'продажа'}</span></td>
-  <td><span class="tag ${o.open?'open':''}">${esc(o.status)}</span>${
+  <td><span class="tag ${o.status==='MISSED'?'missed':(o.open?'open':'')}"${
+    o.status==='MISSED'?' title="Цена доходила до уровня, но на кошельке не хватило средств. Уровень продолжает ждать."':''
+   }>${esc(o.status)}</span>${
     o.reason?`<div class="muted" style="font-size:11px;white-space:normal;max-width:260px">${esc(o.reason)}</div>`:''}</td>
   <td class="num">${num(o.amount_in)} <span class="muted">${esc(o.amount_in_coin)}</span></td>
   <td class="num">${num(o.limit_price)}</td>

@@ -155,8 +155,20 @@ class _Progress:
         if self.active:
             await self.repository.block(self.intent, reason)
 
+    async def missed(self, reason: str) -> None:
+        if self.active and self.intent.status != IntentStatus.MISSED:
+            await self.repository.missed(self.intent, reason)
+
     async def stand_down(self) -> None:
-        """Price moved away or the quote was not good enough: keep watching."""
+        """Price moved away or the quote was not good enough: keep watching.
+
+        A MISSED level keeps its label instead of being walked back to WAITING.
+        Surviving the price leaving the band is the entire point of the status:
+        that walk-back is what used to erase the evidence, leaving a level that
+        looked as though its price had never come.
+        """
+        if self.active and self.intent.status == IntentStatus.MISSED:
+            return
         await self.to(IntentStatus.WAITING)
 
 
@@ -251,9 +263,11 @@ async def execute_swap(
     # the quote behind it -- it is reported and the pipeline runs on. A live run
     # stops here rather than quoting something it cannot pay for.
     if underfunded and not dry:
-        await progress.block(underfunded)
+        # Not BLOCKED: nothing is wrong with the market, the wallet simply had
+        # nothing to spend when its moment came. The operator can fix this one.
+        await progress.missed(underfunded)
         return SwapOutcome(
-            status=IntentStatus.BLOCKED,
+            status=IntentStatus.MISSED,
             symbol=pair.symbol,
             side=side,
             reason=underfunded,

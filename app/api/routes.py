@@ -1905,7 +1905,7 @@ async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict
     """Move a waiting level's price or size without losing the level.
 
     The guards are the cancel endpoint's, for the same reasons: a grid's own
-    level is not a button's to touch, and past ``WAITING``/``BLOCKED`` a nonce
+    level is not a button's to touch, and past the watching statuses a nonce
     may be reserved or a transaction already signed -- editing the row then
     would describe something different from what the chain is about to do.
 
@@ -1922,7 +1922,7 @@ async def fomo_limit_order_edit(intent_id: int, payload: LimitOrderEdit) -> dict
             raise HTTPException(status_code=404, detail="level not found")
         if intent.profile_id is not None:
             raise HTTPException(status_code=409, detail="this level belongs to a grid profile")
-        if intent.status not in ("WAITING", "BLOCKED"):
+        if intent.status not in ("WAITING", "BLOCKED", "MISSED"):
             raise HTTPException(
                 status_code=409, detail=f"level is {intent.status}, too late to edit"
             )
@@ -1977,7 +1977,7 @@ async def fomo_limit_order_cancel(intent_id: int) -> dict:
             raise HTTPException(status_code=404, detail="level not found")
         if intent.profile_id is not None:
             raise HTTPException(status_code=409, detail="this level belongs to a grid profile")
-        if intent.status not in ("WAITING", "BLOCKED"):
+        if intent.status not in ("WAITING", "BLOCKED", "MISSED"):
             # Past WAITING a nonce may be reserved or a transaction signed;
             # cancelling there is the DEX worker's business, not a button's.
             raise HTTPException(status_code=409, detail=f"level is {intent.status}, too late to cancel")

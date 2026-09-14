@@ -51,6 +51,11 @@ class IntentStatus:
     PENDING = "PENDING"
     FILLED = "FILLED"
     BLOCKED = "BLOCKED"
+    #: The price came and we could not take it -- not enough of what this swap
+    #: spends. Distinct from BLOCKED on purpose: BLOCKED is the market's fault
+    #: and clears itself, MISSED is ours and clears only when the wallet is
+    #: topped up. Merging them would hide the one the operator can act on.
+    MISSED = "MISSED"
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
     FAILED = "FAILED"
@@ -76,6 +81,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
         {
             IntentStatus.TRIGGERED,
             IntentStatus.BLOCKED,
+            IntentStatus.MISSED,
             IntentStatus.CANCELLED,
             IntentStatus.EXPIRED,
         }
@@ -86,6 +92,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
             IntentStatus.QUOTED,
             IntentStatus.WAITING,
             IntentStatus.BLOCKED,
+            IntentStatus.MISSED,
             IntentStatus.CANCELLED,
             IntentStatus.EXPIRED,
         }
@@ -96,6 +103,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
             IntentStatus.SIGNING,
             IntentStatus.WAITING,
             IntentStatus.BLOCKED,
+            IntentStatus.MISSED,
             IntentStatus.CANCELLED,
             IntentStatus.EXPIRED,
         }
@@ -112,6 +120,19 @@ TRANSITIONS: dict[str, frozenset[str]] = {
         {
             IntentStatus.WAITING,
             IntentStatus.TRIGGERED,
+            IntentStatus.MISSED,
+            IntentStatus.CANCELLED,
+            IntentStatus.EXPIRED,
+        }
+    ),
+    # Still a live level: the wallet can be topped up and the price can come
+    # back. It keeps the MISSED label meanwhile, which is the whole point --
+    # WAITING said nothing had happened when something had.
+    IntentStatus.MISSED: frozenset(
+        {
+            IntentStatus.TRIGGERED,
+            IntentStatus.WAITING,
+            IntentStatus.BLOCKED,
             IntentStatus.CANCELLED,
             IntentStatus.EXPIRED,
         }

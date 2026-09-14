@@ -60,3 +60,20 @@ def test_terminal_states_accept_nothing():
 def test_unknown_status_is_an_error_not_a_silent_no():
     with pytest.raises(DexStateError):
         assert_transition("PARTIALLY_FILLED", IntentStatus.FILLED)
+
+
+def test_a_missed_level_is_still_live():
+    """It keeps watching: the wallet can be topped up and the price can return."""
+    from app.dex.intents import IntentStatus, is_terminal
+
+    assert not is_terminal(IntentStatus.MISSED)
+
+
+def test_a_missed_level_can_trigger_again_and_be_cancelled():
+    from app.dex.intents import IntentStatus, can_transition
+
+    assert can_transition(IntentStatus.TRIGGERED, IntentStatus.MISSED)
+    assert can_transition(IntentStatus.MISSED, IntentStatus.TRIGGERED)
+    assert can_transition(IntentStatus.MISSED, IntentStatus.CANCELLED)
+    # Never straight to a fill: it has to go through a real attempt first.
+    assert not can_transition(IntentStatus.MISSED, IntentStatus.FILLED)
