@@ -199,7 +199,12 @@ function noQuote(p){
 // for the thing it is read for -- which holdings are large. The exact figure
 // stays one hover away.
 function worth(value){
- return `<span title="${esc(num(value,6))} USDG">${num(value,0)}</span>`;
+ const amount=Number(value);
+ // A holding worth a fraction of a cent is not worth nothing, and rounding it
+ // to «0» says it is. «<1» keeps the distinction that matters -- there is
+ // still something there -- without pretending the sixth decimal is news.
+ const shown=amount>0&&amount<1?'&lt;1':num(value,0);
+ return `<span title="${esc(num(value,6))} USDG">${shown}</span>`;
 }
 function pnl(p){
  if(p.pnl_quote==null)return '<span class="muted">—</span>';
