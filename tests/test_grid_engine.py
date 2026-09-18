@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.exchanges.base import OrderNotCancellable
+from app.exchanges.base import ExchangeError, OrderNotCancellable
 from app.exchanges.bybit import InstrumentInfo
 from app.trading.grid import (
     CANCELLABLE_STATUSES,
@@ -59,14 +59,18 @@ class FakeSession:
 
 
 class FakeExchange:
-    def __init__(self):
+    def __init__(self, balance=Decimal("1000000")):
         self.placed = []
+        self.balance = balance
 
     async def instrument_info(self, _symbol):
         return INFO
 
     async def last_price(self, _symbol):
         return Decimal("65500")
+
+    async def available_balance(self, _coin):
+        return self.balance
 
     async def place_limit_order(self, **kwargs):
         self.placed.append(kwargs)
@@ -430,3 +434,62 @@ async def test_without_a_multiplier_every_cell_still_buys_quote_per_level():
         Decimal("0.000001"), rounding=ROUND_DOWN
     )
     assert exchange.placed[0]["qty"] == expected
+
+
+@pytest.mark.asyncio
+async def test_a_level_the_wallet_cannot_fund_is_not_placed():
+    exchange = FakeExchange(balance=Decimal("10"))
+
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([], current_range()), profile()
+    )
+
+    assert exchange.placed == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_budget_counts_what_the_range_already_holds():
+    # One cell is long for 25 quote and the ceiling is 40, so the next level's
+    # 25 no longer fits even though the wallet itself is full.
+    long_cell = SimpleNamespace(
+        grid_buy_price=Decimal("66000"), side="Buy", status="Filled",
+        qty=Decimal("0.000378"), filled_qty=Decimal("0.000378"),
+        price=Decimal("66000"), order_role="grid", replacement_created=True,
+    )
+    capped = profile()
+    capped.max_investment = Decimal("40")
+    exchange = FakeExchange()
+
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([long_cell], current_range()), capped
+    )
+
+    assert exchange.placed == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_budget_with_room_left_still_seeds():
+    capped = profile()
+    capped.max_investment = Decimal("500")
+    exchange = FakeExchange()
+
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([], current_range()), capped
+    )
+
+    assert [item["price"] for item in exchange.placed] == [Decimal("65000")]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_balance_leaves_the_cell_unarmed():
+    class BlindExchange(FakeExchange):
+        async def available_balance(self, _coin):
+            raise ExchangeError("rpc is rate limited")
+
+    exchange = BlindExchange()
+
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([], current_range()), profile()
+    )
+
+    assert exchange.placed == []

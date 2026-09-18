@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable
 
-from app.trading.math import grid_buy_levels
+from app.trading.math import grid_buy_levels, level_size_weights
 
 
 @dataclass
@@ -17,6 +17,7 @@ class Lot:
 def run_grid_backtest(
     closes: Iterable[Decimal], *, lower: Decimal, upper: Decimal,
     step: Decimal, quote_per_level: Decimal, fee_rate: Decimal,
+    level_size_multiplier: Decimal = Decimal("1"),
     below_grid_lower_price: Decimal | None = None,
     buy_below_grid: bool = True, sell_below_grid: bool = False,
     timestamps_ms: Iterable[int] | None = None, candle_minutes: int = 60,
@@ -42,7 +43,15 @@ def run_grid_backtest(
     levels = below_levels + main_levels
     sell_by_buy = {buy: buy + step for buy in levels}
     lots: dict[Decimal, Lot] = {}
-    initial_quote = quote_per_level * Decimal(len(levels))
+    # Same sizing the engine will place with (GridEngine.level_quote), or the
+    # run says nothing about the grid that actually trades.
+    cost_by_buy = {
+        level: quote_per_level * weight
+        for level, weight in zip(
+            levels, level_size_weights(len(levels), level_size_multiplier)
+        )
+    }
+    initial_quote = sum(cost_by_buy.values(), Decimal("0"))
     quote = initial_quote
     realized = Decimal("0")
     fees = Decimal("0")
@@ -79,11 +88,12 @@ def run_grid_backtest(
         if trading_active and current < previous:
             crossed = [level for level in reversed(levels) if current <= level < previous]
             for buy in crossed:
-                if buy in lots or quote < quote_per_level:
+                level_cost = cost_by_buy[buy]
+                if buy in lots or quote < level_cost:
                     continue
                 execution_price = buy * (Decimal("1") + slippage_rate)
-                fee = quote_per_level * fee_rate
-                qty = (quote_per_level - fee) / execution_price
+                fee = level_cost * fee_rate
+                qty = (level_cost - fee) / execution_price
                 slippage_cost += qty * (execution_price - buy)
                 bought_at_ms = (
                     timestamps[index] + candle_minutes * 60_000
@@ -91,12 +101,12 @@ def run_grid_backtest(
                 )
                 lots[buy] = Lot(
                     qty=qty,
-                    cost=quote_per_level,
+                    cost=level_cost,
                     buy_price=execution_price,
                     buy_fee=fee,
                     bought_at_ms=bought_at_ms,
                 )
-                quote -= quote_per_level
+                quote -= level_cost
                 fees += fee
                 buy_count += 1
         elif trading_active and current > previous:

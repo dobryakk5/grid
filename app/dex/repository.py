@@ -24,12 +24,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import DexIntent, DexWallet
 from app.dex.intents import TERMINAL_STATUSES, IntentStatus, assert_transition
+from app.notify.events import DEX_NOTIFIABLE, dex_kind
+from app.notify.outbox import enqueue
 
 __all__ = ["DexIntentRepository"]
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _intent_payload(intent: DexIntent) -> dict:
+    """What a message needs that the row may no longer say by the time it is sent.
+
+    The stable half (amounts, fill price, tx hash) is read back from the intent
+    at render time; the status and the reason are snapshotted here because a
+    level that was BLOCKED a moment ago is WAITING again thirty seconds later.
+    """
+    return {
+        "intent_id": intent.id,
+        "profile_id": intent.profile_id,
+        "symbol": intent.symbol,
+        "side": intent.side,
+        "status": intent.status,
+        "limit_price": intent.limit_price,
+        "amount_in": intent.amount_in,
+        "amount_in_coin": intent.amount_in_coin,
+        "reason": intent.last_error or intent.blocked_reason,
+    }
 
 
 class DexIntentRepository:
@@ -110,6 +132,12 @@ class DexIntentRepository:
         intent.status = target
         for key, value in fields.items():
             setattr(intent, key, value)
+        # Every intent state change but one passes through here, which makes it
+        # the place to notice the ones worth telling someone about. FILLED is
+        # the exception: it is set in app/dex/execution.py:record_fill, where
+        # the realised amounts are, and queues its own message there.
+        if target in DEX_NOTIFIABLE:
+            enqueue(self.session, dex_kind(target), _intent_payload(intent))
         await self.session.flush()
         return intent
 

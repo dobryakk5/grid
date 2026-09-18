@@ -173,8 +173,9 @@ class Settings(BaseSettings):
 
     # ---- token intelligence (what the top is buying, and is it safe) ------
     # Free, keyless sources only: DexScreener for market data on the chains it
-    # indexes, GoPlus for contract safety, and our own tape for Robinhood
-    # Chain, which neither of them covers.
+    # indexes -- Robinhood Chain included, since it started listing that one --
+    # GoPlus for contract safety, and our own tape for whatever the screener
+    # has not listed there yet.
     goplus_base_url: str = "https://api.gopluslabs.io"
     intel_refresh_seconds: float = 600.0
     # How old a market snapshot may be before the page refreshes it. Shorter
@@ -195,6 +196,10 @@ class Settings(BaseSettings):
     intel_holders_ttl_hours: float = 1.0
     # Coins refreshed in one pass, most recently traded by the cohort first.
     intel_max_tokens: int = 120
+    # Монеты, которые собираются всегда, помимо того, что торгует когорта:
+    # `<сеть>:<адрес>` через запятую, сеть — слагом (`solana`) или числом
+    # (`4663`). Лимитом выше не вытесняются: это явно названный список.
+    intel_watchlist: str = ""
 
     # Optional LLM pass over thesis text. Rules run first and always; the model
     # only sees the notes they could not classify. Blank key = off, and off is a
@@ -216,6 +221,38 @@ class Settings(BaseSettings):
     # pass comfortably inside that without thinking about it.
     intel_llm_pause_seconds: float = 3.0
     intel_llm_timeout_seconds: float = 120.0
+
+    # ---- операции в Telegram ---------------------------------------------
+    # Сетка и история сделок живут в вебе; бот нужен ровно для того, чтобы не
+    # держать вкладку открытой. Пустой токен или пустой чат = выключено, и это
+    # рабочая конфигурация: постановка в очередь просто не происходит, а не
+    # копит недоставленное до лучших времён.
+    telegram_bot_token: str = ""
+    # Один чат или несколько через запятую. Группы и каналы — отрицательные id.
+    telegram_chat_id: str = ""
+    telegram_api_base: str = "https://api.telegram.org"
+    # Внешний адрес самого приложения, если он есть: сообщение тогда даёт
+    # ссылку прямо на страницу истории, а не только пересказывает её. Пусто —
+    # ссылки просто нет, и это нормально для локального запуска.
+    public_base_url: str = ""
+    notify_timeout_seconds: float = 15.0
+
+    # Что именно отправлять: шаблоны через запятую по словарю app/notify/events.py
+    # (`dex.filled`, `grid.order_filled`, `grid.recovery_*`, `*` — всё подряд).
+    # По умолчанию — то, что двигало деньги, и то, что требует человека.
+    notify_events: str = (
+        "dex.filled,dex.failed,dex.missed,dex.expired,dex.cancelled,"
+        "grid.order_filled,grid.order_cancel_refused,grid.grid_budget_blocked,"
+        "grid.recovery_*,grid.trailing_buy_*,grid.recommendation_created"
+    )
+    notify_poll_seconds: float = 3.0
+    notify_batch: int = 20
+    # Telegram принимает около 20 сообщений в минуту в одну группу; пауза
+    # между отправками держит серию исполнений внутри лимита, не дожидаясь 429.
+    notify_send_pause_seconds: float = 0.4
+    # После этого числа неудач сообщение помечается FAILED и больше не мешает
+    # очереди: недоставленное уведомление не повод останавливать торговлю.
+    notify_max_attempts: int = 6
 
 
 settings = Settings()

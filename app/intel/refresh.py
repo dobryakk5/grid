@@ -29,6 +29,7 @@ from app.intel.events import classify
 from app.intel.market import snapshot_tokens
 from app.intel.security import check_tokens
 from app.intel.tape import tape_facts
+from app.intel.watchlist import watchlist
 from app.fomo.tokens import CHAIN_SLUGS
 
 __all__ = ["candidate_keys", "refresh"]
@@ -37,14 +38,23 @@ logger = logging.getLogger(__name__)
 
 
 async def candidate_keys(session, *, period: str, hours: int, now_ms: int, limit: int) -> list:
-    """The coins the cohort traded inside the window, freshest first.
+    """Пин-лист, а следом то, что когорта трогала в окне, свежим вперёд.
 
-    This is the whole watchlist: no separate list to maintain, and nothing in
-    it that the people we actually follow have not touched.
+    Почти всё здесь по-прежнему приходит от когорты: что топ трогал, про то и
+    собираются факты, и отдельного списка на поддержке нет. Но монета, которую
+    смотрят намеренно, не должна ждать, пока её купит кто-то из топа: история
+    капитализации и держателей задним числом не восстанавливается, поэтому
+    `INTEL_WATCHLIST` идёт первым и внутри лимита не вытесняется.
+
+    Побочно это делает сбор независимым от FOMO: с пин-листом проход работает
+    и тогда, когда когорта ещё не импортирована.
     """
+    pinned, rejected = watchlist()
+    for entry in rejected:
+        logger.warning("intel: не разобрал запись INTEL_WATCHLIST: %r", entry)
     cohort = await session.get(FomoLeaderboardState, period)
     if cohort is None:
-        return []
+        return pinned
     users = [trader["user_id"] for trader in cohort.traders]
     cutoff = now_ms - hours * 3600_000
     rows = (await session.execute(select(
@@ -58,7 +68,9 @@ async def candidate_keys(session, *, period: str, hours: int, now_ms: int, limit
     for chain_id, address, at_ms in rows:
         key = (chain_id, address)
         latest[key] = max(latest.get(key, 0), at_ms)
-    return sorted(latest, key=lambda key: (-latest[key], key[0], key[1]))[:limit]
+    traded = [key for key in sorted(latest, key=lambda key: (-latest[key], key[0], key[1]))
+              if key not in set(pinned)]
+    return pinned + traded[:max(limit - len(pinned), 0)]
 
 
 async def store_market(session, facts, *, now_ms: int) -> int:
@@ -246,25 +258,29 @@ async def _store_events(session, rows) -> None:
     await session.commit()
 
 
-async def refresh(session, *, period: str = "30d", hours: int = 24, now_ms: int,
-                  http=None, use_llm: bool = True) -> dict:
-    """Collect everything the card needs for the current candidate set."""
-    keys = await candidate_keys(session, period=period, hours=hours, now_ms=now_ms,
-                                limit=settings.intel_max_tokens)
-    result = {"tokens": len(keys), "market": 0, "named": 0, "security": 0,
-              "theses": {"rules": 0, "llm": 0, "unread": 0}}
+async def collect(session, keys, *, now_ms: int, hours: int = 24, http=None) -> dict:
+    """Рынок, имена и контракты по названным монетам. Тезисов не касается.
+
+    Отдельно от ``refresh`` затем, что список монет бывает не только «что
+    торговала когорта»: суточная таблица собирает ровно свой watchlist, и
+    тянуть ради неё ещё сотню чужих монет было бы странно. Кто именно
+    спрашивает — не влияет на то, что пишется: строки те же самые.
+    """
+    result = {"market": 0, "named": 0, "security": 0}
     if not keys:
         return result
-
     owns_http = http is None
     http = http or httpx.AsyncClient(timeout=20.0)
     try:
         listed = [key for key in keys if key[0] in CHAIN_SLUGS]
         facts = await snapshot_tokens(http, listed) if listed else {}
-        # Chains no screener indexes -- Robinhood Chain today -- are read from
-        # our own tape instead of left blank.
-        for chain_id in {key[0] for key in keys} - set(CHAIN_SLUGS):
-            own = {key for key in keys if key[0] == chain_id}
+        # Whatever the screener did not answer about on the one chain we read
+        # ourselves goes to the tape: the screener now indexes Robinhood Chain,
+        # but it lists a coin only once it notices it, and a coin it has not
+        # noticed used to have tape numbers and must not end up with none.
+        own = {key for key in keys
+               if key[0] == settings.rh_chain_id and key not in facts}
+        if own:
             facts.update(await tape_facts(session, own, now_ms=now_ms, hours=hours))
         result["market"] = await store_market(session, facts, now_ms=now_ms)
         result["named"] = await store_names(session, facts)
@@ -280,6 +296,19 @@ async def refresh(session, *, period: str = "30d", hours: int = 24, now_ms: int,
     finally:
         if owns_http:
             await http.aclose()
+    return result
 
+
+async def refresh(session, *, period: str = "30d", hours: int = 24, now_ms: int,
+                  http=None, use_llm: bool = True) -> dict:
+    """Collect everything the card needs for the current candidate set."""
+    keys = await candidate_keys(session, period=period, hours=hours, now_ms=now_ms,
+                                limit=settings.intel_max_tokens)
+    result = {"tokens": len(keys), "market": 0, "named": 0, "security": 0,
+              "theses": {"rules": 0, "llm": 0, "unread": 0}}
+    if not keys:
+        return result
+
+    result.update(await collect(session, keys, now_ms=now_ms, hours=hours, http=http))
     result["theses"] = await read_theses(session, hours=hours, now_ms=now_ms, use_llm=use_llm)
     return result

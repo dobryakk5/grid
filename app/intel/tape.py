@@ -1,7 +1,8 @@
-"""Market facts for the chain no screener indexes, read from our own tape.
+"""Market facts from our own tape, for what the screener has not listed.
 
-DexScreener does not list Robinhood Chain, so for chain 4663 the only market
-data that exists here is the one this project produces itself: ``chain_swaps``,
+DexScreener now indexes Robinhood Chain, so this is a fallback rather than the
+only source it once was: a coin on chain 4663 the screener has not noticed yet
+still has the market data this project produces itself -- ``chain_swaps``,
 reconstructed from ``Transfer`` logs of the wallets the tape tracks.
 
 That is a narrower thing than a market, and the difference is not cosmetic:

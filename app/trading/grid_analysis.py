@@ -7,6 +7,7 @@ from statistics import mean, pstdev
 from typing import Sequence
 
 from app.trading.backtest import run_grid_backtest
+from app.trading.math import grid_exposure
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,7 @@ def build_candidate_specs(
     return specs
 
 
-def analyze_grid(candles: Sequence, *, quote_per_level: Decimal | None = None, capital_limit: Decimal | None = None, config: GridAnalysisConfig = DEFAULT_CONFIG) -> dict:
+def analyze_grid(candles: Sequence, *, quote_per_level: Decimal | None = None, capital_limit: Decimal | None = None, level_size_multiplier: Decimal = Decimal("1"), config: GridAnalysisConfig = DEFAULT_CONFIG) -> dict:
     if len(candles) < 90 * 24:
         raise ValueError(f"need {90 * 24} hourly candles, found {len(candles)}")
     regime_candles = candles[-90 * 24:]
@@ -227,13 +228,16 @@ def analyze_grid(candles: Sequence, *, quote_per_level: Decimal | None = None, c
             rejected.append({**base, "reason": reason})
             continue
         per_level = quote_per_level or (config.normalized_capital / Decimal(levels))
-        required_capital = per_level * Decimal(levels)
+        # A candidate is priced the way the engine would place it: the
+        # multiplier makes the edges heavier, so the capital limit has to see
+        # full exposure and not the flat product.
+        required_capital = grid_exposure(per_level, levels, level_size_multiplier)
         if capital_limit is not None and required_capital > capital_limit:
             reason = "CAPITAL_LIMIT"
         if reason:
             rejected.append({**base, "reason": reason})
             continue
-        kwargs = dict(lower=low, upper=high, step=step, quote_per_level=per_level, fee_rate=config.fee_rate, slippage_rate=config.slippage_rate, break_down_action="continue", break_up_action="continue")
+        kwargs = dict(lower=low, upper=high, step=step, quote_per_level=per_level, level_size_multiplier=level_size_multiplier, fee_rate=config.fee_rate, slippage_rate=config.slippage_rate, break_down_action="continue", break_up_action="continue")
         train_result = _metrics(run_grid_backtest([item.close for item in train], timestamps_ms=[item.timestamp_ms for item in train], **kwargs))
         if not train_result["completed_cycles"] or Decimal(train_result["max_drawdown_pct"]) > config.hard_max_drawdown_pct:
             rejected.append({**base, "reason": "NO_CYCLES" if not train_result["completed_cycles"] else "HARD_DRAWDOWN_LIMIT"})

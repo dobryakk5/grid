@@ -90,3 +90,35 @@ def test_trailing_buy_settings_are_validated():
         )
     with pytest.raises(ValidationError, match="trailing_buy_deviation_mode"):
         payload(trailing_buy_deviation_mode="atr")
+
+
+def test_a_martingale_grid_must_declare_a_budget():
+    with pytest.raises(ValidationError) as exc:
+        payload(level_size_multiplier=Decimal("1.2"))
+
+    assert "max_investment is required" in str(exc.value)
+
+
+def test_the_budget_check_uses_full_exposure_not_the_flat_product():
+    # Five cells at 25 with 1.2 per step cost 157, not the flat 125.
+    with pytest.raises(ValidationError) as exc:
+        payload(level_size_multiplier=Decimal("1.2"), max_investment=Decimal("130"))
+
+    assert "full exposure" in str(exc.value)
+
+    profile = payload(
+        level_size_multiplier=Decimal("1.2"), max_investment=Decimal("157")
+    )
+    assert profile.level_size_multiplier == Decimal("1.2")
+
+
+def test_a_martingale_cannot_be_combined_with_buying_below_the_grid():
+    with pytest.raises(ValidationError) as exc:
+        payload(
+            level_size_multiplier=Decimal("1.2"),
+            max_investment=Decimal("10000"),
+            buy_below_grid=True,
+            below_grid_lower_price=Decimal("55000"),
+        )
+
+    assert "no middle to measure from" in str(exc.value)

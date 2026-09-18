@@ -121,6 +121,35 @@ def level_size_weights(count: int, multiplier: Decimal) -> list[Decimal]:
     return [multiplier ** abs(Decimal(index) - centre) for index in range(count)]
 
 
+def grid_exposure(quote_per_level: Decimal, count: int, multiplier: Decimal) -> Decimal:
+    """Quote committed when every cell of the grid is long at once.
+
+    The number that matters for funding, and not the same as
+    ``quote_per_level * count`` once a multiplier is in play: cells above the
+    market only arm after price has risen through them, but nothing brings
+    their money back before price falls again, so every cell can hold a lot
+    at the same time. Sizing against the flat product is how a grid runs out
+    of quote halfway down its own ladder.
+    """
+    return quote_per_level * sum(level_size_weights(count, multiplier), Decimal("0"))
+
+
+def quote_per_level_for_budget(
+    budget: Decimal, count: int, multiplier: Decimal
+) -> Decimal:
+    """Invert :func:`grid_exposure`: the middle cell's size a budget affords.
+
+    ``budget / sum(weights)`` -- the whole ladder then fits the budget exactly,
+    which is the only sizing rule that survives contact with a real wallet.
+    """
+    if budget <= 0:
+        raise ValueError("budget must be positive")
+    weights = sum(level_size_weights(count, multiplier), Decimal("0"))
+    if weights <= 0:
+        raise ValueError("grid has no levels to size")
+    return budget / weights
+
+
 def ladder_allocations(
     total: Decimal, count: int, *, mode: str, multiplier: Decimal = Decimal("1.5")
 ) -> list[Decimal]:

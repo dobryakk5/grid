@@ -20,7 +20,13 @@ from app.db.models import (
     StrategyRecommendation,
 )
 from app.exchanges import make_exchange
-from app.exchanges.base import ExchangeClient, InstrumentInfo, OrderNotCancellable, split_symbol
+from app.exchanges.base import (
+    ExchangeClient,
+    ExchangeError,
+    InstrumentInfo,
+    OrderNotCancellable,
+    split_symbol,
+)
 from app.trading.events import record_strategy_event
 from app.trading.math import (
     dca_initial_percent,
@@ -1522,6 +1528,54 @@ class GridEngine:
                 cells.append(rounded)
         return cells
 
+    async def committed_quote(
+        self, session: AsyncSession, profile: GridProfile,
+    ) -> Decimal:
+        """Quote this range already has at risk.
+
+        A resting BUY has the money reserved; a cell whose BUY filled has it
+        spent and not yet returned, whether or not its SELL is already on the
+        book. Only a cell whose SELL has filled is flat again.
+        """
+        result = await session.execute(
+            select(GridOrder).where(
+                GridOrder.profile_id == profile.id,
+                GridOrder.range_id == profile.current_range_id,
+                GridOrder.order_role.in_(GRID_ORDER_ROLES),
+            ).order_by(GridOrder.id)
+        )
+        latest_by_cell: dict[Decimal, GridOrder] = {}
+        for order in result.scalars():
+            latest_by_cell[Decimal(order.grid_buy_price)] = order
+
+        committed = Decimal("0")
+        for cell_price, order in latest_by_cell.items():
+            if order.side == "Sell":
+                if order.status != "Filled":
+                    committed += Decimal(order.qty) * cell_price
+                continue
+            if order.status in OPEN_STATUSES or order.status == "Filled":
+                committed += Decimal(order.filled_qty or order.qty) * Decimal(order.price)
+        return committed
+
+    async def seeding_budget(
+        self, session: AsyncSession, profile: GridProfile,
+    ) -> Decimal:
+        """What the next BUY is actually allowed to spend.
+
+        Two ceilings, and the lower one wins. The wallet's free quote balance
+        is the one that cannot be argued with -- a level sized past it is an
+        order the venue will reject or, on chain, a swap that burns gas to
+        revert. ``max_investment`` is the ceiling the operator declared, and
+        what this range already holds counts against it.
+        """
+        quote_coin = split_symbol(profile.symbol)[1]
+        wallet = await self.exchange.available_balance(quote_coin)
+        declared = getattr(profile, "max_investment", None)
+        if declared is None:
+            return wallet
+        return min(wallet, Decimal(declared) - await self.committed_quote(session, profile))
+
     @staticmethod
     def level_quote(
         profile: GridProfile,
@@ -1578,6 +1632,31 @@ class GridEngine:
         cells: list[tuple[Decimal, Decimal]] | None = None,
     ) -> None:
         quote = self.level_quote(profile, cells or [], buy_price)
+        try:
+            budget = await self.seeding_budget(session, profile)
+        except ExchangeError as exc:
+            # An unreadable balance is not permission to spend blind: leave the
+            # cell unarmed and let the next tick ask again.
+            logger.warning(
+                "Profile %s could not read its quote budget: %s", profile.id, exc
+            )
+            return
+        if quote > budget:
+            logger.warning(
+                "Profile %s skips BUY @ %s: level needs %s, budget is %s",
+                profile.id, buy_price, quote, budget,
+            )
+            record_strategy_event(
+                session, profile_id=profile.id, event_type="GRID_BUDGET_BLOCKED",
+                reason="LEVEL_EXCEEDS_AVAILABLE_BUDGET",
+                metadata={
+                    "buy_price": str(buy_price),
+                    "level_quote": str(quote),
+                    "available_budget": str(budget),
+                },
+            )
+            await session.commit()
+            return
         qty = self.qty_from_quote(quote, buy_price, info)
         await self._place_and_store(
             session=session,

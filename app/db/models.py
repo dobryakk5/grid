@@ -880,4 +880,52 @@ class ChainScanCursor(Base):
     )
 
 
+class Notification(Base):
+    """One message queued for Telegram, written in the operation's own transaction.
+
+    An outbox rather than a direct send. Two reasons, both load-bearing:
+
+    * a trading tick must not wait on api.telegram.org, and must not fail
+      because it was unreachable;
+    * the row lands in the *same* transaction as the fill, the state change or
+      the intent that caused it, so a tick that rolls back takes its message
+      with it. That is what makes "no duplicate, no phantom" true without a
+      dedup key: there is exactly one commit per operation, and exactly one
+      row per commit.
+
+    Delivery itself is at-least-once: a notifier killed between ``sendMessage``
+    and its own commit re-sends on restart. A repeated message is cheap; the
+    alternative (marking sent before sending) loses them silently.
+
+    ``payload`` carries a reference plus whatever was true at the moment, not a
+    finished string: the text is rendered at send time (app/notify/render.py)
+    so that a message can name the profile and the pair without every call site
+    having to load them.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_pending", "status", "scheduled_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Vocabulary in app/notify/events.py: `dex.filled`, `grid.order_filled`, ...
+    kind: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # Fanned out at enqueue time, one row per chat, so a chat that blocks the
+    # bot cannot hold up delivery to the others.
+    chat_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # When this row becomes eligible again; set forward by the retry backoff.
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 Index("ix_grid_orders_profile_range", GridOrder.profile_id, GridOrder.range_id)

@@ -1,9 +1,9 @@
 """Market facts for a coin, from whichever source actually covers its chain.
 
-DexScreener indexes most of what FOMO serves and is free and keyless, so it is
-the source wherever it answers. It does **not** index Robinhood Chain at all --
-the same gap that leaves coin names blank there (see ``app.fomo.tokens``) --
-so for chain 4663 the facts come from our own tape instead, and say so.
+DexScreener indexes every chain here and is free and keyless, so it is the
+source wherever it answers -- Robinhood Chain included, which it did not index
+when this module was written. What it has not listed yet still falls back to
+our own tape (``app.intel.tape``), and such a fact says so in ``source``.
 
 Every function here is pure except the one that fetches. The parse is exercised
 against recorded response shapes in ``tests/test_intel_market.py``.
@@ -19,9 +19,9 @@ from decimal import Decimal, InvalidOperation
 import httpx
 
 from app.core.config import settings
-from app.fomo.tokens import BATCH, CHAIN_SLUGS, same_address
+from app.fomo.tokens import CHAIN_SLUGS, PAIR_CAP, same_address
 
-__all__ = ["MarketFacts", "parse_market", "snapshot_tokens"]
+__all__ = ["MarketFacts", "circulating_pct", "parse_market", "snapshot_tokens"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,11 @@ class MarketFacts:
     change_h24: Decimal | None = None
     pair_created_at_ms: int | None = None
     pools: int | None = None
+    # Источник отдаёт не больше ``PAIR_CAP`` пулов за ответ. Когда их ровно
+    # столько, сумма по пулам — это нижняя граница, а не итог, и строка обязана
+    # уметь про это сказать: «ликвидность $1.7M» и «ликвидность не меньше
+    # $1.7M» — разные утверждения.
+    pools_capped: bool | None = None
     symbol: str | None = None
     name: str | None = None
 
@@ -64,6 +69,28 @@ class MarketFacts:
         data.pop("symbol", None)
         data.pop("name", None)
         return {**data, "observed_at_ms": observed_at_ms}
+
+
+def circulating_pct(market) -> Decimal | None:
+    """Доля обращения от FDV, и только когда две цифры не спорят друг с другом.
+
+    Тот же отбор, что и в ``scoring.quality``: DexScreener считает FDV по пулу,
+    а капитализацию по токену, поэтому пара может дать «в обращении 130%». Это
+    расхождение двух чисел, а не факт о предложении, и показывать его нельзя —
+    иначе экран и оценка сказали бы разное об одной монете.
+
+    Живёт рядом с фактами, а не на странице: тот же вопрос задают и карточка, и
+    суточная таблица, а две реализации одного отбора рано или поздно разойдутся.
+    """
+    if market is None:
+        return None
+    cap, fdv = market.get("market_cap_usd"), market.get("fdv_usd")
+    if not cap or not fdv or Decimal(fdv) <= 0:
+        return None
+    cap, fdv = Decimal(cap), Decimal(fdv)
+    if cap > fdv * Decimal("1.05"):
+        return None
+    return min(cap / fdv, Decimal(1)) * 100
 
 
 def _decimal(value) -> Decimal | None:
@@ -87,7 +114,8 @@ def _side(pair: dict, key: str) -> dict:
     return side if isinstance(side, dict) else {}
 
 
-def parse_market(pairs, chain_id: int, address: str) -> MarketFacts | None:
+def parse_market(pairs, chain_id: int, address: str, *,
+                 capped: bool | None = None) -> MarketFacts | None:
     """Aggregate every pool where this coin is the base token.
 
     Base side only. A pool that holds the coin as its *quote* prices the other
@@ -162,6 +190,7 @@ def parse_market(pairs, chain_id: int, address: str) -> MarketFacts | None:
         # a migration, not a launch.
         pair_created_at_ms=min([value for value in created if value], default=None),
         pools=len(pools),
+        pools_capped=bool(capped) if capped is not None else len(pairs) >= PAIR_CAP,
         symbol=symbol[:64] if isinstance(symbol, str) and symbol.strip() else None,
         name=name[:160] if isinstance(name, str) and name.strip() else None,
     )
@@ -170,7 +199,17 @@ def parse_market(pairs, chain_id: int, address: str) -> MarketFacts | None:
 async def snapshot_tokens(http, wanted, *, sleep=asyncio.sleep) -> dict:
     """``{(chain_id, address): MarketFacts}`` for the coins DexScreener knows.
 
-    A batch that does not answer contributes nothing and leaves those coins for
+    **One address per request, on purpose.** The endpoint takes a comma-joined
+    list, but it answers with at most ``PAIR_CAP`` pools *for the whole
+    request*, and it does not say that it truncated. Asking about thirty coins
+    at once therefore made them share thirty pools between them: a coin with
+    twenty-one pools was recorded as having three, its liquidity and volume
+    summed over those three, and a coin whose pools did not fit at all was
+    recorded as having no market. Sums across pools are the entire point of
+    this module, so the trade is made the other way -- one request per coin,
+    paced under the same 300/minute ceiling.
+
+    A request that does not answer contributes nothing and leaves that coin for
     the next pass -- an outage must not be recorded as "this coin has no
     market". Coins on chains DexScreener does not index are skipped here in
     silence; ``app.intel.tape`` is what covers them.
@@ -182,24 +221,22 @@ async def snapshot_tokens(http, wanted, *, sleep=asyncio.sleep) -> dict:
     addresses = sorted(by_address)
     base = settings.dexscreener_base_url.rstrip("/")
     facts: dict[tuple[int, str], MarketFacts] = {}
-    for start in range(0, len(addresses), BATCH):
-        chunk = addresses[start:start + BATCH]
-        if start:
+    for index, address in enumerate(addresses):
+        if index:
             # Same shared ceiling the name lookup respects: 300 requests/minute.
             await sleep(0.25)
         try:
-            response = await http.get(f"{base}/latest/dex/tokens/{','.join(chunk)}")
+            response = await http.get(f"{base}/latest/dex/tokens/{address}")
             payload = response.json() if response.status_code < 400 else None
         except (httpx.HTTPError, ValueError):
             continue
         pairs = payload.get("pairs") if isinstance(payload, dict) else None
         if not isinstance(pairs, list):
             continue
-        for address in chunk:
-            for chain_id in by_address[address]:
-                parsed = parse_market(pairs, chain_id, address)
-                if parsed is not None:
-                    facts[(chain_id, address)] = parsed
+        for chain_id in by_address[address]:
+            parsed = parse_market(pairs, chain_id, address)
+            if parsed is not None:
+                facts[(chain_id, address)] = parsed
     return facts
 
 

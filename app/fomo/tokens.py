@@ -17,20 +17,34 @@ import httpx
 
 from app.core.config import settings
 
-# FOMO numbers chains; DexScreener names them. Only the chains FOMO actually
-# serves (``fomo_supported_chains``) are worth mapping. Robinhood Chain (4663)
-# is deliberately absent: DexScreener does not index it, and a wrong slug here
-# would silently attach another chain's symbol to its tokens.
+# FOMO numbers chains; DexScreener names them. A wrong slug here would silently
+# attach another chain's symbol to its tokens, so a chain is added only once its
+# slug has been checked against a contract we already know by another route.
+#
+# Robinhood Chain (4663) was deliberately absent until DexScreener started
+# indexing it -- checked against the official PONS contract from
+# ``app.dex.tokens``, which answers on slug ``robinhood`` with its real market.
+# The tape still covers what the screener has not listed there; it is now a
+# fallback rather than the only source (see ``app.intel.refresh.collect``).
+#
+# ``arc`` is Circle's Arc (chain id 5042). FOMO does not serve it, so the id is
+# ours alone: it keys our rows and picks the GoPlus endpoint, and nothing else.
 CHAIN_SLUGS = {
     1: "ethereum",
     56: "bsc",
     143: "monad",
+    4663: "robinhood",
+    5042: "arc",
     8453: "base",
     1399811149: "solana",
 }
 
 # DexScreener's documented ceiling for the comma-joined token endpoint.
 BATCH = 30
+#: Pools one response may carry, for the whole request rather than per coin.
+#: An answer holding exactly this many was cut off somewhere, and the endpoint
+#: does not say where -- see ``app.intel.market.snapshot_tokens``.
+PAIR_CAP = 30
 
 
 def same_address(left: str, right: str) -> bool:
@@ -106,7 +120,14 @@ async def resolve(http, wanted, *, sleep=asyncio.sleep):
         pairs = payload.get("pairs") if isinstance(payload, dict) else None
         if not isinstance(pairs, list):
             continue
+        # An answer at the cap was cut off, and the endpoint does not say
+        # where. A coin missing from it was not necessarily unlisted -- it may
+        # simply not have fitted -- and "asked, nobody lists it" is stored
+        # forever, so a truncated batch may only report what it did find.
+        cut_off = len(pairs) >= PAIR_CAP
         for address in chunk:
             for chain_id in by_address[address]:
-                resolved[(chain_id, address)] = pick_name(pairs, chain_id, address)
+                found = pick_name(pairs, chain_id, address)
+                if found != (None, None) or not cut_off:
+                    resolved[(chain_id, address)] = found
     return resolved

@@ -67,6 +67,7 @@ dex-worker|simple||always|5|yes|Mini Grid Bot DEX worker|$PYTHON -m app.workers.
 dex-sampler|simple||always|5|yes|Mini Grid Bot DEX price sampler|$PYTHON -m app.workers.dex_sampler
 fomo-registry|simple||always|5|yes|Mini Grid Bot FOMO trader registry|$PYTHON -m app.workers.fomo_registry
 chain-tape|simple||always|5|yes|Mini Grid Bot Robinhood Chain trade tape|$PYTHON -m app.workers.chain_tape
+notifier|simple||always|5|yes|Mini Grid Bot Telegram notifier|$PYTHON -m app.workers.notifier
 market-data|oneshot|||| no|Mini Grid Bot daily market data collector|$PYTHON -m app.workers.market_data
 EOF
 )

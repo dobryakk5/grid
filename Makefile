@@ -1,4 +1,4 @@
-.PHONY: install install-systemd test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed fomo-token chain-tape chain-tape-bench chain-tape-rebuild
+.PHONY: install install-systemd test db-init api worker market-data dex-sampler dex-worker bybit-status health fomo-registry fomo-seed fomo-token notifier chain-tape chain-tape-bench chain-tape-rebuild coin-table
 
 install:
 	python3 -m venv .venv
@@ -30,6 +30,10 @@ dex-sampler:
 dex-worker:
 	./scripts/run-dex-worker.sh
 
+# Отправляет операции в Telegram; без токена и чата просто ничего не шлёт.
+notifier:
+	./scripts/run-notifier.sh
+
 fomo-registry:
 	./scripts/run-fomo-registry.sh
 
@@ -49,6 +53,10 @@ fomo-sync:
 
 intel:
 	.venv/bin/python -m app.workers.intel
+
+# Суточная таблица по INTEL_WATCHLIST. ARGS="--collect" -- сперва собрать.
+coin-table:
+	.venv/bin/python scripts/coin_table.py $(ARGS)
 
 chain-tape:
 	./scripts/run-chain-tape.sh

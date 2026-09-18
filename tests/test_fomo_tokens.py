@@ -47,14 +47,15 @@ async def test_resolve_batches_and_records_the_ones_nobody_lists():
         seen.append(request.url.path.rsplit("/", 1)[-1])
         return httpx.Response(200, json={"pairs": [pair("solana", MINT, "USDC", "USD Coin", 5)]})
 
-    wanted = {(SOL, MINT), (SOL, "unlisted"), (4663, "0xrobinhood")}
+    wanted = {(SOL, MINT), (SOL, "unlisted"), (999, "0xnowhere")}
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         found = await resolve(http, wanted, sleep=AsyncMock())
     assert found[(SOL, MINT)] == ("USDC", "USD Coin")
     # Asked and unknown is a stored answer, not a missing key to ask again.
     assert found[(SOL, "unlisted")] == (None, None)
-    # A chain DexScreener does not index is never asked about at all.
-    assert (4663, "0xrobinhood") not in found and 4663 not in CHAIN_SLUGS
+    # A chain DexScreener does not index is never asked about at all. Robinhood
+    # Chain was this example until DexScreener started indexing it.
+    assert (999, "0xnowhere") not in found and 999 not in CHAIN_SLUGS
     assert len(seen) == 1 and seen[0].count(",") == 1
 
 

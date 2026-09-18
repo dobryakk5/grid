@@ -4,7 +4,8 @@ import pytest
 
 from app.trading.math import (
     configured_grid_cells, dca_initial_percent, floor_to_step, grid_buy_levels, grid_lines,
-    ladder_allocations, level_size_weights, strategy_grid_cells, strategy_grid_lines,
+    grid_exposure, ladder_allocations, level_size_weights, quote_per_level_for_budget,
+    strategy_grid_cells, strategy_grid_lines,
 )
 
 
@@ -96,3 +97,29 @@ def test_a_multiplier_of_one_keeps_every_level_the_same_size():
 def test_level_size_weights_refuse_a_non_positive_multiplier():
     with pytest.raises(ValueError):
         level_size_weights(3, Decimal("0"))
+
+
+def test_exposure_counts_the_whole_ladder_not_the_flat_product():
+    # 11 cells at 90 in the middle with 1.2 per step: the flat product would
+    # say 990, the ladder actually needs about 1697.
+    exposure = grid_exposure(Decimal("90"), 11, Decimal("1.2"))
+
+    assert exposure > Decimal("90") * 11
+    assert exposure.quantize(Decimal("0.01")) == Decimal("1697.39")
+
+
+def test_a_flat_grid_still_costs_quote_per_level_times_levels():
+    assert grid_exposure(Decimal("90"), 11, Decimal("1")) == Decimal("990")
+
+
+def test_budget_inverts_exposure_exactly():
+    base = quote_per_level_for_budget(Decimal("900"), 11, Decimal("1.2"))
+
+    assert grid_exposure(base, 11, Decimal("1.2")).quantize(
+        Decimal("0.000001")
+    ) == Decimal("900")
+
+
+def test_a_budget_must_be_positive_to_size_anything():
+    with pytest.raises(ValueError):
+        quote_per_level_for_budget(Decimal("0"), 11, Decimal("1.2"))

@@ -64,7 +64,12 @@ from app.trading.recommendations import (
 from app.trading.backtest import run_grid_backtest
 from app.trading.grid_analysis import analyze_grid
 from app.trading.pnl import grid_cell_statistics
-from app.trading.math import configured_grid_cells, strategy_grid_cells
+from app.trading.math import (
+    configured_grid_cells,
+    grid_exposure,
+    level_size_weights,
+    strategy_grid_cells,
+)
 from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/api")
@@ -148,11 +153,33 @@ class ProfilePayload(BaseModel):
                 self.step_price,
                 mode="arithmetic",
             ) + cells
-        required = self.quote_per_level * len(cells)
+        # What the grid costs to hold, not what one level costs: with a
+        # multiplier the edges are several times the middle cell, so the flat
+        # product understates the funding requirement badly enough to strand
+        # the ladder halfway down.
+        required = grid_exposure(
+            self.quote_per_level, len(cells), self.level_size_multiplier
+        )
+        if self.level_size_multiplier > 1:
+            if self.buy_below_grid and self.below_grid_lower_price is not None:
+                raise ValueError(
+                    "level_size_multiplier and buying below the grid cannot be "
+                    "combined: the martingale is measured from the middle of "
+                    "the corridor, and an open-ended extension below it has no "
+                    "middle to measure from"
+                )
+            if self.max_investment is None:
+                raise ValueError(
+                    "max_investment is required when level_size_multiplier is "
+                    f"above 1: this grid commits {required} at full exposure"
+                )
         if self.strategy == "dca" and self.max_investment is None:
             raise ValueError("max_investment is required for DCA Grid")
         if self.strategy != "dca" and self.max_investment is not None and self.max_investment < required:
-            raise ValueError(f"max_investment must be at least {required} USDT")
+            raise ValueError(
+                f"max_investment must be at least {required} "
+                f"(full exposure of {len(cells)} levels)"
+            )
         if self.stop_loss is not None and self.stop_loss >= self.lower_price:
             raise ValueError("stop_loss must be below lower_price")
         if self.take_profit is not None and self.take_profit <= self.upper_price:
@@ -178,6 +205,7 @@ class BacktestPayload(BaseModel):
         Decimal("250"), Decimal("500"), Decimal("1000"), Decimal("1500")
     ], min_length=1, max_length=12)
     quote_per_level: Decimal = Field(default=Decimal("100"), gt=0)
+    level_size_multiplier: Decimal = Field(default=Decimal("1"), ge=1, le=5)
     fee_rate: Decimal = Field(default=Decimal("0.001"), ge=0, le=Decimal("0.02"))
     days: int = Field(default=30, ge=2, le=365)
     below_grid_lower_price: Decimal | None = Field(default=None, gt=0)
@@ -248,6 +276,19 @@ def range_dict(grid_range: GridRange | None) -> dict | None:
     }
 
 
+def profile_level_quotes(profile: GridProfile) -> list[Decimal]:
+    """The per-cell BUY sizes this profile will actually place."""
+    cells = configured_grid_cells(profile)
+    base = Decimal(profile.quote_per_level)
+    multiplier = Decimal(getattr(profile, "level_size_multiplier", 1) or 1)
+    return [base * weight for weight in level_size_weights(len(cells), multiplier)]
+
+
+def profile_exposure(profile: GridProfile) -> Decimal:
+    """Quote committed with every cell long at once."""
+    return sum(profile_level_quotes(profile), Decimal("0"))
+
+
 def profile_dict(profile: GridProfile, *, current_range: GridRange | None = None, active_orders: int = 0, filled_buys: int = 0, filled_sells: int = 0) -> dict:
     return {
         "id": profile.id,
@@ -260,6 +301,8 @@ def profile_dict(profile: GridProfile, *, current_range: GridRange | None = None
         "step_price": str(profile.step_price),
         "quote_per_level": str(profile.quote_per_level),
         "level_size_multiplier": str(getattr(profile, "level_size_multiplier", 1) or 1),
+        "exposure_quote": str(profile_exposure(profile)),
+        "level_quotes": [str(quote) for quote in profile_level_quotes(profile)],
         "regime_state": getattr(profile, "regime_state", "RANGE"),
         "break_down_action": getattr(profile, "break_down_action", "continue"),
         "breakout_confirm_bars": profile.breakout_confirm_bars,
@@ -760,6 +803,7 @@ async def backtest(payload: BacktestPayload) -> dict:
             upper=payload.upper_price,
             step=step,
             quote_per_level=payload.quote_per_level,
+            level_size_multiplier=payload.level_size_multiplier,
             fee_rate=payload.fee_rate,
             below_grid_lower_price=payload.below_grid_lower_price,
             buy_below_grid=payload.buy_below_grid,
@@ -811,6 +855,10 @@ async def grid_analysis(payload: GridAnalysisPayload) -> dict:
             candles,
             quote_per_level=Decimal(profile.quote_per_level) if profile is not None else None,
             capital_limit=(Decimal(profile.max_investment) if profile is not None and profile.max_investment is not None else None),
+            level_size_multiplier=(
+                Decimal(getattr(profile, "level_size_multiplier", 1) or 1)
+                if profile is not None else Decimal("1")
+            ),
         )
         logger.info("GRID_CANDIDATES_GENERATED symbol=%s count=%d", symbol, analysis["candidate_counts"]["generated"])
         for item in analysis["rejected_candidates"]:

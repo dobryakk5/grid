@@ -26,7 +26,7 @@ from app.db.session import SessionLocal, database_target
 from app.api.fomo_activity import cohort_identities, token_names
 from app.intel import llm
 from app.intel.history import FLOW_WINDOWS, flow_series, flow_windows, holder_trend
-from app.intel.market import MarketFacts
+from app.intel.market import MarketFacts, circulating_pct
 from app.intel.movement import movement
 from app.intel.refresh import refresh as run_refresh
 from app.intel.scoring import score
@@ -98,25 +98,6 @@ def _market_row(snapshot) -> dict | None:
         "pair_created_at_ms": snapshot.pair_created_at_ms,
     }
     return {**row, "circulating_pct": circulating_pct(row)}
-
-
-def circulating_pct(market) -> Decimal | None:
-    """Доля обращения от FDV, и только когда две цифры не спорят друг с другом.
-
-    Тот же отбор, что и в ``scoring.quality``: DexScreener считает FDV по пулу,
-    а капитализацию по токену, поэтому пара может дать «в обращении 130%». Это
-    расхождение двух чисел, а не факт о предложении, и показывать его нельзя —
-    иначе экран и оценка сказали бы разное об одной монете.
-    """
-    if market is None:
-        return None
-    cap, fdv = market.get("market_cap_usd"), market.get("fdv_usd")
-    if not cap or not fdv or Decimal(fdv) <= 0:
-        return None
-    cap, fdv = Decimal(cap), Decimal(fdv)
-    if cap > fdv * Decimal("1.05"):
-        return None
-    return min(cap / fdv, Decimal(1)) * 100
 
 
 async def holder_samples(session, keys, *, since_ms: int) -> dict:

@@ -3,6 +3,8 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import StrategyEvent
+from app.notify.events import grid_kind
+from app.notify.outbox import enqueue
 
 
 def record_strategy_event(
@@ -27,4 +29,16 @@ def record_strategy_event(
         event_metadata=metadata or {},
     )
     session.add(event)
+    # Queued in the caller's transaction, so a tick that rolls back takes the
+    # message with the event it was about. `NOTIFY_EVENTS` decides which of
+    # these are worth a phone buzzing; most of them are not.
+    enqueue(session, grid_kind(event_type), {
+        "profile_id": profile_id,
+        "event_type": event_type,
+        "from_state": from_state,
+        "to_state": to_state,
+        "reason": reason,
+        "market_price": market_price,
+        "metadata": metadata or {},
+    })
     return event

@@ -3,6 +3,9 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from unittest.mock import AsyncMock
+
+from app.fomo.tokens import CHAIN_SLUGS, PAIR_CAP
 from app.intel.market import parse_market, snapshot_tokens
 
 
@@ -69,6 +72,10 @@ def test_a_broken_field_is_unknown_not_zero(broken):
 
 
 async def test_a_chain_without_a_screener_is_never_asked_about():
+    # 4663 used to be this example and is no longer: DexScreener indexes
+    # Robinhood Chain now. The rule is unchanged -- a chain with no slug is not
+    # asked about -- so the test names a chain that genuinely has none.
+    assert 4663 in CHAIN_SLUGS and 999 not in CHAIN_SLUGS
     seen = []
 
     def handle(request):
@@ -76,9 +83,9 @@ async def test_a_chain_without_a_screener_is_never_asked_about():
         return httpx.Response(200, json={"pairs": [pair()]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
-        facts = await snapshot_tokens(http, {(8453, "0xcoin"), (4663, "0xrh")})
-    assert len(seen) == 1 and "0xrh" not in seen[0]
-    assert (8453, "0xcoin") in facts and (4663, "0xrh") not in facts
+        facts = await snapshot_tokens(http, {(8453, "0xcoin"), (999, "0xnowhere")})
+    assert len(seen) == 1 and "0xnowhere" not in seen[0]
+    assert (8453, "0xcoin") in facts and (999, "0xnowhere") not in facts
 
 
 async def test_a_batch_that_does_not_answer_leaves_its_coins_for_next_time():
@@ -88,3 +95,36 @@ async def test_a_batch_that_does_not_answer_leaves_its_coins_for_next_time():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         # Not "these coins have no market" -- nothing was learned about them.
         assert await snapshot_tokens(http, {(8453, "0xcoin")}) == {}
+
+
+async def test_every_coin_gets_its_own_request_so_they_do_not_share_the_cap():
+    # Ответ источника ограничен тридцатью пулами на ЗАПРОС, а не на монету.
+    # Пока адреса летели пачкой, монета с двадцатью одним пулом записывалась
+    # как трёхпуловая, а её ликвидность -- суммой по этим трём.
+    seen = []
+
+    def handle(request):
+        address = str(request.url).rsplit("/", 1)[-1]
+        seen.append(address)
+        return httpx.Response(200, json={"pairs": [
+            pair(baseToken={"address": address, "symbol": "COIN", "name": "Coin"})]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        facts = await snapshot_tokens(http, {(8453, "0xone"), (8453, "0xtwo")},
+                                      sleep=AsyncMock())
+    assert sorted(seen) == ["0xone", "0xtwo"]
+    assert not any("," in address for address in seen)
+    assert len(facts) == 2
+
+
+async def test_an_answer_at_the_cap_is_marked_as_a_floor():
+    def handle(request):
+        return httpx.Response(200, json={"pairs": [
+            pair(pairAddress=f"0xpair{index}") for index in range(PAIR_CAP)]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        facts = await snapshot_tokens(http, {(8453, "0xcoin")}, sleep=AsyncMock())
+    fact = facts[(8453, "0xcoin")]
+    assert fact.pools == PAIR_CAP and fact.pools_capped is True
+    # Тот же ответ, но не упершийся в потолок, ничего про границу не говорит.
+    assert parse_market([pair()], 8453, "0xcoin").pools_capped is False

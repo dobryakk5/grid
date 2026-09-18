@@ -46,6 +46,12 @@ th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:
 .icons .copy:hover{border-color:var(--accent);color:var(--accent)}
 .icons .kill{color:var(--bad)}
 .icons .kill:hover{border-color:var(--bad);background:#2a1519}
+/* Gas and tx are icon-only: the value/hash lives in the native tooltip so
+   the column stays a quiet glyph until the operator actually wants it. */
+.cell-icon{display:inline-flex;color:var(--muted);vertical-align:middle}
+.cell-icon svg{width:15px;height:15px;display:block}
+.cell-icon.tx-link{color:var(--accent);text-decoration:none}
+.cell-icon:hover{color:var(--accent)}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;
  padding:20px;max-width:420px}
 dialog::backdrop{background:rgba(0,0,0,.6)}
@@ -105,7 +111,14 @@ const BASE=location.pathname.replace(/\/history(\/.*)?$/,'');
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num=(v,d=8)=>v==null?'—':Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d});
-const time=v=>v?new Date(v).toLocaleString('ru-RU'):'—';
+// Time first because that's what an operator scans a fresh row for; the date
+// only matters once rows span more than a day, so it drops to a quiet second line.
+const timeCell=v=>{
+ if(!v)return '—';
+ const d=new Date(v);
+ return `${esc(d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}))}`+
+  `<div class="muted" style="font-size:11px">${esc(d.toLocaleDateString('ru-RU'))}</div>`;
+};
 let orders=[];
 
 async function api(path){
@@ -145,6 +158,12 @@ const CROSS='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-w
 const COPY='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"'+
  ' stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>'+
  '<path d="M10.5 3.5H3.5a1 1 0 00-1 1v7"/></svg>';
+const GAS='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"'+
+ ' stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 14.5V3a1 1 0 011-1h5a1 1 0 011 1v11"/>'+
+ '<path d="M1.5 14.5h9"/><path d="M9.5 6h1.5a1 1 0 011 1v4a1 1 0 002 0V4.8a1 1 0 00-.3-.7L12.3 2.7"/></svg>';
+const LINK='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"'+
+ ' stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h-3a1 1 0 00-1 1v8a1 1 0 001 1h8a1 1 0 001-1v-3"/>'+
+ '<path d="M9.5 2.5h4v4"/><path d="M7 9l6.5-6.5"/></svg>';
 
 function actions(o){
  // Copying never touches the row it copies, so it is offered on every order --
@@ -172,7 +191,7 @@ function render(){
   <div class="tile"><div class="label">Ждут цены</div><div class="value warn">${open.length}</div></div>`;
  $('summary').textContent=`${orders.length} записей`;
  $('rows').innerHTML=orders.length?orders.map(o=>`<tr>
-  <td class="muted">${time(o.created_at)}</td>
+  <td class="muted">${timeCell(o.created_at)}</td>
   <td><b>${coin(o)}</b><div class="muted" style="font-size:11px">${esc(o.source)}</div></td>
   <td><span class="tag ${o.side==='Buy'?'buy':'sell'}">${o.side==='Buy'?'покупка':'продажа'}</span></td>
   <td><span class="tag ${o.status==='MISSED'?'missed':(o.open?'open':'')}"${
@@ -183,9 +202,11 @@ function render(){
   <td class="num">${num(o.limit_price)}</td>
   <td class="num">${o.fill_price?`<b>${num(o.fill_price)}</b>`:'—'}</td>
   <td class="num">${num(o.filled_amount_out)}</td>
-  <td class="num muted">${o.gas_quote?num(o.gas_quote,6)+' '+esc(o.gas_quote_coin||''):'—'}</td>
-  <td>${o.tx_hash?`<a class="tx" target="_blank" rel="noopener noreferrer"
-     href="https://robinhoodchain.blockscout.com/tx/${esc(o.tx_hash)}">${esc(o.tx_hash.slice(0,10))}…</a>`:'<span class="muted">—</span>'}</td>
+  <td class="num">${o.gas_quote?`<span class="cell-icon gas" title="${num(o.gas_quote,6)} ${esc(o.gas_quote_coin||'')}">${GAS}</span>`
+    :'<span class="muted">—</span>'}</td>
+  <td>${o.tx_hash?`<a class="cell-icon tx-link" target="_blank" rel="noopener noreferrer"
+     title="${esc(o.tx_hash)}"
+     href="https://robinhoodchain.blockscout.com/tx/${esc(o.tx_hash)}">${LINK}</a>`:'<span class="muted">—</span>'}</td>
   <td>${actions(o)}</td>
  </tr>`).join(''):'<tr><td colspan="11" class="empty">Пока ни одной сделки.</td></tr>';
 }

@@ -91,3 +91,35 @@ def test_backtest_can_continue_after_breakdown():
         break_down_action="continue",
     )
     assert result["status"] == "COMPLETED"
+
+
+def test_a_martingale_backtest_buys_the_lower_level_bigger():
+    flat = run_grid_backtest(
+        [Decimal("66"), Decimal("63"), Decimal("64")],
+        lower=Decimal("62"), upper=Decimal("67"), step=Decimal("1"),
+        quote_per_level=Decimal("100"), fee_rate=Decimal("0"),
+    )
+    martingale = run_grid_backtest(
+        [Decimal("66"), Decimal("63"), Decimal("64")],
+        lower=Decimal("62"), upper=Decimal("67"), step=Decimal("1"),
+        quote_per_level=Decimal("100"), fee_rate=Decimal("0"),
+        level_size_multiplier=Decimal("1.5"),
+    )
+
+    # Same crossings, same cycle -- but the cells away from the middle carry
+    # more money, so both the capital at risk and the profit are larger.
+    assert flat["cycles"] == martingale["cycles"] == 1
+    assert Decimal(martingale["initial_quote"]) > Decimal(flat["initial_quote"])
+    assert Decimal(martingale["realized_pnl"]) > Decimal(flat["realized_pnl"])
+
+
+def test_a_multiplier_of_one_is_the_flat_backtest():
+    prices = [Decimal("66"), Decimal("63"), Decimal("64")]
+    kwargs = dict(
+        lower=Decimal("62"), upper=Decimal("67"), step=Decimal("1"),
+        quote_per_level=Decimal("100"), fee_rate=Decimal("0.001"),
+    )
+
+    assert run_grid_backtest(prices, **kwargs) == run_grid_backtest(
+        prices, level_size_multiplier=Decimal("1"), **kwargs
+    )

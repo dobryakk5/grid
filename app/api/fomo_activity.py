@@ -129,11 +129,12 @@ def prepare_theses(payload):
 async def name_tokens(session, wanted) -> int:
     """Name the coins we have not asked about yet; return how many got a name.
 
-    Two sources, because no single one covers the chains FOMO serves. Tokens on
-    Robinhood Chain come from ``chain_tokens``, read from each contract's own
-    ``symbol()`` by the tape scanner -- DexScreener does not index that chain at
-    all, which is why its busiest coins stayed bare addresses. Everything else
-    comes from DexScreener. The contract's own answer wins where both exist.
+    Two sources, because neither is complete on its own. Tokens on Robinhood
+    Chain come from ``chain_tokens``, read from each contract's own ``symbol()``
+    by the tape scanner -- back when DexScreener did not index that chain, this
+    was the only thing keeping its busiest coins from staying bare addresses,
+    and it still names what the screener has not listed. Everything else comes
+    from DexScreener. The contract's own answer wins where both exist.
 
     Called after the legs are committed, in its own transaction: naming is
     cosmetic and talks to a third party, and an import that has just walked

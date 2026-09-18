@@ -43,6 +43,8 @@ from app.dex.repository import DexIntentRepository
 from app.dex.risk import evaluate
 from app.dex.tokens import DexPair, Token, resolve_pair
 from app.dex.uniswap import UniswapClient, UniswapError
+from app.notify.events import dex_kind
+from app.notify.outbox import enqueue
 
 __all__ = [
     "StorageUnavailable",
@@ -665,6 +667,17 @@ async def record_fill(
     intent.block_hash = fill.block_hash
     # The payload only exists to make a re-broadcast possible; it is confirmed.
     intent.raw_tx = None
+    # Queued before the commit that makes the fill real, so the message and the
+    # fill are the same decision: no commit, no message. The realised figures
+    # are read back from this row at send time, so only the status has to be
+    # carried here.
+    enqueue(session, dex_kind(IntentStatus.FILLED), {
+        "intent_id": intent.id,
+        "profile_id": intent.profile_id,
+        "symbol": intent.symbol,
+        "side": intent.side,
+        "status": IntentStatus.FILLED,
+    })
     await session.commit()
 
     logger.info(
