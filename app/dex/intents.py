@@ -108,8 +108,16 @@ TRANSITIONS: dict[str, frozenset[str]] = {
             IntentStatus.EXPIRED,
         }
     ),
+    # WAITING is reachable from here because the pre-flight sits inside SIGNING:
+    # a route the node says will revert is refused before anything is signed, so
+    # the level has spent nothing and goes back to watching.
     IntentStatus.SIGNING: frozenset(
-        {IntentStatus.SUBMITTING, IntentStatus.BLOCKED, IntentStatus.FAILED}
+        {
+            IntentStatus.SUBMITTING,
+            IntentStatus.WAITING,
+            IntentStatus.BLOCKED,
+            IntentStatus.FAILED,
+        }
     ),
     IntentStatus.SUBMITTING: frozenset({IntentStatus.PENDING, IntentStatus.FAILED}),
     # Back to SUBMITTING covers a re-broadcast or a gas bump on the same nonce.

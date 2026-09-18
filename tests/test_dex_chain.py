@@ -4,7 +4,13 @@ import pytest
 from eth_account import Account
 
 from app.core.config import settings
-from app.dex.chain import ChainClient, ChainError, to_int
+from app.dex.chain import (
+    ChainClient,
+    ChainError,
+    PreflightRevert,
+    decode_revert,
+    to_int,
+)
 
 
 KEY = "0x" + "11" * 32
@@ -123,3 +129,99 @@ def test_signing_still_refuses_without_a_key(monkeypatch):
     )
     with pytest.raises(ChainError):
         client().sign({"chainId": 4663, "nonce": 0, "to": None, "value": 0})
+
+
+# ---- pre-flight ----------------------------------------------------------
+
+
+class FakeProvider:
+    """Answers ``eth_call`` the way a node does, error object and all."""
+
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+
+    async def make_request(self, method, params):
+        self.requests.append((method, params))
+        return self.response
+
+
+def preflight_client(response):
+    c = client(private_key=KEY)
+    c.w3.provider = FakeProvider(response)
+    return c
+
+
+async def test_a_pre_flight_that_the_node_accepts_sends_the_real_calldata():
+    c = preflight_client({"jsonrpc": "2.0", "id": 1, "result": "0x"})
+
+    await c.preflight({"to": "0x" + "ab" * 20, "data": "0xdeadbeef", "value": 0})
+
+    method, (payload, block) = c.w3.provider.requests[0]
+    assert method == "eth_call" and block == "latest"
+    assert payload["data"] == "0xdeadbeef"
+    assert payload["from"] == c.wallet_address
+    assert payload["value"] == "0x0"
+
+
+async def test_a_custom_error_comes_back_named_not_as_four_bytes():
+    """The whole point of reading ``data`` instead of calling w3.eth.call.
+
+    ``CurrencyNotSettled`` is what a route through a pool the router cannot
+    settle reverts with; as "execution reverted" it is indistinguishable from
+    a price that merely moved.
+    """
+    c = preflight_client(
+        {"error": {"code": 3, "message": "execution reverted", "data": "0x5212cba1"}}
+    )
+
+    with pytest.raises(PreflightRevert) as exc:
+        await c.preflight({"to": "0x" + "ab" * 20, "data": "0xdead", "value": 0})
+
+    assert "CurrencyNotSettled" in str(exc.value)
+
+
+async def test_a_node_that_cannot_answer_is_not_reported_as_a_bad_swap():
+    """An outage must not read as "this route reverts": the two are acted on
+    differently, and only one of them says anything about the trade."""
+
+    class DeadProvider:
+        async def make_request(self, method, params):
+            raise OSError("connection refused")
+
+    c = client(private_key=KEY)
+    c.w3.provider = DeadProvider()
+
+    with pytest.raises(ChainError) as exc:
+        await c.preflight({"to": "0x" + "ab" * 20, "data": "0xdead", "value": 0})
+
+    assert not isinstance(exc.value, PreflightRevert)
+    assert "pre-flight call failed" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        ("0x5212cba1", "CurrencyNotSettled"),
+        ("0x8b063d73" + "00" * 64, "V4TooLittleReceived"),
+        ("0x5bf6f916", "TransactionDeadlinePassed"),
+        ("0xd81b2f2e" + "00" * 32, "AllowanceExpired"),
+        ("0x1234abcd", "unknown error 0x1234abcd"),
+        ("0x", "reverted without a reason"),
+        (None, "reverted without a reason"),
+    ],
+)
+def test_revert_data_is_decoded_as_far_as_it_can_be_read(data, expected):
+    assert expected in decode_revert(data)
+
+
+def test_a_revert_string_is_read_out_of_its_abi_encoding():
+    reason = "STF"
+    payload = (
+        "0x08c379a0"
+        + f"{32:064x}"
+        + f"{len(reason):064x}"
+        + reason.encode().hex().ljust(64, "0")
+    )
+
+    assert decode_revert(payload) == reason

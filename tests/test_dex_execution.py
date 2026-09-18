@@ -4,7 +4,12 @@ import pytest
 
 from app.core.config import settings
 from app.dex.dexscreener import MarketSnapshot
-from app.dex.execution import execute_buy, execute_swap
+from app.dex.chain import PreflightRevert
+from app.dex.execution import (
+    _build_transaction,
+    execute_buy,
+    execute_swap,
+)
 from app.dex.intents import IntentStatus
 from app.dex.tokens import resolve_pair
 from app.dex.uniswap import QuoteResult, UniswapError
@@ -37,9 +42,12 @@ class FakeMarket:
 class FakeChain:
     chain_id = 4663
 
-    def __init__(self, *, balance="1", allowance=0):
+    def __init__(self, *, balance="1", allowance=0, preflight_error=None,
+                 gas_estimate=200_000):
         self.balance = Decimal(balance)
         self.allowance = allowance
+        self.preflight_error = preflight_error
+        self.gas_estimate = gas_estimate
         self.calls = []
 
     @property
@@ -65,6 +73,26 @@ class FakeChain:
     def sign_typed_data(self, *, domain, types, message):
         self.calls.append("sign_typed_data")
         return "0x" + "cd" * 65
+
+    async def preflight(self, tx):
+        self.calls.append("preflight")
+        if self.preflight_error is not None:
+            raise PreflightRevert(self.preflight_error)
+
+    async def estimate_gas(self, tx):
+        self.calls.append("estimate_gas")
+        return self.gas_estimate
+
+    async def pending_nonce(self, address=None):
+        self.calls.append("pending_nonce")
+        return 7
+
+    async def fee_fields(self, *, priority_wei=None):
+        return {"maxFeePerGas": 10**9, "maxPriorityFeePerGas": 0}
+
+    def sign(self, tx):
+        self.calls.append("sign")
+        raise AssertionError("nothing in these tests may be signed")
 
 
 class FakeUniswap:
@@ -564,3 +592,88 @@ async def test_a_level_that_was_merely_waiting_still_stands_down():
     await _Progress(Repo(), intent).stand_down()
 
     assert moved == [IntentStatus.WAITING]
+
+
+# ---- pre-flight ----------------------------------------------------------
+
+
+@pytest.fixture
+def any_router(monkeypatch):
+    """The fake swap targets "0xrouter"; let it through the router check."""
+    monkeypatch.setattr(settings, "rh_universal_router_address", "")
+
+
+CURRENCY_NOT_SETTLED = (
+    "CurrencyNotSettled (the route leaves an unsettled balance in the pool "
+    "manager) [0x5212cba1]; execution reverted"
+)
+
+
+async def test_a_route_the_node_says_will_revert_is_never_signed(any_router):
+    """The failure this exists for.
+
+    Two live buys were routed through a v4 pool the Universal Router cannot
+    settle. Both reverted on chain, and both were paid for in full -- a nonce,
+    a signature and half a million gas each, to learn something one eth_call
+    would have said for free.
+    """
+    chain = FakeChain(preflight_error=CURRENCY_NOT_SETTLED)
+    uniswap = FakeUniswap()
+
+    outcome = await buy(chain=chain, uniswap=uniswap, dry_run=False)
+
+    assert outcome.status == IntentStatus.WAITING
+    assert "CurrencyNotSettled" in outcome.reason
+    # Nothing irreversible happened: no nonce taken, no signature, no broadcast.
+    assert "preflight" in chain.calls
+    assert "sign" not in chain.calls
+    assert "pending_nonce" not in chain.calls
+
+
+async def test_a_swap_that_passes_the_pre_flight_is_built_as_before(any_router):
+    chain = FakeChain()
+    swap = {"to": "0xrouter", "data": "0xdead", "value": "0x0", "gasLimit": "0x0"}
+
+    tx = await _build_transaction(chain, swap, native_input=True)
+
+    assert tx["nonce"] == 7
+    assert tx["data"] == "0xdead"
+    # The order is the point: nothing is reserved until the swap is known to run.
+    assert chain.calls.index("preflight") < chain.calls.index("pending_nonce")
+
+
+async def test_the_gas_limit_is_measured_not_taken_on_trust(any_router):
+    """The reverted swaps carried the API's flat 650000, so estimate_gas -- the
+    call that would have refused them -- was never made."""
+    chain = FakeChain(gas_estimate=900_000)
+    swap = {"to": "0xrouter", "data": "0xdead", "value": "0x0", "gasLimit": 650_000}
+
+    tx = await _build_transaction(chain, swap, native_input=True)
+
+    assert "estimate_gas" in chain.calls
+    assert tx["gas"] == 1_035_000  # 900000 + 15%
+
+
+async def test_the_gas_limit_never_drops_below_the_routers_own_figure(any_router):
+    """An estimate is measured against this block; the swap lands in a later
+    one, and may cross a tick more than it simulated."""
+    chain = FakeChain(gas_estimate=100_000)
+    swap = {"to": "0xrouter", "data": "0xdead", "value": "0x0", "gasLimit": 650_000}
+
+    tx = await _build_transaction(chain, swap, native_input=True)
+
+    assert tx["gas"] == 747_500  # 650000 + 15%
+
+
+async def test_a_node_that_will_not_estimate_falls_back_to_the_router(any_router):
+    class NoEstimate(FakeChain):
+        async def estimate_gas(self, tx):
+            self.calls.append("estimate_gas")
+            raise RuntimeError("estimate unavailable")
+
+    chain = NoEstimate()
+    swap = {"to": "0xrouter", "data": "0xdead", "value": "0x0", "gasLimit": 650_000}
+
+    tx = await _build_transaction(chain, swap, native_input=True)
+
+    assert tx["gas"] == 747_500  # 650000 + 15%

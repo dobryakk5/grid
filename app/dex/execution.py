@@ -34,7 +34,7 @@ from app.core.config import settings
 from app.db.models import DexIntent
 from app.dex.approvals import ensure_allowance, sign_permit
 from app.dex.accounting import execution_values, realised_price
-from app.dex.chain import ChainClient, ChainError, to_int
+from app.dex.chain import ChainClient, ChainError, PreflightRevert, to_int
 from app.dex.dexscreener import DexScreenerClient, MarketSnapshot
 from app.dex.intents import IntentStatus, assert_transition
 from app.dex.pricing import GasCost, PricingError, convert_gas
@@ -161,7 +161,7 @@ class _Progress:
         if self.active and self.intent.status != IntentStatus.MISSED:
             await self.repository.missed(self.intent, reason)
 
-    async def stand_down(self) -> None:
+    async def stand_down(self, reason: str | None = None) -> None:
         """Price moved away or the quote was not good enough: keep watching.
 
         A MISSED level keeps its label instead of being walked back to WAITING.
@@ -171,7 +171,9 @@ class _Progress:
         """
         if self.active and self.intent.status == IntentStatus.MISSED:
             return
-        await self.to(IntentStatus.WAITING)
+        await self.to(
+            IntentStatus.WAITING, **({"last_error": reason[:500]} if reason else {})
+        )
 
 
 async def execute_swap(
@@ -245,7 +247,9 @@ async def execute_swap(
             market_price=snapshot.price_quote,
         )
 
-    await progress.to(IntentStatus.TRIGGERED)
+    # A new attempt clears the last one's note: the reason a level stood down
+    # is worth showing while it is still standing down, and misleading after.
+    await progress.to(IntentStatus.TRIGGERED, last_error=None)
     await chain.ensure_ready()
     # A wrong decimals value rescales every amount silently; check before money.
     await chain.verify_token(pair.base)
@@ -348,9 +352,30 @@ async def execute_swap(
     await progress.to(IntentStatus.SIGNING)
     signature = sign_permit(chain, quote.permit_data) if quote.needs_permit else None
     swap = await uniswap.build_swap(quote, signature=signature)
-    tx = await _build_transaction(
-        chain, swap, native_input=token_in.native, repository=repository
-    )
+    try:
+        tx = await _build_transaction(
+            chain, swap, native_input=token_in.native, repository=repository
+        )
+    except PreflightRevert as exc:
+        # Nothing was signed and no nonce was spent: this quote's route does not
+        # execute. Keep the level watching -- the next tick quotes again, and
+        # may well be routed somewhere that works.
+        logger.warning("%s %s: pre-flight refused the swap: %s", pair.symbol, side, exc)
+        await progress.stand_down(f"pre-flight: {exc}")
+        return SwapOutcome(
+            status=IntentStatus.WAITING,
+            symbol=pair.symbol,
+            side=side,
+            reason=f"pre-flight refused the swap: {exc}",
+            market_price=snapshot.price_quote,
+            quoted_price=executable,
+            worst_price=guaranteed,
+            worst_amount_out=guaranteed_out,
+            amount_in=amount_in,
+            amount_out=expected_out,
+            funding_note=underfunded,
+            **_gas_estimate(quote),
+        )
     if token_in.native and int(tx["value"]) != amount_in_wei:
         # The router built something other than what we asked to spend.
         raise UniswapError(
@@ -540,21 +565,9 @@ async def _build_transaction(
     native_input: bool,
     repository: DexIntentRepository | None = None,
 ) -> dict:
-    # With a repository the nonce is reserved under a row lock, so two workers
-    # cannot hand the same one to two transactions; without it the chain's
-    # pending count is the only source, which is fine for a single manual run.
-    chain_nonce = await chain.pending_nonce()
-    nonce = (
-        await repository.reserve_nonce(
-            wallet=chain.wallet_address, chain_nonce=chain_nonce
-        )
-        if repository is not None
-        else chain_nonce
-    )
     _check_router(swap["to"])
     tx: dict = {
         "chainId": chain.chain_id,
-        "nonce": nonce,
         "to": swap["to"],
         "data": swap["data"],
         "value": to_int(swap.get("value")) or 0,
@@ -562,11 +575,39 @@ async def _build_transaction(
     if not native_input and tx["value"]:
         raise UniswapError("ERC-20 input must not carry a native value")
 
+    # Ask the node whether this executes before paying to find out. A reverted
+    # swap is charged in full -- the router does not refund the attempt -- and
+    # the failures worth catching here are structural: a route through a pool
+    # this router cannot settle reverts in every block, not just this one.
+    await chain.preflight(tx)
+
     gas_limit = to_int(swap.get("gasLimit")) or to_int(swap.get("gas"))
-    tx["gas"] = (
-        int(Decimal(gas_limit) * _GAS_BUFFER)
-        if gas_limit
-        else int(Decimal(await chain.estimate_gas(tx)) * _GAS_BUFFER)
+    estimated = 0
+    try:
+        estimated = await chain.estimate_gas(tx)
+    except Exception as exc:
+        # The pre-flight already passed, so this is the node declining to
+        # measure rather than a swap that cannot run. Fall back to the router's
+        # own figure; with neither, there is nothing honest to sign.
+        if not gas_limit:
+            raise
+        logger.warning("gas estimate failed, using the router's %s: %s", gas_limit, exc)
+    # Never below what the router asked for: the estimate is measured against
+    # this block, and a swap that crosses one tick more than it simulated still
+    # has to fit.
+    tx["gas"] = int(Decimal(max(estimated, gas_limit or 0)) * _GAS_BUFFER)
+
+    # The nonce is reserved last, once the swap is known to be executable. With
+    # a repository it is handed out under a row lock, so two workers cannot give
+    # the same one to two transactions; without it the chain's pending count is
+    # the only source, which is fine for a single manual run.
+    chain_nonce = await chain.pending_nonce()
+    tx["nonce"] = (
+        await repository.reserve_nonce(
+            wallet=chain.wallet_address, chain_nonce=chain_nonce
+        )
+        if repository is not None
+        else chain_nonce
     )
 
     max_fee = to_int(swap.get("maxFeePerGas"))

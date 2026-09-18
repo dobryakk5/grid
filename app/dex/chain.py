@@ -16,6 +16,7 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 
+from eth_abi import decode
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import AsyncHTTPProvider, AsyncWeb3
@@ -24,11 +25,29 @@ from web3.exceptions import TransactionNotFound
 from app.core.config import settings
 from app.dex.tokens import Token
 
-__all__ = ["MAX_UINT256", "ChainClient", "ChainError", "SignedPayload", "to_int"]
+__all__ = [
+    "MAX_UINT256",
+    "ChainClient",
+    "ChainError",
+    "PreflightRevert",
+    "SignedPayload",
+    "decode_revert",
+    "to_int",
+]
 
 
 class ChainError(RuntimeError):
     """RPC unreachable, wrong chain, or a transaction we refuse to send."""
+
+
+class PreflightRevert(ChainError):
+    """The calldata reverts against current state, so it is never signed.
+
+    Separate from its parent because it is not an outage: the node answered,
+    and the answer was that this swap cannot execute. Nothing has been signed
+    and no nonce has been spent, so the level simply stands down and tries
+    again on the next tick with a fresh quote.
+    """
 
 
 _ERC20_ABI = [
@@ -92,6 +111,80 @@ def to_int(value) -> int | None:
             return None
         return int(text, 16) if text.startswith(("0x", "0X")) else int(text)
     raise TypeError(f"unsupported numeric value: {value!r}")
+
+
+# Four bytes of revert data say nothing in a log line, so the errors this stack
+# actually produces are named here. Anything not listed still comes back as its
+# selector: an unrecognised error is a fact worth printing, not a reason to say
+# "reverted" and lose the only evidence there is.
+_REVERT_SELECTORS: dict[str, str] = {
+    # Universal Router
+    "0x5bf6f916": "TransactionDeadlinePassed (the quote expired before it was sent)",
+    "0x2c4029e9": "ExecutionFailed (a router command reverted)",
+    "0xd76a1e9e": "InvalidCommandType",
+    "0x1231ae40": "ETHNotAccepted",
+    "0x38bbd576": "InvalidEthSender",
+    # Uniswap v4 pool manager and router
+    "0x5212cba1": (
+        "CurrencyNotSettled (the route leaves an unsettled balance in the pool "
+        "manager -- usually a hooked pool this router cannot swap through)"
+    ),
+    "0x486aa307": "PoolNotInitialized (no such pool)",
+    "0x8b063d73": "V4TooLittleReceived (slippage: the route no longer clears its own floor)",
+    "0x39d35496": "V3TooLittleReceived (slippage)",
+    "0x849eaf98": "V2TooLittleReceived (slippage)",
+    "0x4e86d23a": "TooLittleReceived (slippage)",
+    "0x675cae38": "InsufficientToken",
+    "0x6a12f104": "InsufficientETH",
+    "0xbe8b8507": "SwapAmountCannotBeZero",
+    "0x6f5ffb7e": "ContractLocked",
+    # Permit2
+    "0xd81b2f2e": "AllowanceExpired (the Permit2 allowance needs renewing)",
+    "0xf96fb071": "InsufficientAllowance (the Permit2 allowance is too small)",
+    "0x7939f424": "TransferFromFailed (the wallet could not pay the input token)",
+    "0xcd21db4f": "SignatureExpired",
+    "0x815e1d64": "InvalidSigner",
+}
+
+
+def decode_revert(data) -> str:
+    """Say what revert data means, as far as it can be read.
+
+    ``Error(string)`` and ``Panic(uint256)`` carry their own reason; everything
+    else on this stack is a custom error, which is nothing but a selector until
+    it is looked up.
+    """
+    if isinstance(data, str):
+        text = data.strip()
+        if not text.startswith(("0x", "0X")):
+            return text or "reverted without a reason"
+        try:
+            raw = bytes.fromhex(text[2:])
+        except ValueError:
+            return text
+    elif isinstance(data, (bytes, bytearray)):
+        raw = bytes(data)
+    else:
+        return "reverted without a reason"
+
+    if not raw:
+        return "reverted without a reason"
+    if len(raw) < 4:
+        return "0x" + raw.hex()
+
+    selector = "0x" + raw[:4].hex()
+    if selector == "0x08c379a0":  # Error(string)
+        try:
+            return decode(["string"], raw[4:])[0] or "reverted without a reason"
+        except Exception:
+            return selector
+    if selector == "0x4e487b71":  # Panic(uint256)
+        try:
+            return f"panic {hex(decode(['uint256'], raw[4:])[0])}"
+        except Exception:
+            return selector
+    named = _REVERT_SELECTORS.get(selector)
+    return f"{named} [{selector}]" if named else f"unknown error {selector}"
 
 
 @dataclass(frozen=True)
@@ -244,6 +337,41 @@ class ChainClient:
         payload = dict(tx)
         payload["from"] = self.wallet_address
         return int(await self.w3.eth.estimate_gas(payload))
+
+    async def preflight(self, tx: dict) -> None:
+        """Run this exact calldata against current state; raise if it reverts.
+
+        A swap that cannot execute costs a nonce, a signature and the gas of
+        the attempt -- a reverted transaction is paid for in full. Asking the
+        node first costs one ``eth_call`` and turns that into a level that
+        simply keeps waiting. It is deliberately the raw JSON-RPC call rather
+        than ``w3.eth.call``: the reason a swap will not execute is in the
+        error's ``data``, and every custom error would otherwise arrive as the
+        same unhelpful "execution reverted".
+
+        A simulation is not a promise -- it reads the current block, and the
+        transaction lands in a later one -- but everything it does catch would
+        otherwise have been paid for on chain.
+        """
+        payload = {
+            "from": self.wallet_address,
+            "to": AsyncWeb3.to_checksum_address(tx["to"]),
+            "data": tx["data"],
+            "value": hex(int(tx.get("value") or 0)),
+        }
+        if tx.get("gas"):
+            payload["gas"] = hex(int(tx["gas"]))
+        try:
+            response = await self.w3.provider.make_request("eth_call", [payload, "latest"])
+        except Exception as exc:  # the node, not the transaction
+            raise ChainError(f"pre-flight call failed: {exc}") from None
+        error = response.get("error")
+        if error is None:
+            return
+        detail = decode_revert(error.get("data"))
+        raise PreflightRevert(
+            f"{detail}; {error.get('message', 'execution reverted')}"
+        )
 
     # ---- writes ----------------------------------------------------------
 
