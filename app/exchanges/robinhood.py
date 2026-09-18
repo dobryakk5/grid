@@ -136,19 +136,30 @@ class RobinhoodClient:
     # ---- account ---------------------------------------------------------
 
     async def api_key_info(self) -> dict:
-        """Configuration readout -- no key material is read or returned."""
+        """Configuration readout -- no key material is read or returned.
+
+        Carries ``readOnly``/``permissions`` in the same shape Bybit and MEXC
+        return, because that is what the profile start gate reads and it has
+        no business knowing which venue is underneath. On a DEX "may this
+        account trade?" is "can we sign and broadcast?": without a wallet
+        signer or an RPC the venue can quote and price but never place a
+        swap, which is exactly what read-only means on the other two.
+        """
+        can_trade = bool(settings.rh_private_key) and bool(settings.rh_rpc_url)
         return {
             "result": {
                 "venue": self.name,
                 "chainId": self.chain_id,
                 "chain": self.chain,
+                "readOnly": 0 if can_trade else 1,
+                "permissions": {"Spot": ["SpotTrade"] if can_trade else []},
                 "rpcConfigured": bool(settings.rh_rpc_url),
                 "universalRouterVersion": settings.rh_universal_router_version,
                 "pairs": list(list_pairs()),
                 "walletConfigured": bool(settings.rh_private_key),
                 "dryRun": settings.dex_dry_run,
-                "note": "swaps run through scripts/dex_buy.py; the engine path "
-                        "is not wired up yet",
+                "note": "limit levels become dex_intents; the DEX worker signs "
+                        "and broadcasts them",
             }
         }
 

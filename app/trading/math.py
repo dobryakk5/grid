@@ -98,6 +98,29 @@ def configured_grid_cells(profile) -> list[tuple[Decimal, Decimal]]:
     return strategy_grid_cells(extension, lower, step, mode="arithmetic") + main
 
 
+def level_size_weights(count: int, multiplier: Decimal) -> list[Decimal]:
+    """Martingale weights across a grid: 1 in the middle, growing to the edges.
+
+    A per-fill martingale doubles after a loss. A grid has no losses to count,
+    but it does have a middle: cells near the centre of the corridor trade the
+    most often for the least edge, while the cells at the bottom and the top
+    are the ones worth committing size to. So the weight is a function of the
+    distance from the middle cell, not of what happened before -- the same
+    shape, indexed by price instead of by streak.
+
+    Symmetric on purpose: a cell's SELL sells what its own BUY bought, so a
+    heavy cell at the top is exactly what "sell size into the top" means here.
+    """
+    if count <= 0:
+        return []
+    if multiplier <= 0:
+        raise ValueError("level size multiplier must be positive")
+    # An even number of cells has no single middle cell; the half-step
+    # distance that falls out of this keeps the shape symmetric anyway.
+    centre = Decimal(count - 1) / Decimal(2)
+    return [multiplier ** abs(Decimal(index) - centre) for index in range(count)]
+
+
 def ladder_allocations(
     total: Decimal, count: int, *, mode: str, multiplier: Decimal = Decimal("1.5")
 ) -> list[Decimal]:

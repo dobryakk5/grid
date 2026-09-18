@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -396,3 +396,37 @@ async def test_seed_missing_buy_orders_does_not_seed_while_a_signed_buy_is_pendi
     )
 
     assert exchange.placed == []
+
+
+@pytest.mark.asyncio
+async def test_a_martingale_grid_sizes_a_cell_by_its_distance_from_the_middle():
+    # 62000..67000 in five cells: the middle cell buys at 64000, and 65000 is
+    # one step above it, so it commits one multiplier's worth more.
+    martingale = profile()
+    martingale.level_size_multiplier = Decimal("1.2")
+    exchange = FakeExchange()
+
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([], current_range()), martingale
+    )
+
+    placed = exchange.placed[0]
+    assert placed["price"] == Decimal("65000")
+    expected = (Decimal("25") * Decimal("1.2") / Decimal("65000")).quantize(
+        Decimal("0.000001"), rounding=ROUND_DOWN
+    )
+    assert placed["qty"] == expected
+
+
+@pytest.mark.asyncio
+async def test_without_a_multiplier_every_cell_still_buys_quote_per_level():
+    exchange = FakeExchange()
+
+    await GridEngine(exchange).seed_missing_buy_orders(
+        FakeSession([], current_range()), profile()
+    )
+
+    expected = (Decimal("25") / Decimal("65000")).quantize(
+        Decimal("0.000001"), rounding=ROUND_DOWN
+    )
+    assert exchange.placed[0]["qty"] == expected

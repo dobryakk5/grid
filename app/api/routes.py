@@ -79,6 +79,9 @@ class ProfilePayload(BaseModel):
     upper_price: Decimal = Field(gt=0)
     step_price: Decimal = Field(gt=0)
     quote_per_level: Decimal = Field(gt=0)
+    # 1 = every level the same size; above 1 turns the grid into a martingale
+    # around the middle of the corridor (app/trading/math.level_size_weights).
+    level_size_multiplier: Decimal = Field(default=Decimal("1"), ge=1, le=5)
     break_down_action: Literal["continue", "stop", "trailing_buy", "recommend"] = "continue"
     breakout_confirm_bars: int = Field(default=2, ge=2, le=12)
     breakout_ema_period: int = Field(default=50, ge=5, le=300)
@@ -256,6 +259,7 @@ def profile_dict(profile: GridProfile, *, current_range: GridRange | None = None
         "upper_price": str(profile.upper_price),
         "step_price": str(profile.step_price),
         "quote_per_level": str(profile.quote_per_level),
+        "level_size_multiplier": str(getattr(profile, "level_size_multiplier", 1) or 1),
         "regime_state": getattr(profile, "regime_state", "RANGE"),
         "break_down_action": getattr(profile, "break_down_action", "continue"),
         "breakout_confirm_bars": profile.breakout_confirm_bars,
@@ -488,6 +492,7 @@ async def create_profile(payload: ProfilePayload) -> dict:
             upper_price=payload.upper_price,
             step_price=payload.step_price,
             quote_per_level=payload.quote_per_level,
+            level_size_multiplier=payload.level_size_multiplier,
             regime_state="RANGE",
             break_down_action=payload.break_down_action,
             breakout_confirm_bars=payload.breakout_confirm_bars,
@@ -617,6 +622,7 @@ async def update_profile(profile_id: int, payload: ProfilePayload) -> dict:
         profile.upper_price = payload.upper_price
         profile.step_price = payload.step_price
         profile.quote_per_level = payload.quote_per_level
+        profile.level_size_multiplier = payload.level_size_multiplier
         profile.regime_state = "RANGE"
         profile.break_down_action = payload.break_down_action
         profile.breakout_confirm_bars = payload.breakout_confirm_bars

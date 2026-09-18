@@ -98,6 +98,27 @@ async def test_api_key_info_reports_config_without_key_material():
     assert not any("key" in str(value).lower() for value in result.values())
 
 
+async def test_a_signing_wallet_reads_as_spot_trading_permission(monkeypatch):
+    # The profile start gate reads the Bybit-shaped permissions block, so a
+    # venue that can sign has to say so there or it can never be started.
+    monkeypatch.setattr(settings, "rh_private_key", "0x" + "11" * 32)
+    monkeypatch.setattr(settings, "rh_rpc_url", "https://rpc.example")
+
+    result = (await client().api_key_info())["result"]
+
+    assert result["readOnly"] == 0
+    assert result["permissions"]["Spot"] == ["SpotTrade"]
+
+
+async def test_without_a_signer_the_venue_is_read_only(monkeypatch):
+    monkeypatch.setattr(settings, "rh_private_key", "")
+
+    result = (await client().api_key_info())["result"]
+
+    assert result["readOnly"] == 1
+    assert result["permissions"]["Spot"] == []
+
+
 async def test_market_orders_still_refuse_and_name_their_stage():
     # A swap has no resting order to skip; the engine path is what is missing.
     with pytest.raises(DexNotImplementedError) as exc:

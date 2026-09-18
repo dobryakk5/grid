@@ -36,6 +36,13 @@ class GridProfile(Base):
     upper_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     step_price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     quote_per_level: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    # Martingale sizing across the corridor: quote_per_level is the middle
+    # cell's size and every step away from the middle multiplies it, so the
+    # grid stays quiet around the centre and commits real money at the edges.
+    # 1 means every level is the same size, which is what it used to be.
+    level_size_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("1"), server_default="1"
+    )
     regime_state: Mapped[str] = mapped_column(String(24), nullable=False, default="RANGE")
     break_down_action: Mapped[str] = mapped_column(
         String(16), nullable=False, default="continue"
@@ -685,6 +692,10 @@ class TokenSnapshot(Base):
     change_h24: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     pair_created_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     pools: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Ответ источника уперся в свой потолок пулов: сумма по пулам тогда нижняя
+    # граница, а не итог. NULL -- снимок старше этой колонки, и про него это
+    # неизвестно; ноль и «не спрашивали» тут обязаны различаться.
+    pools_capped: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     __table_args__ = (
         Index("ix_token_snapshots_token_time", "chain_id", "token_address", "observed_at_ms"),

@@ -4,7 +4,7 @@ import pytest
 
 from app.trading.math import (
     configured_grid_cells, dca_initial_percent, floor_to_step, grid_buy_levels, grid_lines,
-    ladder_allocations, strategy_grid_cells, strategy_grid_lines,
+    ladder_allocations, level_size_weights, strategy_grid_cells, strategy_grid_lines,
 )
 
 
@@ -71,3 +71,28 @@ def test_configured_grid_can_extend_buys_below_main_range():
         (Decimal("60"), Decimal("61")),
         (Decimal("61"), Decimal("62")),
     ]
+
+
+def test_level_size_weights_are_light_in_the_middle_and_heavy_at_both_edges():
+    weights = level_size_weights(5, Decimal("1.2"))
+
+    assert weights[2] == Decimal("1")
+    assert weights[0] == weights[-1] == Decimal("1.2") ** 2
+    assert weights[1] == weights[-2] == Decimal("1.2")
+
+
+def test_an_even_grid_has_no_middle_cell_and_stays_symmetric():
+    weights = level_size_weights(4, Decimal("1.2"))
+
+    assert weights[0] == weights[-1]
+    assert weights[1] == weights[-2]
+    assert weights[1] < weights[0]
+
+
+def test_a_multiplier_of_one_keeps_every_level_the_same_size():
+    assert level_size_weights(6, Decimal("1")) == [Decimal("1")] * 6
+
+
+def test_level_size_weights_refuse_a_non_positive_multiplier():
+    with pytest.raises(ValueError):
+        level_size_weights(3, Decimal("0"))

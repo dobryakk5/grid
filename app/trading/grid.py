@@ -26,6 +26,7 @@ from app.trading.math import (
     dca_initial_percent,
     floor_to_step,
     ladder_allocations,
+    level_size_weights,
     strategy_grid_cells,
 )
 from app.trading.recommendations import create_recommendation, expire_recommendations
@@ -1437,7 +1438,7 @@ class GridEngine:
                     )
                     return
                 if buy_price < market_price:
-                    await self._seed_buy(session, profile, buy_price, info, grid_range.id)
+                    await self._seed_buy(session, profile, buy_price, info, grid_range.id, cells)
                     return
                 continue
 
@@ -1472,7 +1473,7 @@ class GridEngine:
             if latest.status in retry_statuses:
                 if latest.side == "Buy":
                     if buy_price < market_price:
-                        await self._seed_buy(session, profile, buy_price, info, grid_range.id)
+                        await self._seed_buy(session, profile, buy_price, info, grid_range.id, cells)
                         return
                 else:
                     # A cancelled SELL means this cell may still own BTC from the
@@ -1521,6 +1522,29 @@ class GridEngine:
                 cells.append(rounded)
         return cells
 
+    @staticmethod
+    def level_quote(
+        profile: GridProfile,
+        cells: list[tuple[Decimal, Decimal]],
+        buy_price: Decimal,
+    ) -> Decimal:
+        """Quote budget for one cell's BUY.
+
+        ``quote_per_level`` is the middle cell's size; a multiplier above 1
+        scales it up with every step away from the middle (see
+        :func:`level_size_weights`). Only the seeding BUY reads this -- once a
+        cell has traded, its replacements carry the quantity that cell already
+        owns, so the shape survives without being recomputed.
+        """
+        base = Decimal(profile.quote_per_level)
+        multiplier = Decimal(getattr(profile, "level_size_multiplier", 1) or 1)
+        if multiplier == 1 or not cells:
+            return base
+        prices = [cell[0] for cell in cells]
+        if buy_price not in prices:
+            return base
+        return base * level_size_weights(len(cells), multiplier)[prices.index(buy_price)]
+
     async def _seed_market_buy(
         self, session: AsyncSession, profile: GridProfile, grid_buy_price: Decimal,
         market_price: Decimal, info: InstrumentInfo, range_id: int,
@@ -1551,8 +1575,10 @@ class GridEngine:
         buy_price: Decimal,
         info: InstrumentInfo,
         range_id: int,
+        cells: list[tuple[Decimal, Decimal]] | None = None,
     ) -> None:
-        qty = self.qty_from_quote(Decimal(profile.quote_per_level), buy_price, info)
+        quote = self.level_quote(profile, cells or [], buy_price)
+        qty = self.qty_from_quote(quote, buy_price, info)
         await self._place_and_store(
             session=session,
             profile=profile,
@@ -1569,11 +1595,12 @@ class GridEngine:
         )
         await session.commit()
         logger.info(
-            "Profile %s seeded BUY %s %s @ %s",
+            "Profile %s seeded BUY %s %s @ %s (%s quote)",
             profile.id,
             profile.symbol,
             qty,
             buy_price,
+            quote,
         )
 
     async def _seed_buy_quote(

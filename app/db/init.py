@@ -207,6 +207,7 @@ async def init_db() -> None:
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS buy_ladder_mode VARCHAR(24) NOT NULL DEFAULT 'linear'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS sell_ladder_mode VARCHAR(24) NOT NULL DEFAULT 'linear'",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS ladder_multiplier NUMERIC(12, 6) NOT NULL DEFAULT 1.5",
+            "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS level_size_multiplier NUMERIC(12, 6) NOT NULL DEFAULT 1",
             "ALTER TABLE grid_profiles ADD COLUMN IF NOT EXISTS current_range_id INTEGER REFERENCES grid_ranges(id) ON DELETE SET NULL",
             "ALTER TABLE grid_orders ADD COLUMN IF NOT EXISTS order_role VARCHAR(32) NOT NULL DEFAULT 'grid'",
             "ALTER TABLE grid_orders ADD COLUMN IF NOT EXISTS range_id INTEGER REFERENCES grid_ranges(id) ON DELETE SET NULL",
@@ -263,6 +264,10 @@ async def init_db() -> None:
             "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS sells_h6 INTEGER",
             "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS buys_h1 INTEGER",
             "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS sells_h1 INTEGER",
+            # Ответ DexScreener отдаёт не больше 30 пулов на запрос и не
+            # сообщает, что обрезал: снимок обязан отличать «столько и есть» от
+            # «не меньше столько».
+            "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS pools_capped BOOLEAN",
         ):
             await conn.execute(text(statement))
 
