@@ -320,3 +320,28 @@ async def test_a_registry_that_now_claims_other_decimals_is_checked_again():
         await c.verify_token(Token(symbol="USDG", address=address, decimals=18))
 
     assert len(reads) == 2
+
+
+# ---- two endpoints for one chain -----------------------------------------
+
+
+def test_a_blank_tape_endpoint_falls_back_to_the_trading_one(monkeypatch):
+    """Blank is the single-endpoint setup, and must stay the default."""
+    monkeypatch.setattr(settings, "rh_rpc_url", "https://public.example")
+    monkeypatch.setattr(settings, "chain_tape_rpc_url", "")
+
+    c = ChainClient(rpc_url=settings.chain_tape_rpc_url or None)
+
+    assert c.w3.provider.endpoint_uri == "https://public.example"
+
+
+def test_the_tape_reads_through_its_own_endpoint_when_one_is_set(monkeypatch):
+    """A rate limit the tape walks into must not be one a swap stands behind."""
+    monkeypatch.setattr(settings, "rh_rpc_url", "https://metered.example/key")
+    monkeypatch.setattr(settings, "chain_tape_rpc_url", "https://public.example")
+
+    tape = ChainClient(rpc_url=settings.chain_tape_rpc_url or None)
+    trading = ChainClient()
+
+    assert tape.w3.provider.endpoint_uri == "https://public.example"
+    assert trading.w3.provider.endpoint_uri == "https://metered.example/key"

@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     # Read-only for now: no private key is read anywhere until execution lands.
     rh_chain_id: int = 4663
     rh_rpc_url: str = ""
+    # The tape reads the same chain through its own endpoint, because it wants
+    # the opposite thing from the same node. Trading needs a few small reads
+    # to be answered now and never refused; the tape needs `eth_getLogs` over
+    # thousands of blocks at a time, and does not care when the answer lands.
+    # Provider tiers price those apart -- Alchemy's free tier serves execution
+    # happily and caps getLogs at a 10-block range, which the tape cannot use
+    # at all -- and, more to the point, a rate limit the tape walks into must
+    # not be one a swap is standing behind. Blank means "same as rh_rpc_url",
+    # which is the single-endpoint setup.
+    chain_tape_rpc_url: str = ""
     # Trading wallet key -- a dedicated bot account, never the main wallet's
     # seed. Read lazily by app/dex/chain.py and never logged or persisted.
     rh_private_key: str = ""

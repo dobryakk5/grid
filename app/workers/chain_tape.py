@@ -337,7 +337,7 @@ async def run_realtime_pass(client: ChainClient, batch: AdaptiveBatchSize, *, ch
 
 async def main() -> None:
     await init_db()
-    client = ChainClient()
+    client = ChainClient(rpc_url=settings.chain_tape_rpc_url or None)
     await client.ensure_ready()
     chain_id = settings.rh_chain_id
     batch = AdaptiveBatchSize(
