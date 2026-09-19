@@ -50,18 +50,28 @@ class DexWorker:
         intents = await repository.open_intents()
         # Signed rows first, always.
         ordered = sorted(intents, key=lambda row: row.status not in SIGNED_STATUSES)
+        # Ids, not rows: the rollback below expires every object the session
+        # holds, so a row read after one failed level would try to reload
+        # itself from inside plain attribute access -- IO async SQLAlchemy
+        # cannot do, raising past this loop and taking the whole pass with it.
+        # One level failing is normal; it must cost only that level.
+        queue = [row.id for row in ordered]
 
-        for intent in ordered:
-            action = plan_intent(IntentView.of(intent))
+        for intent_id in queue:
+            action = "PLAN"
             try:
+                intent = await repository.reload(intent_id)
+                if intent is None:
+                    continue
+                action = plan_intent(IntentView.of(intent))
                 await self._apply(session, repository, intent, action)
             except (
                 ChainError, DexScreenerError, DexConfigError, StorageUnavailable,
             ) as exc:
-                logger.warning("intent %s (%s): %s", intent.id, action, exc)
+                logger.warning("intent %s (%s): %s", intent_id, action, exc)
                 await session.rollback()
             except Exception:
-                logger.exception("intent %s failed on %s", intent.id, action)
+                logger.exception("intent %s failed on %s", intent_id, action)
                 await session.rollback()
 
     async def _apply(self, session, repository, intent, action: str) -> None:

@@ -217,6 +217,12 @@ class ChainClient:
         self.w3 = AsyncWeb3(AsyncHTTPProvider(url, request_kwargs={"timeout": 30}))
         key = private_key if private_key is not None else settings.rh_private_key
         self._account = Account.from_key(key.strip()) if key and key.strip() else None
+        # Answers that cannot change while this process lives. Robinhood's
+        # public RPC is rate-limited, and a worker that re-asks the same two
+        # questions for every level on every tick spends its budget on them
+        # instead of on the reads a trade actually needs.
+        self._chain_confirmed = False
+        self._verified_decimals: dict[str, int] = {}
 
     async def close(self) -> None:
         provider = getattr(self.w3, "provider", None)
@@ -248,7 +254,13 @@ class ChainClient:
         )
 
     async def ensure_ready(self) -> None:
-        """Fail before any money moves if the RPC points at the wrong chain."""
+        """Fail before any money moves if the RPC points at the wrong chain.
+
+        Asked once per process: the endpoint is fixed at construction and a
+        chain does not change its id underneath a running worker.
+        """
+        if self._chain_confirmed:
+            return
         try:
             actual = await self.w3.eth.chain_id
         except Exception as exc:
@@ -257,6 +269,7 @@ class ChainClient:
             raise ChainError(
                 f"RPC reports chain {actual}, expected {self.chain_id}"
             )
+        self._chain_confirmed = True
 
     # ---- reads -----------------------------------------------------------
 
@@ -283,13 +296,23 @@ class ChainClient:
 
         A wrong decimals value silently rescales every amount by orders of
         magnitude, so this runs before the first transaction of a session.
+
+        The answer is remembered per address: an ERC-20's decimals are fixed at
+        deployment, and what this guards against is a wrong *registry* entry,
+        which is caught the first time the address is used. Keyed by address
+        rather than symbol, so re-pointing a symbol at another contract -- or
+        changing the decimals claimed for the same one -- is checked again.
         """
+        address = (token.address or "").lower()
+        if self._verified_decimals.get(address) == token.decimals:
+            return
         on_chain = await self.token_decimals(token)
         if on_chain != token.decimals:
             raise ChainError(
                 f"{token.symbol} reports {on_chain} decimals on chain, "
                 f"registry says {token.decimals}; fix DEX_TOKENS before trading"
             )
+        self._verified_decimals[address] = on_chain
 
     async def token_allowance(self, token: Token, spender: str, owner: str | None = None) -> int:
         """Raw allowance in the token's own units."""

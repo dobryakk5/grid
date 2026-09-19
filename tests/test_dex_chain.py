@@ -225,3 +225,98 @@ def test_a_revert_string_is_read_out_of_its_abi_encoding():
     )
 
     assert decode_revert(payload) == reason
+
+
+# ---- answers asked once --------------------------------------------------
+
+
+class FakeEth:
+    def __init__(self):
+        self.chain_id_reads = 0
+
+    @property
+    async def chain_id(self):
+        self.chain_id_reads += 1
+        return 4663
+
+
+async def test_the_chain_id_is_confirmed_once_not_every_tick():
+    """Robinhood's public RPC rate-limits; a question whose answer cannot
+    change must not be re-asked for every level on every pass."""
+    c = client(private_key=KEY)
+    eth = FakeEth()
+    c.w3.eth = eth
+
+    for _ in range(5):
+        await c.ensure_ready()
+
+    assert eth.chain_id_reads == 1
+
+
+async def test_a_wrong_chain_is_still_refused_and_not_remembered():
+    class WrongChain(FakeEth):
+        @property
+        async def chain_id(self):
+            self.chain_id_reads += 1
+            return 1
+
+    c = client(private_key=KEY)
+    c.w3.eth = WrongChain()
+
+    for _ in range(2):
+        with pytest.raises(ChainError):
+            await c.ensure_ready()
+
+    assert c.w3.eth.chain_id_reads == 2
+
+
+def _counting_decimals(c, value=6):
+    reads = []
+
+    async def token_decimals(token):
+        reads.append(token.address)
+        return value
+
+    c.token_decimals = token_decimals
+    return reads
+
+
+async def test_token_decimals_are_read_once_per_address():
+    from app.dex.tokens import Token
+
+    c = client(private_key=KEY)
+    reads = _counting_decimals(c)
+    usdg = Token(symbol="USDG", address="0x" + "ab" * 20, decimals=6)
+
+    for _ in range(4):
+        await c.verify_token(usdg)
+
+    assert len(reads) == 1
+
+
+async def test_a_symbol_repointed_at_another_contract_is_checked_again():
+    """The guard is against a wrong registry entry, so what is remembered is
+    the address -- not the symbol, which dynamic tokens can move."""
+    from app.dex.tokens import Token
+
+    c = client(private_key=KEY)
+    reads = _counting_decimals(c)
+
+    await c.verify_token(Token(symbol="CASHCAT", address="0x" + "ab" * 20, decimals=6))
+    await c.verify_token(Token(symbol="CASHCAT", address="0x" + "cd" * 20, decimals=6))
+
+    assert len(reads) == 2
+
+
+async def test_a_registry_that_now_claims_other_decimals_is_checked_again():
+    from app.dex.tokens import Token
+
+    c = client(private_key=KEY)
+    reads = _counting_decimals(c, value=6)
+    address = "0x" + "ab" * 20
+
+    await c.verify_token(Token(symbol="USDG", address=address, decimals=6))
+    with pytest.raises(ChainError):
+        await c.verify_token(Token(symbol="USDG", address=address, decimals=18))
+
+    assert len(reads) == 2

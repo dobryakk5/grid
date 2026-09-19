@@ -126,6 +126,19 @@ class DexIntentRepository:
 
     # ---- transitions -----------------------------------------------------
 
+    async def reload(self, intent_id: int) -> DexIntent | None:
+        """Read one intent back, whatever state the session was left in.
+
+        A rollback expires every object the session is holding, and reading an
+        expired one is implicit IO that async SQLAlchemy refuses to do. So the
+        worker carries ids from one level to the next, not rows, and asks for
+        the row here -- where the load is awaited like any other read.
+
+        ``None`` means the row is gone: cancelled from the UI while the pass
+        was running, which is not an error.
+        """
+        return await self.session.get(DexIntent, intent_id)
+
     async def transition(self, intent: DexIntent, target: str, **fields) -> DexIntent:
         """Move one intent, refusing any move the state machine forbids."""
         assert_transition(intent.status, target)
