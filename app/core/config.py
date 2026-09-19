@@ -46,11 +46,22 @@ class Settings(BaseSettings):
     # Robinhood Chain only ever deployed Universal Router 2.1.1; asking for 2.0
     # is an error there, so the version is pinned rather than left to a default.
     rh_universal_router_version: str = "2.1.1"
-    # The only Universal Router deployed on Robinhood Chain. Swap calldata is
-    # refused if it points anywhere else -- we are about to sign it, and a
-    # transaction to an unexpected contract is not something to find out about
-    # afterwards. Blank disables the check.
-    rh_universal_router_address: str = "0x8876789976decbfcbbbe364623c63652db8c0904"
+    # Universal Routers we will sign calldata for, comma-separated. Anything
+    # else is refused -- we are about to sign it, and a transaction to an
+    # unexpected contract is not something to find out about afterwards.
+    # Blank disables the check.
+    #
+    # A list rather than one address, because Robinhood Chain has more than one
+    # live Universal Router and the Trading API decides which it builds for.
+    # Both defaults below were verified on chain: each carries the
+    # execute(bytes,bytes[],uint256) selector and embeds this chain's Permit2,
+    # v4 PoolManager and V3 factory, and each is settling swaps in recent
+    # blocks. Pinning only one of them is what refuses every quote the API
+    # happens to route through the other.
+    rh_universal_router_address: str = (
+        "0x8876789976decbfcbbbe364623c63652db8c0904,"
+        "0x204FAca1764B154221e35c0d20aBb3c525710498"
+    )
 
     dex_chain_slug: str = "robinhood"
     dexscreener_base_url: str = "https://api.dexscreener.com"
@@ -169,6 +180,11 @@ class Settings(BaseSettings):
     # better USD estimate than any external price feed.
     usd_quote_symbols: str = "USDG"
     chain_tape_poll_seconds: float = 5.0
+    # What to wait after the node refuses a pass for asking too often, and the
+    # ceiling that wait doubles towards. The public endpoint rate-limits hard
+    # enough that retrying every poll interval simply keeps the limit tripped.
+    chain_tape_backoff_seconds: float = 5.0
+    chain_tape_backoff_max_seconds: float = 120.0
     chain_tape_block_batch_max: int = 2000
     chain_tape_block_batch_min: int = 50
     # Blocks the tape stays behind the chain head before treating a block as

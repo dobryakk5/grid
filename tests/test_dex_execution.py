@@ -677,3 +677,57 @@ async def test_a_node_that_will_not_estimate_falls_back_to_the_router(any_router
     tx = await _build_transaction(chain, swap, native_input=True)
 
     assert tx["gas"] == 747_500  # 650000 + 15%
+
+
+# ---- which routers we will sign for --------------------------------------
+
+
+ROUTER_A = "0x8876789976decbfcbbbe364623c63652db8c0904"
+ROUTER_B = "0x204FAca1764B154221e35c0d20aBb3c525710498"
+
+
+def _pin(monkeypatch, value):
+    monkeypatch.setattr(settings, "rh_universal_router_address", value)
+
+
+def test_either_live_router_is_signable(monkeypatch):
+    """The bug this exists for: one pinned address, and every quote the
+    Trading API routed through the chain's other live Universal Router was
+    refused -- orders that had reached their limit, turned away at signing."""
+    from app.dex.execution import _check_router
+
+    _pin(monkeypatch, f"{ROUTER_A},{ROUTER_B}")
+
+    _check_router(ROUTER_A)
+    _check_router(ROUTER_B.lower())
+    _check_router(ROUTER_A.upper())
+
+
+def test_an_address_nobody_listed_is_still_refused(monkeypatch):
+    """The point of the guard is unchanged: we are about to sign this."""
+    from app.dex.execution import _check_router
+
+    _pin(monkeypatch, f"{ROUTER_A},{ROUTER_B}")
+
+    with pytest.raises(UniswapError) as exc:
+        _check_router("0x" + "de" * 20)
+
+    assert "not one of the configured" in str(exc.value)
+
+
+def test_one_address_on_its_own_still_works(monkeypatch):
+    from app.dex.execution import _check_router
+
+    _pin(monkeypatch, ROUTER_A)
+
+    _check_router(ROUTER_A)
+    with pytest.raises(UniswapError):
+        _check_router(ROUTER_B)
+
+
+def test_blank_disables_the_check(monkeypatch):
+    from app.dex.execution import _check_router
+
+    _pin(monkeypatch, "")
+
+    _check_router("0x" + "de" * 20)

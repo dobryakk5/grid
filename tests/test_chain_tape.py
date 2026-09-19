@@ -145,3 +145,47 @@ def test_non_usd_quote_symbol_leaves_the_row_unpriced_for_now():
 
 def test_empty_transfers_list_yields_no_rows():
     assert classify([], {WALLET_A}, PAIR, chain_id=4663) == []
+
+
+# ---- backing off a node that is refusing us ------------------------------
+
+
+def test_the_wait_doubles_while_the_node_keeps_refusing():
+    """Retrying a 429 at the normal cadence keeps the limit tripped: the
+    refused request still spends the budget that would have served the next."""
+    from app.chain.tape import RateLimitBackoff
+
+    backoff = RateLimitBackoff(base=5.0, maximum=120.0)
+
+    waits = [backoff.record_refusal() for _ in range(7)]
+
+    assert waits == [5.0, 10.0, 20.0, 40.0, 80.0, 120.0, 120.0]
+
+
+def test_one_pass_getting_through_drops_the_wait_entirely():
+    """The tape wants the next block range as soon as it is allowed to have
+    it -- it is days behind, and a cautious ramp back costs hours."""
+    from app.chain.tape import RateLimitBackoff
+
+    backoff = RateLimitBackoff(base=5.0, maximum=120.0)
+    backoff.record_refusal()
+    backoff.record_refusal()
+
+    backoff.record_success()
+
+    assert backoff.current == 0.0
+
+
+def test_a_rate_limit_is_told_apart_from_every_other_failure():
+    """They are answered differently: one waits, the other is a bug to see."""
+    from app.chain.tape import is_rate_limited_error
+
+    class Refused(Exception):
+        status = 429
+
+    assert is_rate_limited_error(Refused())
+    assert is_rate_limited_error(Exception("429, message='Too Many Requests'"))
+    assert is_rate_limited_error(Exception("rate limit exceeded"))
+    assert not is_rate_limited_error(
+        Exception("value too long for type character varying(32)")
+    )

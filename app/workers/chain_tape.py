@@ -45,7 +45,9 @@ from app.chain.tape import (
     fetch_wallet_transfers,
     group_by_tx,
     is_batch_too_large_error,
+    is_rate_limited_error,
     price_swap,
+    RateLimitBackoff,
 )
 from app.chain.discovery import discover_wallets
 from app.chain.tokens import resolve_token_meta
@@ -345,6 +347,10 @@ async def main() -> None:
         minimum=settings.chain_tape_block_batch_min,
         maximum=settings.chain_tape_block_batch_max,
     )
+    backoff = RateLimitBackoff(
+        base=settings.chain_tape_backoff_seconds,
+        maximum=settings.chain_tape_backoff_max_seconds,
+    )
     logger.info(
         "chain tape worker started (every %ss, discovery every %ss)",
         settings.chain_tape_poll_seconds,
@@ -369,9 +375,18 @@ async def main() -> None:
                 written = await run_realtime_pass(client, batch, chain_id=chain_id)
                 if written:
                     logger.info("recorded %s swap rows", written)
-            except Exception:
-                logger.exception("chain tape pass failed")
-            await asyncio.sleep(settings.chain_tape_poll_seconds)
+                backoff.record_success()
+            except Exception as exc:
+                if is_rate_limited_error(exc):
+                    # Not worth a traceback: it is one line, it is expected on
+                    # a shared endpoint, and it says nothing about the tape.
+                    logger.warning(
+                        "node is rate-limiting the tape; waiting %.0fs",
+                        backoff.record_refusal(),
+                    )
+                else:
+                    logger.exception("chain tape pass failed")
+            await asyncio.sleep(max(settings.chain_tape_poll_seconds, backoff.current))
     finally:
         await client.close()
 

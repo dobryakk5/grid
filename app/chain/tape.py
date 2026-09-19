@@ -51,6 +51,7 @@ from app.dex.tokens import DexPair
 __all__ = [
     "TRANSFER_TOPIC",
     "AdaptiveBatchSize",
+    "RateLimitBackoff",
     "ChainSwapRow",
     "classify",
     "classify_any",
@@ -60,6 +61,7 @@ __all__ = [
     "fetch_transfers",
     "group_by_tx",
     "is_batch_too_large_error",
+    "is_rate_limited_error",
     "price_swap",
 ]
 
@@ -99,9 +101,49 @@ class ChainSwapRow:
     pricing_source: str = "UNPRICED"
 
 
+_RATE_LIMITED_NEEDLES = ("429", "too many requests", "rate limit", "-32029")
+
+
 def is_batch_too_large_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(needle in message for needle in _BATCH_TOO_LARGE_NEEDLES)
+
+
+def is_rate_limited_error(exc: Exception) -> bool:
+    """Did the node refuse this because we asked too often?
+
+    Distinct from a batch being too large, which is about the question; this
+    is about the rate of asking, and the same question will be answered a
+    moment later.
+    """
+    message = str(exc).lower()
+    if any(needle in message for needle in _RATE_LIMITED_NEEDLES):
+        return True
+    return getattr(exc, "status", None) == 429
+
+
+@dataclass
+class RateLimitBackoff:
+    """How long to wait after a pass the node refused for asking too often.
+
+    Retrying a 429 at the normal cadence is not persistence, it is the thing
+    keeping the limit tripped: every refused request still counts against the
+    budget that would otherwise have served the next real one. So the wait
+    doubles while the node keeps saying no, and is dropped the moment a pass
+    gets through -- the tape wants the next block range as soon as it is
+    allowed to have it, not a cautious ramp back.
+    """
+
+    base: float
+    maximum: float
+    current: float = 0.0
+
+    def record_success(self) -> None:
+        self.current = 0.0
+
+    def record_refusal(self) -> float:
+        self.current = min(self.maximum, self.current * 2 if self.current else self.base)
+        return self.current
 
 
 @dataclass

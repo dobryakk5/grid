@@ -664,12 +664,23 @@ def _gas_estimate(quote) -> dict:
 
 
 def _check_router(target: str) -> None:
-    """Refuse calldata aimed at anything but the router we expect."""
-    expected = (settings.rh_universal_router_address or "").strip()
-    if expected and target.strip().lower() != expected.lower():
+    """Refuse calldata aimed at anything but a router we trust.
+
+    Plural because the chain has more than one live Universal Router and the
+    Trading API picks which one it builds for; a single pin turns the API
+    moving to another deployment into every order being refused. The guard is
+    unchanged in what it is for: an address nobody put on the list is still
+    something we will not sign.
+    """
+    allowed = {
+        item.strip().lower()
+        for item in (settings.rh_universal_router_address or "").split(",")
+        if item.strip()
+    }
+    if allowed and target.strip().lower() not in allowed:
         raise UniswapError(
-            f"swap targets {target}, not the configured Universal Router "
-            f"{expected}; refusing to sign it"
+            f"swap targets {target}, which is not one of the configured "
+            f"Universal Routers ({', '.join(sorted(allowed))}); refusing to sign it"
         )
 
 
