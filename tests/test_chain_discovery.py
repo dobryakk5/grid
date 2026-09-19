@@ -99,3 +99,36 @@ def test_candidate_volume_is_the_sum_of_both_sides():
     )
     assert candidate.volume_usd == Decimal("12.5")
     assert candidate.trades == 2
+
+
+# ---- a symbol is whatever the contract felt like returning ----------------
+
+
+def test_a_symbol_too_long_for_the_column_is_cut_to_fit():
+    """The bug this exists for: a token on chain answers `symbol()` with
+    several hundred digits of pi. The INSERT failed, the scan pass failed with
+    it, and the tape sat on that block re-reading the same token forever."""
+    from app.chain.tokens import _SYMBOL_MAX, _clean_symbol
+
+    pi = "3.14159265358979323846264338327950288419716939937510582097494459"
+
+    symbol = _clean_symbol(pi)
+
+    assert len(symbol) == _SYMBOL_MAX
+    assert symbol == pi[:_SYMBOL_MAX]
+
+
+def test_an_ordinary_symbol_is_left_alone():
+    from app.chain.tokens import _clean_symbol
+
+    assert _clean_symbol("PONS") == "PONS"
+    assert _clean_symbol("  USDG  ") == "USDG"
+
+
+def test_a_symbol_of_nothing_printable_is_no_symbol():
+    """An unnamed token is still tradable; the address stands in for the name."""
+    from app.chain.tokens import _clean_symbol
+
+    assert _clean_symbol("") is None
+    assert _clean_symbol("   ") is None
+    assert _clean_symbol("\x00\x07\x1b") is None

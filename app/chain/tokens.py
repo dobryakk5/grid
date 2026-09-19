@@ -52,6 +52,24 @@ class TokenMeta:
         return Decimal(int(amount)).scaleb(-self.decimals)
 
 
+# An ERC-20 symbol is whatever an arbitrary contract chose to return, and
+# "arbitrary" is not a figure of speech: a token on Robinhood Chain answers
+# with several hundred digits of pi. It goes into a VARCHAR, so it is cut to
+# fit at the boundary where it arrives rather than at the INSERT -- a row that
+# cannot be written fails the whole scan pass, and the tape then sits on that
+# block forever, re-reading the same token and failing the same way. A coin
+# nobody trades must not be able to stop the scan.
+#
+# Taken from the column so the two cannot drift apart.
+_SYMBOL_MAX = ChainToken.symbol.type.length
+
+
+def _clean_symbol(raw) -> str | None:
+    """A symbol short enough to store and printable enough to show."""
+    text = "".join(ch for ch in str(raw) if ch.isprintable()).strip()
+    return text[:_SYMBOL_MAX] or None
+
+
 async def _read_from_chain(client, address: str) -> TokenMeta:
     contract = client.w3.eth.contract(
         address=AsyncWeb3.to_checksum_address(address), abi=_ERC20_METADATA_ABI
@@ -61,7 +79,7 @@ async def _read_from_chain(client, address: str) -> TokenMeta:
     except Exception:
         decimals = _DEFAULT_DECIMALS
     try:
-        symbol = str(await contract.functions.symbol().call()).strip() or None
+        symbol = _clean_symbol(await contract.functions.symbol().call())
     except Exception:
         # Pre-standard tokens return bytes32 here, and some return nothing at
         # all. An unnamed token is still perfectly tradable, so this is not
