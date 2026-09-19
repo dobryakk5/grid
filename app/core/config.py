@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     mexc_base_url: str = "https://api.mexc.com"
 
     grid_poll_seconds: float = 3.0
+    # Connections one process may hold. Deliberately small: every service here
+    # runs the same engine, a worker uses one session per tick, and each idle
+    # backend on the server costs real memory -- SQLAlchemy's own defaults
+    # (5 plus 10 overflow, per process) are sized for a web server, not for six
+    # of these sharing one small box.
+    db_pool_size: int = 2
+    db_max_overflow: int = 3
     grid_fee_buffer_pct: Decimal = Decimal("0.002")
 
     # ---- on-chain venue (Robinhood Chain / Uniswap) -----------------------

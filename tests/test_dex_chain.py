@@ -345,3 +345,17 @@ def test_the_tape_reads_through_its_own_endpoint_when_one_is_set(monkeypatch):
 
     assert tape.w3.provider.endpoint_uri == "https://public.example"
     assert trading.w3.provider.endpoint_uri == "https://metered.example/key"
+
+
+# ---- connection pools ----------------------------------------------------
+
+
+def test_the_pool_is_sized_for_a_worker_not_a_web_server():
+    """Six services share one small box, and each idle backend on the server
+    costs real memory. SQLAlchemy's own default is 5 plus 10 overflow per
+    process, which is how a box with 891 MB of RAM ends up OOM-killing its
+    own database."""
+    from app.db.session import engine
+
+    assert engine.pool.size() == settings.db_pool_size
+    assert settings.db_pool_size + settings.db_max_overflow <= 5
