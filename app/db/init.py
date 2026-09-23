@@ -171,7 +171,40 @@ async def bootstrap_live_position_lots() -> None:
             await session.commit()
 
 
+# Arbitrary, fixed, and only ever used here. Postgres advisory locks are
+# keyed by a bigint the application picks; this one means "schema init".
+_INIT_LOCK_KEY = 0x6772_6964_696E_6974  # "gridinit"
+
+
 async def init_db() -> None:
+    """Bring the schema and seed rows up to date, one process at a time.
+
+    Every service calls this on start, and a deploy restarts six of them
+    within the same second. Nothing here was written for that: ``create_all``
+    checks whether a table exists and then creates it, so two processes can
+    both see "missing" and the loser dies on a duplicate ``pg_type`` row --
+    which is exactly how the DEX worker and the tape crashed on the deploy
+    that added ``dex_wallet_tokens``. The seed profile and both bootstraps
+    below are the same check-then-write shape, one level up: two concurrent
+    starts could give a profile two current ranges.
+
+    So the whole function runs under a Postgres advisory lock. The first
+    process does the work; the rest wait, then find everything already in
+    place, which every step here already handles. A session-level lock on a
+    connection of its own, because the steps below use their own sessions --
+    it is released on unlock, or by Postgres itself if the process dies
+    holding it. That costs one pooled connection for the duration, so the
+    pool must allow at least two (the default allows five).
+    """
+    async with engine.connect() as lock:
+        await lock.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _INIT_LOCK_KEY})
+        try:
+            await _init_db()
+        finally:
+            await lock.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _INIT_LOCK_KEY})
+
+
+async def _init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # create_all does not add columns to an existing PostgreSQL table.

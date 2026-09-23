@@ -195,10 +195,10 @@ function render(){
   <td><b>${coin(o)}</b><div class="muted" style="font-size:11px">${esc(o.source)}</div></td>
   <td><span class="tag ${o.side==='Buy'?'buy':'sell'}">${o.side==='Buy'?'покупка':'продажа'}</span></td>
   <td><span class="tag ${o.status==='MISSED'?'missed':(o.open?'open':'')}"${
-    o.status==='MISSED'?' title="Цена доходила до уровня, но на кошельке не хватило средств. Уровень продолжает ждать."':''
-   }>${esc(o.status)}</span>${
-    o.reason?`<div class="muted" style="font-size:11px;white-space:normal;max-width:260px">${esc(o.reason)}</div>`:''}</td>
-  <td class="num">${num(o.amount_in)} <span class="muted">${esc(o.amount_in_coin)}</span></td>
+    o.status==='MISSED'?' title="Цена доходила до уровня, но на кошельке не хватило средств. Уровень продолжает ждать."'
+    :(o.reason?` title="${esc(o.reason)}" style="cursor:help"`:'')
+   }>${esc(o.status)}</span></td>
+  <td class="num">${num(o.amount_in,0)}${/^USD/i.test(o.amount_in_coin||'')?` <span class="muted">${esc(o.amount_in_coin)}</span>`:''}</td>
   <td class="num">${num(o.limit_price)}</td>
   <td class="num">${o.fill_price?`<b>${num(o.fill_price)}</b>`:'—'}</td>
   <td class="num">${num(o.filled_amount_out)}</td>
