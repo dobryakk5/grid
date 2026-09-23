@@ -19,14 +19,20 @@ from app.dex.chain import ChainClient, ChainError
 from app.dex.dexscreener import DexScreenerClient, DexScreenerError
 from app.dex.execution import StorageUnavailable, execute_swap
 from app.dex.intents import SIGNED_STATUSES, IntentStatus
+from app.dex.positions import open_positions
 from app.dex.recovery import rebroadcast, replace_stuck, settle
 from app.dex.repository import DexIntentRepository
 from app.dex.scheduling import Action, IntentView, plan_intent
 from app.dex.tokens import DexConfigError
 from app.dex.uniswap import UniswapClient
+from app.dex.wallet_tokens import (
+    WalletToken,
+    ensure_seeded as ensure_wallet_tokens,
+    remember as remember_wallet_tokens,
+)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -44,6 +50,35 @@ class DexWorker:
                 await client.close()
             except Exception:  # pragma: no cover - best-effort shutdown
                 logger.exception("Failed to close a DEX client")
+
+    async def scan_wallet_tokens(self) -> int:
+        """Look for holdings nobody told us about, and add them to the list.
+
+        The positions page reads ``dex_wallet_tokens``, which knows about a
+        coin the moment we trade it. It cannot know about one that simply
+        arrived -- an airdrop, or a buy made from the wallet outside this bot.
+        Finding those means asking every token the tape has met, which is the
+        eleven-thousand-row sweep that made the page time out.
+
+        So it happens here instead. Off the request path a slow pass costs
+        nothing, a failed one costs nothing either, and the page keeps serving
+        the list this produced last time.
+
+        Read through the tape's RPC when one is configured: the sweep is a
+        burst of large Multicalls, which is the workload the trading provider
+        refuses and the public node serves.
+        """
+        chain = ChainClient(rpc_url=settings.chain_tape_rpc_url or None)
+        try:
+            await ensure_wallet_tokens(SessionLocal, chain.wallet_address)
+            held = await open_positions(SessionLocal, chain, universe="chain")
+        finally:
+            await chain.close()
+        return await remember_wallet_tokens(
+            SessionLocal,
+            [WalletToken(p.address, p.symbol, p.decimals) for p in held],
+            source="scan", nonzero=True,
+        )
 
     async def tick(self, session) -> None:
         repository = DexIntentRepository(session)
@@ -163,6 +198,11 @@ async def main() -> None:
         )
     logger.info("DEX worker started (every %ss)", settings.dex_poll_seconds)
 
+    # Due immediately on start, then on its own much slower clock. Wallet
+    # inventory changes when we trade -- which updates the list directly --
+    # so this pass is only looking for the arrivals nobody announced.
+    next_scan = 0.0
+
     try:
         while True:
             try:
@@ -174,6 +214,24 @@ async def main() -> None:
                     await worker.tick(session)
             except Exception:
                 logger.exception("DEX tick failed")
+
+            if asyncio.get_running_loop().time() >= next_scan:
+                # Scheduled before the attempt, not after: a sweep that fails
+                # must not be retried on the next five-second tick, which is
+                # how a rate-limited node gets hammered by the one job that
+                # has no deadline at all.
+                next_scan = (
+                    asyncio.get_running_loop().time() + settings.dex_wallet_scan_seconds
+                )
+                try:
+                    found = await worker.scan_wallet_tokens()
+                    logger.info("wallet token scan: %s holding(s)", found)
+                except Exception as exc:
+                    # Never an exception() traceback: this pass is allowed to
+                    # fail, the page keeps the previous list, and a stack
+                    # trace here reads like a trading fault when it is not.
+                    logger.warning("wallet token scan skipped: %s", exc)
+
             await asyncio.sleep(settings.dex_poll_seconds)
     finally:
         await worker.aclose()

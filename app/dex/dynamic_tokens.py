@@ -22,7 +22,7 @@ import time
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import ChainToken
+from app.db.models import ChainToken, DexWalletToken
 from app.dex.tokens import DexConfigError, register_dynamic_token
 
 __all__ = ["load_dynamic_tokens"]
@@ -34,9 +34,10 @@ logger = logging.getLogger(__name__)
 _TTL_SECONDS = 60.0
 _last_load = 0.0
 # Addresses already reported as unregisterable. The registry is re-read every
-# minute and the same impostor tokens fail every time; saying so once is
-# information, saying so 1440 times a day buries everything else.
-_warned: set[str] = set()
+# minute and the same impostor tokens fail every time. These collisions are
+# expected input filtering, not an operational warning; retain them at DEBUG
+# for diagnosis without polluting a production WARNING journal.
+_reported: set[str] = set()
 
 
 async def load_dynamic_tokens(session_factory, *, chain_id: int | None = None, force: bool = False) -> int:
@@ -52,6 +53,16 @@ async def load_dynamic_tokens(session_factory, *, chain_id: int | None = None, f
         rows = list((await session.execute(
             select(ChainToken).where(ChainToken.chain_id == chain, ChainToken.symbol.is_not(None))
         )).scalars())
+        # Our own list too, and not for symmetry: an address bought by hand is
+        # read off its contract into ``dex_wallet_tokens`` and may never
+        # appear in the tape's cache at all. Without this the API would arm a
+        # level the worker -- a separate process, with its own registry --
+        # could not resolve a pair for, and the order would sit unexecutable.
+        rows += list((await session.execute(
+            select(DexWalletToken).where(
+                DexWalletToken.chain_id == chain, DexWalletToken.symbol.is_not(None)
+            )
+        )).scalars())
 
     registered = 0
     for row in rows:
@@ -62,7 +73,7 @@ async def load_dynamic_tokens(session_factory, *, chain_id: int | None = None, f
             # A token claiming a name the registry already pins to another
             # address -- on this chain, three separate contracts call
             # themselves USDG. Worth knowing once, not on every reload.
-            if row.address not in _warned:
-                _warned.add(row.address)
-                logger.warning("skipped dynamic token: %s", exc)
+            if row.address not in _reported:
+                _reported.add(row.address)
+                logger.debug("skipped dynamic token: %s", exc)
     return registered

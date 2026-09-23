@@ -3,24 +3,34 @@
 Scanning is wallet-centric, not token-centric: ``eth_getLogs`` is filtered by
 the tracked wallets in the indexed ``from``/``to`` topics and **not** by token
 address, so a wallet's whole trading activity is captured rather than only
-the one pair this bot happens to trade. Cost does not grow with the number of
-wallets -- a topic position accepts a set of values, so the whole roster is
-two calls per block range.
+the one pair this bot happens to trade. RPC cost does not grow with the
+number of wallets -- a topic position accepts a set of values, so the whole
+roster is two calls per block range.
 
-Three jobs share one loop:
+What *does* grow with the roster is what comes back. Every token address in
+every transfer has to be identified to classify a swap, and when all of them
+were also kept, 698 wallets put eleven thousand contracts into
+``chain_tokens`` in a week -- two thirds of which never traded. Hence the two
+bounds added since: the roster is a ranked top-N (``_tracked_wallets``), and
+only tokens that turn out to be trades are written (``_rows_from``).
 
-0. **Discovery** -- once an hour, look at the watched market and add wallets
+Four jobs share one loop:
+
+0. **Ranking** -- once an hour, re-decide which wallets are worth a slot,
+   from accumulated volume in ``chain_swaps``.
+1. **Discovery** -- also hourly, look at the watched market and add wallets
    that have started trading since the roster was last built. Without this
    the tape only ever sees wallets someone added by hand, and goes stale the
-   moment a new trader shows up.
-1. **Backfill** -- for every ``fomo_traders`` row with
+   moment a new trader shows up. Being discovered is not being scanned: a
+   new wallet is a candidate for the next ranking.
+2. **Backfill** -- for every ``fomo_traders`` row with
    ``backfilled_from_block IS NULL``, scan that wallet's last
    ``settings.fomo_new_wallet_backfill_blocks`` *before* the global cursor
    moves any further. Without this, a wallet discovered because it just
    bought something is exactly the wallet whose first purchase would never be
    recorded: it is noticed after the fact, by which point the realtime cursor
    has already passed that block.
-2. **Realtime** -- advance the shared cursor forward from the chain head,
+3. **Realtime** -- advance the shared cursor forward from the chain head,
    staying ``chain_tape_confirmations`` blocks behind it.
 
 ``ChainTransaction`` rows and ``ChainSwap`` rows are written in the same
@@ -35,7 +45,7 @@ import asyncio
 import logging
 import time
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.chain.tape import (
@@ -50,12 +60,12 @@ from app.chain.tape import (
     RateLimitBackoff,
 )
 from app.chain.discovery import discover_wallets
-from app.chain.tokens import resolve_token_meta
+from app.chain.tokens import remember_tokens, resolve_token_meta
 from app.core.config import settings
 from app.db.init import init_db
 from app.db.models import ChainScanCursor, ChainSwap, ChainTransaction, FomoTrader
 from app.db.session import SessionLocal
-from app.dex.chain import ChainClient
+from app.dex.chain import ChainClient, ChainError
 from app.dex.tokens import DexConfigError, DexPair, resolve_pair, resolve_token
 from app.workers.dex_sampler import watched_symbols
 
@@ -81,9 +91,56 @@ def quote_assets() -> dict[str, str]:
     return assets
 
 
-async def _tracked_wallets(session) -> set[str]:
-    result = await session.execute(select(FomoTrader.evm_address).where(FomoTrader.evm_address.is_not(None)))
-    return {row for row in result.scalars() if row}
+def _own_wallet(client: ChainClient) -> str | None:
+    """Our own trading address, or None if this deploy has no wallet at all.
+
+    Asked of the client rather than of ``settings``: ``RH_WALLET_ADDRESS`` is
+    an optional dry-run stand-in and is normally blank, because the address
+    is derived from the signing key. Reading the setting would have made the
+    pin below a silent no-op on exactly the deploys that trade.
+    """
+    try:
+        return client.wallet_address
+    except ChainError:
+        return None
+
+
+async def _tracked_wallets(session, own: str | None = None) -> set[str]:
+    """The wallets this pass scans -- a bounded roster, not everything known.
+
+    Every address discovery has ever met used to be scanned forever after.
+    That is unbounded by construction: discovery runs hourly and only ever
+    adds, so the roster reached 698 wallets, and since the scan is
+    deliberately not filtered by token, their transfer logs put eleven
+    thousand contracts into ``chain_tokens`` in a week. The cost of that
+    landed on the positions page, which had to sweep the lot for balances.
+
+    So the tape follows the top ``chain_tape_wallet_limit`` by traded volume
+    -- the ranking ``rerank_wallets`` writes -- and the rest of
+    ``fomo_traders`` stays as history. An unranked row is not scanned: a FOMO
+    leaderboard identity has no on-chain volume of its own, and several
+    hundred hand-seeded addresses are exactly the roster this bounds.
+
+    Our own wallet is added unconditionally and does not consume a slot. It
+    is the one address whose swaps this system reads back -- the positions
+    page takes its cost basis from ``chain_swaps`` -- and it is in the roster
+    today only because discovery happened to notice it. Dropping it would
+    stop recording our own fills, silently, and show a page with no cost
+    basis rather than an error.
+    """
+    result = await session.execute(
+        select(FomoTrader.evm_address)
+        .where(
+            FomoTrader.evm_address.is_not(None),
+            FomoTrader.volume_rank.is_not(None),
+        )
+        .order_by(FomoTrader.volume_rank)
+        .limit(max(1, settings.chain_tape_wallet_limit))
+    )
+    wallets = {row for row in result.scalars() if row}
+    if own:
+        wallets.add(own)
+    return wallets
 
 
 async def _resolve_pairs(symbols: list[str]) -> list[DexPair]:
@@ -145,11 +202,21 @@ async def _rows_from(client, transfers: list[dict], wallets: set[str], *, chain_
 
     Metadata resolution owns its own short sessions, so the RPC calls it may
     need happen before the write transaction is opened -- never inside it.
+
+    Read for everything, keep only what traded. Classifying a swap needs the
+    decimals of every leg, so the read cannot be narrowed; the *write* can,
+    and it is the write that grew ``chain_tokens`` by thousands of rows a
+    day. A tracked wallet's transfer log is mostly addresses that are not
+    trades at all -- airdropped spam, intermediate hops, receipt tokens --
+    and on the history to date two thirds of the table never appeared in a
+    single classified swap. Those rows cost nothing to store and a great
+    deal to sweep for balances afterwards.
     """
     if not transfers:
         return []
     token_meta = await resolve_token_meta(
-        client, SessionLocal, [item["token_address"] for item in transfers], chain_id=chain_id
+        client, SessionLocal, [item["token_address"] for item in transfers],
+        chain_id=chain_id, persist=False,
     )
     assets = quote_assets()
     rows: list[ChainSwapRow] = []
@@ -157,6 +224,14 @@ async def _rows_from(client, transfers: list[dict], wallets: set[str], *, chain_
         rows.extend(classify_any(
             tx_transfers, wallets, token_meta=token_meta, quote_assets=assets, chain_id=chain_id
         ))
+
+    traded = {row.token_address.lower() for row in rows if row.token_address}
+    traded |= {row.quote_address.lower() for row in rows if row.quote_address}
+    await remember_tokens(
+        SessionLocal,
+        [meta for address, meta in token_meta.items() if address in traded],
+        chain_id=chain_id,
+    )
     return rows
 
 
@@ -175,6 +250,72 @@ async def _fetch_chunked(client, wallets: list[str], from_block: int, to_block: 
         out.extend(await fetch_wallet_transfers(client, wallets, start, end))
         start = end + 1
     return out
+
+
+# ---- roster ------------------------------------------------------------
+
+
+async def rerank_wallets(*, chain_id: int) -> int:
+    """Re-decide which wallets are worth following. Returns how many rank.
+
+    Ranked from the tape's own record rather than from a discovery window.
+    Discovery looks at ~900 blocks -- about a minute of this chain -- which
+    is the right lens for "who is active right now" and the wrong one for
+    "who is worth a permanent slot": a single large trade would take a slot
+    for an hour and drop a wallet that trades all day. ``chain_swaps`` is
+    already the accumulated answer, so the ranking is one aggregate over a
+    trailing window.
+
+    A wallet with no priced volume in the window keeps no rank and is not
+    scanned. That is the point: the roster is a fixed budget, and a row that
+    has not traded is the cheapest thing to drop from it. Nothing is deleted
+    -- an unranked wallet keeps its history and can rank again tomorrow.
+    """
+    window = max(1, settings.chain_tape_rank_window_days)
+    async with SessionLocal() as session:
+        # One statement, so no moment exists where the roster is empty: a
+        # pass that read it between a DELETE and an INSERT would scan
+        # nothing and silently move the cursor past those blocks.
+        result = await session.execute(text("""
+            WITH volumes AS (
+                SELECT lower(cs.wallet_address) AS wallet,
+                       SUM(COALESCE(cs.value_usd, 0)) AS volume
+                  FROM chain_swaps cs
+                 WHERE cs.chain_id = :chain_id
+                   AND cs.block_time_ms >= :since_ms
+                 GROUP BY 1
+            ), ranked AS (
+                SELECT wallet, row_number() OVER (ORDER BY volume DESC, wallet) AS rank
+                  FROM volumes
+                 WHERE volume > 0
+            )
+            UPDATE fomo_traders t
+               SET volume_rank = r.rank
+              FROM ranked r
+             WHERE lower(t.evm_address) = r.wallet
+        """), {
+            "chain_id": chain_id,
+            "since_ms": int((time.time() - window * 86400) * 1000),
+        })
+        ranked = result.rowcount or 0
+        # Everyone else loses their rank in the same transaction, so the
+        # roster is exactly "the current ranking" and never the union of
+        # this ranking and a stale one.
+        await session.execute(text("""
+            UPDATE fomo_traders t
+               SET volume_rank = NULL
+             WHERE t.volume_rank IS NOT NULL
+               AND lower(t.evm_address) NOT IN (
+                    SELECT lower(cs.wallet_address) FROM chain_swaps cs
+                     WHERE cs.chain_id = :chain_id AND cs.block_time_ms >= :since_ms
+                       AND COALESCE(cs.value_usd, 0) > 0
+               )
+        """), {
+            "chain_id": chain_id,
+            "since_ms": int((time.time() - window * 86400) * 1000),
+        })
+        await session.commit()
+    return ranked
 
 
 # ---- discovery ---------------------------------------------------------
@@ -202,7 +343,7 @@ async def run_discovery_pass(client: ChainClient, *, chain_id: int) -> int:
         ))
 
     async with SessionLocal() as session:
-        known = {wallet.lower() for wallet in await _tracked_wallets(session)}
+        known = {wallet.lower() for wallet in await _tracked_wallets(session, _own_wallet(client))}
         fresh = []
         for candidate in candidates:
             key = candidate.address.lower()
@@ -244,7 +385,7 @@ async def run_backfill_pass(client: ChainClient, *, chain_id: int) -> int:
                 FomoTrader.evm_address.is_not(None),
             )
         )).scalars())
-        all_wallets = await _tracked_wallets(session)
+        all_wallets = await _tracked_wallets(session, _own_wallet(client))
     if not pending:
         return 0
 
@@ -291,7 +432,7 @@ async def run_backfill_pass(client: ChainClient, *, chain_id: int) -> int:
 async def run_realtime_pass(client: ChainClient, batch: AdaptiveBatchSize, *, chain_id: int) -> int:
     async with SessionLocal() as session:
         cursor = await session.get(ChainScanCursor, (chain_id, SCOPE_REALTIME))
-        wallets = await _tracked_wallets(session)
+        wallets = await _tracked_wallets(session, _own_wallet(client))
     if not wallets:
         return 0
 
@@ -359,10 +500,17 @@ async def main() -> None:
     # Run discovery on the first tick so a restart picks up whoever started
     # trading while the worker was down.
     last_discovery = 0.0
+    last_rank = 0.0
     try:
         while True:
             try:
                 now = time.monotonic()
+                if now - last_rank >= settings.wallet_discovery_interval_seconds:
+                    last_rank = now
+                    # Before discovery, and regardless of whether discovery
+                    # runs at all: the roster is what the scan reads, and a
+                    # deploy with discovery switched off must still have one.
+                    logger.info("roster: %s wallet(s) ranked", await rerank_wallets(chain_id=chain_id))
                 if settings.wallet_discovery_enabled and (
                     now - last_discovery >= settings.wallet_discovery_interval_seconds
                 ):

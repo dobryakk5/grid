@@ -4,14 +4,23 @@ part-sale of one of those holdings would look like.
 Finding the holdings is the awkward half. The tape indexes FOMO traders'
 wallets, not ours, so ``chain_transactions`` has nothing about us; a filtered
 log scan over the chain's 61M blocks times out on the RPC; and the Blockscout
-API sits behind a bot-check. What is left is to ask every token we know about
-whether it owes us anything -- which is only affordable through multicall3,
-where 1385 ``balanceOf`` calls cost four ``eth_call``s instead of 1385.
+API sits behind a bot-check. What is left is to ask a list of tokens whether
+they owe us anything -- which is only affordable through multicall3, where
+hundreds of ``balanceOf`` calls cost one ``eth_call`` instead of hundreds.
 
-The consequence worth knowing: a position is visible here only if its token is
-in ``chain_tokens``. That table is filled by the tape, so a coin nobody on the
-leaderboard has ever touched could sit in the wallet unseen. It is a real gap,
-not a rounding error, and it is the price of not having an indexer.
+Which list is the whole question. Asking ``chain_tokens`` -- everything the
+tape has ever met -- was affordable at 1385 rows and is not at eleven
+thousand: other people's trading grows that table by thousands a day, and a
+page load turned into dozens of Multicalls and then into a gateway timeout.
+So the request path asks ``dex_wallet_tokens`` instead, the few dozen
+contracts this wallet has touched, and the wider sweep moved to a background
+pass that feeds that list (see ``app.dex.wallet_tokens``).
+
+The consequence worth knowing is unchanged in kind, only in who bears it: a
+holding is visible once something has put its contract on one of those two
+lists. A coin airdropped to us and never traded by anyone is found by the
+background sweep, not by the page. It is a real gap, not a rounding error,
+and it is the price of not having an indexer.
 """
 
 from __future__ import annotations
@@ -23,10 +32,10 @@ from decimal import Decimal, ROUND_DOWN
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import ChainToken
+from app.db.models import ChainToken, DexWalletToken
 
 __all__ = [
-    "MULTICALL3", "Position", "fraction_amount", "limit_from_quote",
+    "MULTICALL3", "Position", "PositionReadError", "fraction_amount", "limit_from_quote",
     "read_balances", "open_positions",
 ]
 
@@ -37,6 +46,16 @@ _BALANCE_OF = "70a08231"
 # 400 calls per batch answered in ~2.3s against this RPC; larger batches start
 # to risk the same timeout that killed the log scan.
 _BATCH = 400
+# Thousands of discovered tokens turn those batches into a burst large enough
+# to make the public RPC rate-limit every request. Keep a little parallelism,
+# but never fan the whole token table out at once. The total deadline stays
+# below nginx's default 60-second upstream timeout, so callers get a useful
+# application error rather than a gateway timeout.
+_BATCH_CONCURRENCY = 8
+_BATCH_ATTEMPT_TIMEOUT = 10.0
+_BATCH_ATTEMPTS = 3
+_BATCH_RETRY_DELAY = 0.5
+_BALANCE_SCAN_TIMEOUT = 45.0
 
 _AGGREGATE3_ABI = [{
     "inputs": [{"components": [
@@ -64,6 +83,10 @@ class Position:
     @property
     def amount(self) -> Decimal:
         return Decimal(self.raw).scaleb(-self.decimals)
+
+
+class PositionReadError(RuntimeError):
+    """The wallet balance scan could not finish against the chain RPC."""
 
 
 def fraction_amount(balance: Decimal, percent: int, decimals: int) -> Decimal:
@@ -127,10 +150,25 @@ async def read_balances(client, addresses: list[str], owner: str) -> dict[str, i
     )
     data = _call_data(owner)
     chunks = [addresses[i:i + _BATCH] for i in range(0, len(addresses), _BATCH)]
+    gate = asyncio.Semaphore(_BATCH_CONCURRENCY)
 
     async def sweep(chunk: list[str]) -> list[tuple[str, int]]:
         calls = [(client.w3.to_checksum_address(a), True, data) for a in chunk]
-        results = await contract.functions.aggregate3(calls).call()
+        last_error: Exception | None = None
+        for attempt in range(_BATCH_ATTEMPTS):
+            try:
+                async with gate:
+                    async with asyncio.timeout(_BATCH_ATTEMPT_TIMEOUT):
+                        results = await contract.functions.aggregate3(calls).call()
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < _BATCH_ATTEMPTS:
+                    await asyncio.sleep(_BATCH_RETRY_DELAY * 2 ** attempt)
+        else:
+            raise PositionReadError(
+                f"balance batch failed after {_BATCH_ATTEMPTS} attempts: {last_error}"
+            ) from last_error
         found = []
         for address, (ok, returned) in zip(chunk, results):
             if ok and len(returned) >= 32:
@@ -138,17 +176,42 @@ async def read_balances(client, addresses: list[str], owner: str) -> dict[str, i
         return found
 
     balances: dict[str, int] = {}
-    for part in await asyncio.gather(*(sweep(chunk) for chunk in chunks)):
-        balances.update(part)
+    try:
+        async with asyncio.timeout(_BALANCE_SCAN_TIMEOUT):
+            for part in await asyncio.gather(*(sweep(chunk) for chunk in chunks)):
+                balances.update(part)
+    except TimeoutError as exc:
+        raise PositionReadError(
+            f"wallet balance scan exceeded {_BALANCE_SCAN_TIMEOUT:g}s"
+        ) from exc
+    except Exception as exc:
+        raise PositionReadError(f"wallet balance scan failed: {exc}") from exc
     return balances
 
 
-async def open_positions(session_factory, client, *, chain_id: int | None = None) -> list[Position]:
-    """Every known token the wallet holds a non-zero amount of, largest first."""
+async def open_positions(
+    session_factory, client, *, chain_id: int | None = None, universe: str = "wallet",
+) -> list[Position]:
+    """Every known token the wallet holds a non-zero amount of, largest first.
+
+    ``universe`` picks which list of contracts to ask about, and the choice is
+    the difference between a page that paints and one that times out:
+
+    ``"wallet"`` -- the few dozen in ``dex_wallet_tokens``, the ones this
+    wallet has actually touched. One Multicall. This is what a request path
+    should ever use.
+
+    ``"chain"`` -- every token the tape has ever met, which is what this did
+    unconditionally until the table passed ten thousand rows. Kept for the
+    background sweep in ``app.workers.dex``, whose whole job is to discover
+    holdings the wallet never traded for -- an airdrop, or a coin bought
+    outside the bot -- and which can afford to take a minute over it.
+    """
     chain = chain_id if chain_id is not None else settings.rh_chain_id
+    model = ChainToken if universe == "chain" else DexWalletToken
     async with session_factory() as session:
         tokens = list((await session.execute(
-            select(ChainToken).where(ChainToken.chain_id == chain)
+            select(model).where(model.chain_id == chain)
         )).scalars())
     known = {token.address.lower(): token for token in tokens}
     balances = await read_balances(client, sorted(known), client.wallet_address)

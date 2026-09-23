@@ -17,7 +17,8 @@ from sqlalchemy import func, select
 
 from app.core.auth import require_trading
 from app.core.config import settings
-from app.db.models import ChainSwap, ChainToken, DexIntent
+from app.chain.tokens import read_token_from_chain
+from app.db.models import ChainSwap, ChainToken, DexIntent, DexWalletToken
 from app.db.session import SessionLocal
 import asyncio
 
@@ -25,12 +26,25 @@ from app.dex.chain import ChainClient
 from app.dex.costbasis import Fill, cost_basis
 from app.dex.dynamic_tokens import load_dynamic_tokens
 from app.dex.intents import TERMINAL_STATUSES, IntentStatus
-from app.dex.positions import fraction_amount, limit_from_quote, open_positions
+from app.dex.positions import (
+    Position,
+    PositionReadError,
+    fraction_amount,
+    limit_from_quote,
+    open_positions,
+    read_balances,
+)
 from app.dex.repository import DexIntentRepository
+from app.dex.wallet_tokens import (
+    WalletToken,
+    ensure_seeded as ensure_wallet_tokens,
+    remember as remember_wallet_tokens,
+)
 from app.dex.tokens import (
     DexConfigError,
     dynamic_key,
     plain_symbol,
+    register_dynamic_token,
     resolve_pair,
     resolve_token,
 )
@@ -76,20 +90,51 @@ class BuyRequest(BaseModel):
     ignore_liquidity: bool = False
 
 
-async def _known_token(address: str) -> ChainToken:
-    """The tape-verified token at this address, buyable whether held or not.
+async def _known_token(address: str, chain: ChainClient | None = None) -> WalletToken:
+    """The token at this address, buyable whether held or not.
 
     Buying deliberately does not require an existing position -- that is how a
-    new one is opened -- so this looks in ``chain_tokens`` rather than in the
-    wallet.
+    new one is opened -- so this looks in the token tables rather than in the
+    wallet. Both are tried: our own short list first, then the tape's cache.
+
+    Missing from both is not a refusal. The tape now follows a bounded roster
+    of wallets, so "no row" means "nobody we watch has traded it", which is a
+    statement about them and not about the contract; reading ``symbol()`` and
+    ``decimals()`` off the contract answers the only question that matters
+    here. Narrowing what the tape *collects* must not narrow what we can buy.
     """
+    lowered = address.lower()
     async with SessionLocal() as session:
-        token = (await session.execute(select(ChainToken).where(
-            ChainToken.chain_id == settings.rh_chain_id,
-            ChainToken.address == address.lower(),
-        ))).scalar_one_or_none()
-    if token is None:
-        raise HTTPException(404, "Токен не найден среди проверенных на цепочке")
+        for model in (DexWalletToken, ChainToken):
+            row = (await session.execute(select(model).where(
+                model.chain_id == settings.rh_chain_id,
+                model.address == lowered,
+            ))).scalar_one_or_none()
+            if row is not None:
+                return WalletToken(lowered, row.symbol, row.decimals)
+
+    owns_client = chain is None
+    chain = chain or ChainClient()
+    try:
+        meta = await read_token_from_chain(chain, lowered)
+    except Exception as exc:
+        raise HTTPException(
+            502, f"Не удалось прочитать контракт {address} на цепочке: {exc}"
+        ) from None
+    finally:
+        if owns_client:
+            await chain.close()
+
+    token = WalletToken(lowered, meta.symbol, meta.decimals)
+    # Remembered right here: whatever happens to the order, this address is
+    # now one the wallet has an interest in, and the positions page should be
+    # asking about it from the next load onwards.
+    await remember_wallet_tokens(SessionLocal, [token], source="manual")
+    # And registered in this process straight away. ``load_dynamic_tokens``
+    # re-reads only once a minute, and the caller is about to ask
+    # ``_pair_for`` for this very address -- waiting out the TTL would refuse
+    # the order for a token we just successfully read off the chain.
+    register_dynamic_token(meta.symbol, lowered, meta.decimals)
     return token
 
 
@@ -270,9 +315,24 @@ async def _exit_value(
 async def positions() -> dict:
     """Everything the wallet holds, with USDG cash reported apart from it."""
     await load_dynamic_tokens(SessionLocal)
-    chain = ChainClient()
+    # The trading RPC may be an authenticated provider optimised for small,
+    # latency-sensitive calls. A wallet inventory is the opposite workload:
+    # read-only Multicalls. Reuse the tape's read RPC when it is configured;
+    # on Robinhood Chain it handles these calls reliably while the trading
+    # provider stalls on the same payloads. It is now one Multicall rather
+    # than dozens -- see ``universe`` below -- but the preference still holds.
+    chain = ChainClient(rpc_url=settings.chain_tape_rpc_url or None)
     try:
-        held = await open_positions(SessionLocal, chain)
+        # First load after a deploy, before the worker's sweep has run: take
+        # the list from our own swap history rather than showing an empty
+        # wallet. A no-op from the second call onwards.
+        await ensure_wallet_tokens(SessionLocal, chain.wallet_address)
+        try:
+            held = await open_positions(SessionLocal, chain)
+        except PositionReadError as exc:
+            raise HTTPException(
+                503, "Robinhood Chain RPC не успел прочитать балансы кошелька"
+            ) from exc
         native = await chain.native_balance()
         wallet = chain.wallet_address
     finally:
@@ -360,15 +420,31 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
     await load_dynamic_tokens(SessionLocal)
     chain = ChainClient()
     try:
-        held = {p.address.lower(): p for p in await open_positions(SessionLocal, chain)}
+        # One balance, not the whole wallet. Selling needs exactly this
+        # token's holding, and taking it from a full inventory sweep tied the
+        # one path that must always work to the size of the tape's token
+        # cache -- eleven thousand rows, twelve seconds, and growing with
+        # other people's trading. A Multicall over a single address is the
+        # same call shape at a five-hundredth of the cost.
+        token = await _known_token(address, chain)
+        try:
+            raw = (await read_balances(chain, [address.lower()], chain.wallet_address)).get(
+                address.lower(), 0
+            )
+        except PositionReadError as exc:
+            raise HTTPException(
+                503, "Robinhood Chain RPC не успел прочитать баланс токена"
+            ) from exc
         native_balance = await chain.native_balance()
         wallet = chain.wallet_address
     finally:
         await chain.close()
 
-    position = held.get(address.lower())
-    if position is None:
+    if raw <= 0:
         raise HTTPException(404, "Такой позиции в кошельке нет")
+    position = Position(
+        address=address.lower(), symbol=token.symbol, decimals=token.decimals, raw=raw,
+    )
     pair = _pair_for(position.symbol, position.address)
 
     amount = fraction_amount(position.amount, payload.percent, position.decimals)
@@ -447,17 +523,19 @@ async def buy(payload: BuyRequest, address: str = ADDRESS) -> dict:
             f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}",
         )
     await load_dynamic_tokens(SessionLocal)
-    token = await _known_token(address)
-    pair = _pair_for(token.symbol, address)
     quote_token = resolve_token(QUOTE_SYMBOL)
 
     chain = ChainClient()
     try:
+        # Inside the client's lifetime: an address nobody has traded yet is
+        # read off its own contract, and that read needs a node.
+        token = await _known_token(address, chain)
         cash = await chain.token_balance(quote_token)
         native_balance = await chain.native_balance()
         wallet = chain.wallet_address
     finally:
         await chain.close()
+    pair = _pair_for(token.symbol, address)
     if cash < payload.quote_amount:
         raise HTTPException(
             422,

@@ -268,6 +268,10 @@ async def init_db() -> None:
             # сообщает, что обрезал: снимок обязан отличать «столько и есть» от
             # «не меньше столько».
             "ALTER TABLE token_snapshots ADD COLUMN IF NOT EXISTS pools_capped BOOLEAN",
+            # Which wallets the tape actually scans. Everything ever met stays
+            # in the table; only the top of this ranking is followed on chain.
+            "ALTER TABLE fomo_traders ADD COLUMN IF NOT EXISTS volume_rank INTEGER",
+            "CREATE INDEX IF NOT EXISTS ix_fomo_traders_volume_rank ON fomo_traders (volume_rank)",
         ):
             await conn.execute(text(statement))
 

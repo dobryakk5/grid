@@ -23,7 +23,7 @@ from web3 import AsyncWeb3
 
 from app.db.models import ChainToken
 
-__all__ = ["TokenMeta", "resolve_token_meta"]
+__all__ = ["TokenMeta", "read_token_from_chain", "remember_tokens", "resolve_token_meta"]
 
 _ERC20_METADATA_ABI = [
     {
@@ -70,7 +70,7 @@ def _clean_symbol(raw) -> str | None:
     return text[:_SYMBOL_MAX] or None
 
 
-async def _read_from_chain(client, address: str) -> TokenMeta:
+async def read_token_from_chain(client, address: str) -> TokenMeta:
     contract = client.w3.eth.contract(
         address=AsyncWeb3.to_checksum_address(address), abi=_ERC20_METADATA_ABI
     )
@@ -101,8 +101,40 @@ async def read_cached(session, addresses: list[str], *, chain_id: int) -> dict[s
     return {row.address.lower(): TokenMeta(row.address, row.symbol, row.decimals) for row in rows}
 
 
+async def remember_tokens(
+    session_factory, metas: list[TokenMeta], *, chain_id: int
+) -> int:
+    """Write these tokens into the cache. Returns how many were offered.
+
+    Separate from reading them because the two want different inputs. A scan
+    pass has to *read* metadata for every address in every transfer -- there
+    is no classifying a swap without knowing the decimals of both legs -- but
+    it should only *keep* the ones that turned out to be trades.
+
+    When it kept everything, the table grew by thousands of rows a day: on a
+    chain like this one, the addresses in a tracked wallet's transfer log are
+    mostly airdrop spam, intermediate hops and receipt tokens, and two thirds
+    of them never appeared in a single classified swap. They cost nothing to
+    store and a great deal to sweep for balances later.
+    """
+    if not metas:
+        return 0
+    async with session_factory() as session:
+        for meta in metas:
+            statement = insert(ChainToken).values(
+                chain_id=chain_id, address=meta.address.lower(),
+                symbol=meta.symbol, decimals=meta.decimals,
+            )
+            statement = statement.on_conflict_do_nothing(
+                index_elements=[ChainToken.chain_id, ChainToken.address]
+            )
+            await session.execute(statement)
+        await session.commit()
+    return len(metas)
+
+
 async def resolve_token_meta(
-    client, session_factory, addresses: list[str], *, chain_id: int
+    client, session_factory, addresses: list[str], *, chain_id: int, persist: bool = True
 ) -> dict[str, TokenMeta]:
     """``{lowercase address: TokenMeta}``, reading the chain only for misses.
 
@@ -111,6 +143,10 @@ async def resolve_token_meta(
     a database transaction is open. Interleaving them means a stalled RPC
     (which a rate-limited public node does readily) leaves Postgres sitting
     "idle in transaction", holding locks until the process is killed.
+
+    ``persist=False`` performs the first two phases and skips the third,
+    leaving the caller to decide which of the answers are worth keeping via
+    ``remember_tokens``. The metadata is returned either way.
     """
     wanted = {address.lower() for address in addresses if address}
     if not wanted:
@@ -123,17 +159,9 @@ async def resolve_token_meta(
     if not missing:
         return known
 
-    fetched = {address: await _read_from_chain(client, address) for address in missing}
+    fetched = {address: await read_token_from_chain(client, address) for address in missing}
 
-    async with session_factory() as session:
-        for address, meta in fetched.items():
-            statement = insert(ChainToken).values(
-                chain_id=chain_id, address=address, symbol=meta.symbol, decimals=meta.decimals,
-            )
-            statement = statement.on_conflict_do_nothing(
-                index_elements=[ChainToken.chain_id, ChainToken.address]
-            )
-            await session.execute(statement)
-        await session.commit()
+    if persist:
+        await remember_tokens(session_factory, list(fetched.values()), chain_id=chain_id)
 
     return {**known, **fetched}

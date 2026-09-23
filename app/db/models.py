@@ -540,6 +540,12 @@ class FomoTrader(Base):
     # Where evm_address came from: "leaderboard", "holders", "trade", or
     # "manual" for a hand-seeded fallback row.
     source: Mapped[str] = mapped_column(String(24), nullable=False, default="leaderboard")
+    # Position in the last discovery ranking, 1 = biggest traded volume. NULL
+    # means "never ranked": a wallet seeded by hand or imported from a FOMO
+    # leaderboard has no on-chain volume of its own until discovery meets it.
+    # The tape scans the top of this ordering rather than every row it has
+    # ever heard of -- see ``app.workers.chain_tape._tracked_wallets``.
+    volume_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # NULL means never backfilled -- the queue chain_tape drains before it
     # advances the global cursor. Set once the wallet's recent history has
     # been scanned, so the trade that got this wallet noticed is not lost.
@@ -860,6 +866,34 @@ class ChainToken(Base):
     symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decimals: Mapped[int] = mapped_column(Integer, nullable=False, default=18)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DexWalletToken(Base):
+    """Tokens worth asking *our own* wallet about, and nothing else.
+
+    ``chain_tokens`` is the tape's metadata cache: it holds every ERC-20 that
+    brushed past any tracked wallet, which on this chain is tens of thousands
+    of rows and two thirds of them never traded at all. Sweeping that table
+    for balances is what turned the positions page into a gateway timeout.
+
+    This is the other list -- the few dozen contracts the wallet has actually
+    touched. It is deliberately additive: a row is never removed when a
+    balance goes to zero, because a coin sold today is one that may be bought
+    again tomorrow, and re-finding it costs a full sweep.
+    """
+
+    __tablename__ = "dex_wallet_tokens"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decimals: Mapped[int] = mapped_column(Integer, nullable=False, default=18)
+    # How this address got here: "swap" (our own tape history), "intent" (an
+    # order was armed on it), "scan" (the background sweep found a balance),
+    # or "manual" (bought by address). Diagnostic, not behavioural.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="scan")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_nonzero_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ChainScanCursor(Base):

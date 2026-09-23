@@ -9,7 +9,7 @@ import pytest
 from app.api import dex_positions
 from app.core.config import settings
 from app.core.security import hash_password
-from app.dex.positions import Position
+from app.dex.positions import Position, PositionReadError
 from app.dex.tokens import Token
 from app.dex.uniswap import UniswapError
 
@@ -49,7 +49,7 @@ def wired(monkeypatch):
     monkeypatch.setattr(settings, "auth_secret", "s", raising=False)
     monkeypatch.setattr(settings, "auth_password_hash", hash_password("p"), raising=False)
     monkeypatch.setattr(settings, "auth_service_token", "svc-token", raising=False)
-    monkeypatch.setattr(dex_positions, "ChainClient", lambda: FakeChain())
+    monkeypatch.setattr(dex_positions, "ChainClient", lambda **_kwargs: FakeChain())
     monkeypatch.setattr(dex_positions, "UniswapClient", lambda: FakeUniswap())
 
     async def no_dynamic_load(_factory):
@@ -61,6 +61,30 @@ def wired(monkeypatch):
         return [Position(CHATGPT, "ChatGpt", 18, 8 * 10 ** 18)]
 
     monkeypatch.setattr(dex_positions, "open_positions", held)
+
+    async def seeded(_factory, _wallet, **_kw):
+        return 0
+
+    monkeypatch.setattr(dex_positions, "ensure_wallet_tokens", seeded)
+
+    async def remembered(_factory, _tokens, **_kw):
+        return 0
+
+    monkeypatch.setattr(dex_positions, "remember_wallet_tokens", remembered)
+
+    # Selling reads one balance rather than the whole wallet, so the fake
+    # holding lives here now instead of in ``open_positions``. The wallet
+    # holds 8 ChatGpt and nothing else -- an unknown address reads zero,
+    # which is what makes "not held" a 404 rather than a lookup failure.
+    async def known(address, _chain=None):
+        return dex_positions.WalletToken(address.lower(), "ChatGpt", 18)
+
+    monkeypatch.setattr(dex_positions, "_known_token", known)
+
+    async def balances(_chain, addresses, _owner):
+        return {a.lower(): 8 * 10 ** 18 for a in addresses if a.lower() == CHATGPT}
+
+    monkeypatch.setattr(dex_positions, "read_balances", balances)
 
     armed = []
 
@@ -93,6 +117,17 @@ def client():
 
 
 AUTH = {"Authorization": "Bearer svc-token"}
+
+
+async def test_positions_reports_rpc_timeout_as_service_unavailable(wired, monkeypatch):
+    async def unavailable(_factory, _chain, **_kw):
+        raise PositionReadError("wallet balance scan exceeded 45s")
+
+    monkeypatch.setattr(dex_positions, "open_positions", unavailable)
+    async with client() as http:
+        response = await http.get("/api/dex/positions", headers=AUTH)
+    assert response.status_code == 503
+    assert "RPC" in response.json()["detail"]
 
 
 async def test_selling_needs_authentication(wired):
@@ -321,8 +356,8 @@ def buyable(wired, monkeypatch):
     """A known token, a funded wallet, and a quote of 8 tokens for 40 USDG."""
     monkeypatch.setattr(dex_positions, "_pair_for", lambda symbol, address: _pair())
 
-    async def known(address):
-        return type("Token", (), {"symbol": "ChatGpt", "decimals": 18, "address": address})()
+    async def known(address, _chain=None):
+        return dex_positions.WalletToken(address.lower(), "ChatGpt", 18)
 
     monkeypatch.setattr(dex_positions, "_known_token", known)
 
@@ -330,7 +365,7 @@ def buyable(wired, monkeypatch):
         async def token_balance(self, token):
             return Decimal("100")
 
-    monkeypatch.setattr(dex_positions, "ChainClient", lambda: Funded())
+    monkeypatch.setattr(dex_positions, "ChainClient", lambda **_kwargs: Funded())
     # 40 USDG in, 8 tokens out -> 5 USDG each.
     monkeypatch.setattr(dex_positions, "UniswapClient",
                         lambda: FakeUniswap(type("Q", (), {"amount_out": 8 * 10 ** 18,

@@ -111,6 +111,12 @@ class Settings(BaseSettings):
 
     # ---- DEX worker ------------------------------------------------------
     dex_poll_seconds: float = 5.0
+    # How often the worker sweeps every token the tape knows, looking for
+    # holdings nobody announced -- an airdrop, or a buy made outside the bot.
+    # Anything we trade ourselves lands in ``dex_wallet_tokens`` immediately,
+    # so this is slow on purpose: it is the expensive pass, and the only one
+    # that must never run inside a request.
+    dex_wallet_scan_seconds: float = 600.0
     # How long a level waits for its price before it is given up on.
     dex_intent_ttl_hours: int = 168
     # A level blocked by a risk gate re-checks after this long.
@@ -203,6 +209,18 @@ class Settings(BaseSettings):
     # a set of values), so this is about how long one pass may hold up the
     # realtime cursor, not about RPC cost per wallet.
     chain_tape_backfill_wallets: int = 50
+    # How many wallets the tape actually follows, biggest traded volume
+    # first. Discovery keeps meeting new addresses and every one of them was
+    # scanned forever after: 698 wallets, whose transfer logs put eleven
+    # thousand contracts into ``chain_tokens`` in a week -- two thirds of
+    # which never appeared in a single swap. The roster is a top-N now, and
+    # the rest of the table is history rather than a scan target. Our own
+    # wallet is always followed on top of this, whatever it ranks.
+    chain_tape_wallet_limit: int = 30
+    # Trailing window the roster ranking is measured over. Long enough that
+    # one big trade does not buy a slot for an hour, short enough that a
+    # wallet which has stopped trading gives one up.
+    chain_tape_rank_window_days: int = 7
 
     # ---- token intelligence (what the top is buying, and is it safe) ------
     # Free, keyless sources only: DexScreener for market data on the chains it
