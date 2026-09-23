@@ -30,6 +30,7 @@ from app.dex.positions import (
     Position,
     PositionReadError,
     fraction_amount,
+    ladder_levels,
     limit_from_quote,
     open_positions,
     read_balances,
@@ -66,10 +67,16 @@ class SellRequest(BaseModel):
     limit is set a slippage cap below that quote, so the order fills now but
     still cannot fill at any price. Present means a real limit order, which
     waits for the market to come up to it and may never fill at all.
+
+    ``ladder_step_pct`` splits a limit order into five equal levels, two steps
+    below ``limit_price``, one at it and two above, so ``limit_price`` is the
+    ladder's average. Each level is small enough to move the pool less than
+    the whole size would, and the upper ones fill as buyers lift the price.
     """
 
     percent: int = Field(json_schema_extra={"enum": [25, 50, 75, 100]})
     limit_price: Decimal | None = Field(default=None, gt=0, max_digits=38, decimal_places=18)
+    ladder_step_pct: Decimal | None = Field(default=None, gt=0, lt=50, decimal_places=1)
 
 
 class BuyRequest(BaseModel):
@@ -83,6 +90,8 @@ class BuyRequest(BaseModel):
 
     quote_amount: Decimal = Field(gt=0, max_digits=38, decimal_places=18)
     limit_price: Decimal | None = Field(default=None, gt=0, max_digits=38, decimal_places=18)
+    # Same five-level ladder as a sale, see SellRequest.
+    ladder_step_pct: Decimal | None = Field(default=None, gt=0, lt=50, decimal_places=1)
     # Off unless asked for: the floors exist because a pool can be drained
     # between arming a level and the price reaching it, and the two are usually
     # the same event. Waiving them is a decision about one coin, so it is
@@ -413,10 +422,50 @@ async def positions() -> dict:
     }
 
 
+def _require_limit_for_ladder(limit: Decimal | None, step: Decimal | None) -> None:
+    if step is not None and limit is None:
+        raise HTTPException(422, "Лесенка ставится только лимиткой — укажите цену")
+
+
+def _plan(
+    amount: Decimal, limit: Decimal, step: Decimal | None, decimals: int
+) -> list[tuple[Decimal, Decimal]]:
+    """``(limit_price, amount)`` per level: one level, or a five-rung ladder."""
+    if step is None:
+        return [(limit, amount)]
+    try:
+        return ladder_levels(amount, limit, step, decimals)
+    except ValueError:
+        raise HTTPException(422, "Объём слишком мал, чтобы разбить его на пять ступеней") from None
+
+
+async def _arm(
+    symbol: str, side: str, plan: list[tuple[Decimal, Decimal]], coin: str, **extra
+) -> list[dict]:
+    # One transaction for the whole ladder: half a ladder is a position traded
+    # on a shape nobody chose.
+    async with SessionLocal() as session:
+        repository = DexIntentRepository(session)
+        intents = [
+            await repository.create_level(
+                symbol=symbol, side=side, limit_price=level_price,
+                amount_in=level_amount, amount_in_coin=coin,
+                order_link_id=str(uuid4()), **extra,
+            )
+            for level_price, level_amount in plan
+        ]
+        await session.commit()
+    return [
+        {"intent_id": intent.id, "limit_price": str(level_price), "amount": str(level_amount)}
+        for intent, (level_price, level_amount) in zip(intents, plan)
+    ]
+
+
 @router.post("/positions/{address}/sell", dependencies=[Depends(require_trading)])
 async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
     if payload.percent not in (25, 50, 75, 100):
         raise HTTPException(422, "Доля продажи: 25, 50, 75 или 100 процентов")
+    _require_limit_for_ladder(payload.limit_price, payload.ladder_step_pct)
     await load_dynamic_tokens(SessionLocal)
     chain = ChainClient()
     try:
@@ -488,19 +537,17 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
     # days, and both facts will have changed by the time it triggers. The worker
     # re-checks them at execution, which is the only moment they mean anything.
 
-    async with SessionLocal() as session:
-        intent = await DexIntentRepository(session).create_level(
-            symbol=pair.symbol, side="Sell", limit_price=limit,
-            amount_in=amount, amount_in_coin=pair.base_coin,
-            order_link_id=str(uuid4()),
-        )
-        await session.commit()
-        intent_id = intent.id
+    plan = _plan(amount, limit, payload.ladder_step_pct, position.decimals)
+    levels = await _arm(pair.symbol, "Sell", plan, pair.base_coin)
+    intent_id = levels[0]["intent_id"]
 
     return {
         "intent_id": intent_id, "symbol": pair.symbol, "side": "Sell",
         "order_type": "market" if payload.limit_price is None else "limit",
-        "percent": payload.percent, "amount": str(amount),
+        "percent": payload.percent, "amount": str(amount), "levels": levels,
+        "ladder_step_pct": (
+            str(payload.ladder_step_pct) if payload.ladder_step_pct is not None else None
+        ),
         "amount_coin": pair.base_coin,
         "quoted_proceeds": str(proceeds) if proceeds is not None else None,
         "limit_price": str(limit),
@@ -522,6 +569,7 @@ async def buy(payload: BuyRequest, address: str = ADDRESS) -> dict:
             422,
             f"Минимальный ордер — {settings.dex_min_order_quote} {QUOTE_SYMBOL}",
         )
+    _require_limit_for_ladder(payload.limit_price, payload.ladder_step_pct)
     await load_dynamic_tokens(SessionLocal)
     quote_token = resolve_token(QUOTE_SYMBOL)
 
@@ -572,21 +620,28 @@ async def buy(payload: BuyRequest, address: str = ADDRESS) -> dict:
     # worker re-checks them at execution, which is the only moment they mean
     # anything.
 
-    async with SessionLocal() as session:
-        intent = await DexIntentRepository(session).create_level(
-            symbol=pair.symbol, side="Buy", limit_price=limit,
-            amount_in=payload.quote_amount, amount_in_coin=pair.quote_coin,
-            order_link_id=str(uuid4()),
-            ignore_liquidity_gate=payload.ignore_liquidity,
+    plan = _plan(payload.quote_amount, limit, payload.ladder_step_pct, quote_token.decimals)
+    # Every rung is its own order, so every rung has to clear the minimum.
+    if min(level_amount for _, level_amount in plan) < settings.dex_min_order_quote:
+        raise HTTPException(
+            422,
+            f"Ступень лесенки меньше минимального ордера "
+            f"{settings.dex_min_order_quote} {QUOTE_SYMBOL}",
         )
-        await session.commit()
-        intent_id = intent.id
+    levels = await _arm(
+        pair.symbol, "Buy", plan, pair.quote_coin,
+        ignore_liquidity_gate=payload.ignore_liquidity,
+    )
+    intent_id = levels[0]["intent_id"]
 
     return {
         "intent_id": intent_id, "symbol": pair.symbol, "side": "Buy",
         "order_type": "market" if payload.limit_price is None else "limit",
         "amount": str(payload.quote_amount), "amount_coin": pair.quote_coin,
-        "limit_price": str(limit),
+        "limit_price": str(limit), "levels": levels,
+        "ladder_step_pct": (
+            str(payload.ladder_step_pct) if payload.ladder_step_pct is not None else None
+        ),
         "ignore_liquidity": payload.ignore_liquidity,
         "quoted_receive": str(quoted_receive) if quoted_receive is not None else None,
         "status": "WAITING", "dry_run": settings.dex_dry_run,

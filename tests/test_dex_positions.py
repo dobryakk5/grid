@@ -11,6 +11,7 @@ from app.dex.positions import (
     Position,
     PositionReadError,
     fraction_amount,
+    ladder_levels,
     limit_from_quote,
     read_balances,
 )
@@ -222,3 +223,19 @@ async def test_the_page_asks_our_own_short_list_not_the_tapes_cache():
     # but only where a slow pass costs nothing: the background worker.
     await positions.open_positions(factory, chain, chain_id=4663, universe="chain")
     assert factory.model is ChainToken
+
+
+def test_a_ladder_centres_on_the_chosen_price_and_sells_exactly_the_share():
+    levels = ladder_levels(Decimal("10.000001"), Decimal("2"), Decimal("1"), 6)
+    assert [p for p, _ in levels] == [
+        Decimal("1.96"), Decimal("1.98"), Decimal("2"), Decimal("2.02"), Decimal("2.04"),
+    ]
+    assert [a for _, a in levels[:4]] == [Decimal("2.000000")] * 4
+    assert sum(a for _, a in levels) == Decimal("10.000001")
+
+
+def test_a_ladder_refuses_a_share_too_small_to_split():
+    with pytest.raises(ValueError):
+        ladder_levels(Decimal("0.000004"), Decimal("2"), Decimal("1"), 6)
+    with pytest.raises(ValueError):
+        ladder_levels(Decimal("10"), Decimal("2"), Decimal("50"), 6)

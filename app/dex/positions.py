@@ -106,6 +106,37 @@ def fraction_amount(balance: Decimal, percent: int, decimals: int) -> Decimal:
     return exact.quantize(step, rounding=ROUND_DOWN)
 
 
+LADDER_STEPS = 5
+
+
+def ladder_levels(
+    amount: Decimal, price: Decimal, step_pct: Decimal, decimals: int
+) -> list[tuple[Decimal, Decimal]]:
+    """``(limit_price, amount)`` for five levels centred on ``price``.
+
+    Two steps below, the price itself, two above -- so the chosen price is the
+    average of the ladder. Equal slices rounded down to the token precision;
+    the rounding dust goes to the top level so the slices add up to exactly
+    ``amount`` and a 100% ladder still empties the wallet.
+    """
+    if step_pct <= 0 or step_pct * 2 >= 100:
+        raise ValueError("step must be between 0 and 50 percent")
+    unit = Decimal(1).scaleb(-decimals)
+    slice_ = (amount / LADDER_STEPS).quantize(unit, rounding=ROUND_DOWN)
+    if slice_ <= 0:
+        raise ValueError("amount is too small to split into five levels")
+    half = LADDER_STEPS // 2
+    levels = []
+    for k in range(-half, half + 1):
+        level_price = (price * (1 + step_pct * k / 100)).quantize(
+            Decimal(1).scaleb(-18), rounding=ROUND_DOWN
+        )
+        levels.append((level_price, slice_))
+    top_price, _ = levels[-1]
+    levels[-1] = (top_price, amount - slice_ * (LADDER_STEPS - 1))
+    return levels
+
+
 def limit_from_quote(
     amount_in: Decimal, amount_out: Decimal, slippage_pct: Decimal, *, side: str = "Sell"
 ) -> Decimal:

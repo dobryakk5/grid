@@ -96,7 +96,12 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
 <label class="choice"><input type="radio" name="buyType" value="limit">
  <span>Лимиткой по цене, USDG за штуку
  <input id="buyLimit" type="text" inputmode="decimal" placeholder="например 4.20" disabled
-  style="width:100%;margin-top:4px"></span></label>
+  style="width:100%;margin-top:4px">
+ <span style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:13px">
+  <input type="checkbox" id="buyLadder" checked disabled> Лесенкой, 5 ступеней, шаг
+  <input id="buyStep" type="number" min="0.1" max="49.9" step="0.1" value="1.0" disabled
+   style="width:64px;min-width:0;flex:none;margin:0;padding:5px 7px"> %</span>
+ <span class="muted" id="buyLadderPreview" style="display:block;font-size:12px;margin-top:4px"></span></span></label>
 <label class="choice" style="margin-top:4px"><input type="checkbox" id="buyIgnoreLiq">
  <span>без ликв — не проверять ликвидность и объём
  <span class="muted" style="display:block;font-size:12px">Обычно уровень с тонкой монетой встаёт
@@ -118,7 +123,11 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
  <span>Лимиткой по цене, USDG за штуку
  <input id="sellLimit" type="text" inputmode="decimal" placeholder="например 4.20" disabled
   style="width:100%;margin-top:4px">
- <span class="muted" id="sellLimitHint" style="font-size:12px"></span></span></label>
+ <span class="muted" id="sellLimitHint" style="font-size:12px"></span>
+ <span style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:13px">
+  <input type="checkbox" id="sellLadder" checked disabled> Лесенкой, 5 ступеней, шаг
+  <input id="sellStep" type="number" min="0.1" max="49.9" step="0.1" value="1.0" disabled
+   style="width:64px;min-width:0;flex:none;margin:0;padding:5px 7px"> %</span></span></label>
 <dl id="sellDetails"></dl>
 <p class="warn" id="sellWarn" style="margin:0 0 14px"></p>
 <p class="bad" id="sellError" style="margin:0 0 10px"></p>
@@ -269,13 +278,37 @@ $('rows').onclick=event=>{
 // The share is a quarter of what the wallet holds *now*; showing the resulting
 // token amount is the whole point of the chips, since a percentage of an
 // unfamiliar balance means nothing on its own.
+// The ladder the server will arm: the chosen price in the middle, two steps
+// either side, a fifth of the share on each. Null when it is not a ladder.
+function ladderStep(side){
+ if($(side+'Form')[side+'Type'].value!=='limit'||!$(side+'Ladder').checked)return null;
+ const step=Math.round(Number($(side+'Step').value.replace(',','.'))*10)/10;
+ return step>0&&step<50?step:NaN;
+}
+const ladderPrices=(price,step)=>[-2,-1,0,1,2].map(k=>num(price*(1+step*k/100),10)).join(' · ');
+// Radio, ladder box and step field move together in both dialogs.
+function syncLimit(side){
+ const limit=$(side+'Form')[side+'Type'].value==='limit';
+ $(side+'Limit').disabled=$(side+'Ladder').disabled=!limit;
+ $(side+'Step').disabled=!limit||!$(side+'Ladder').checked;
+ return limit;
+}
+function ladderAlert(result){
+ return `Лесенка поставлена: ${result.levels.length} ступеней, шаг ${result.ladder_step_pct}%.\n`+
+  result.levels.map(l=>`#${l.intent_id}: ${l.amount} ${ticker(result.amount_coin)} по ${l.limit_price} USDG`).join('\n');
+}
+
 function sellDetails(){
  const position=pending&&pending.position;
  if(!position)return;
  const share=Number(position.amount)*pending.percent/100;
  const price=$('sellForm').sellType.value==='limit'?Number($('sellLimit').value.replace(',','.')):NaN;
+ const step=ladderStep('sell');
+ const ladder=step>0&&price>0
+  ?`<dt>Ступени</dt><dd>${ladderPrices(price,step)}
+    <span class="muted">по ${num(share/5,8)}</span></dd>`:'';
  const proceeds=Number.isFinite(price)&&price>0
-  ?`<dt>Если исполнится</dt><dd>${num(share*price,6)} USDG</dd>`:'';
+  ?`${ladder}<dt>Если исполнится</dt><dd>${num(share*price,6)} USDG</dd>`:'';
  $('sellDetails').innerHTML=`<dt>Текущая цена</dt><dd>${currentPrice(position)}</dd>
   <dt>В кошельке</dt><dd>${num(position.amount,8)}</dd>
   <dt>К продаже</dt><dd>${num(share,8)} ${esc(position.symbol||'')}</dd>${proceeds}`;
@@ -312,6 +345,7 @@ function openSell(address){
   ? `×2 от цены закупа ${num(position.average_price,10)}`
   : 'цена закупа неизвестна — подставить нечего';
  $('sellForm').sellType.value='market';$('sellLimit').disabled=true;
+ $('sellLadder').checked=true;$('sellStep').value='1.0';syncLimit('sell');
  $('sellChips').innerHTML=[25,50,75,100].map(q=>
   `<button type="button" data-percent="${q}" aria-pressed="${q===25}">${q}%</button>`).join('');
  $('sellWarn').textContent=state.dry_run
@@ -329,11 +363,12 @@ $('sellChips').onclick=event=>{
  sellDetails();
 };
 [...document.querySelectorAll('input[name=sellType]')].forEach(radio=>radio.onchange=()=>{
- $('sellLimit').disabled=$('sellForm').sellType.value!=='limit';
- if(!$('sellLimit').disabled)$('sellLimit').focus();
+ if(syncLimit('sell'))$('sellLimit').focus();
  sellDetails();
 });
 $('sellLimit').oninput=sellDetails;
+$('sellStep').oninput=sellDetails;
+$('sellLadder').onchange=()=>{syncLimit('sell');sellDetails();};
 $('cancelSell').onclick=()=>{pending=null;$('sell').close();};
 
 $('sellForm').onsubmit=async event=>{
@@ -344,14 +379,19 @@ $('sellForm').onsubmit=async event=>{
  if($('sellForm').sellType.value==='limit'){
   if(!$('sellLimit').value.trim()){$('sellError').textContent='Укажите цену лимитки.';return;}
   body.limit_price=$('sellLimit').value.trim().replace(',','.');
+  const step=ladderStep('sell');
+  if(Number.isNaN(step)){$('sellError').textContent='Шаг лесенки: от 0.1 до 49.9 %.';return;}
+  if(step)body.ladder_step_pct=step.toFixed(1);
  }
  $('doSell').disabled=true;
  try{
   const result=await api(`/api/dex/positions/${pending.address}/sell`,
    {method:'POST',body:JSON.stringify(body)});
   $('sell').close();
-  alert(`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
-        `${result.amount} ${ticker(result.amount_coin)} по лимиту ${result.limit_price} USDG за штуку.`+
+  alert((result.levels.length>1
+   ?ladderAlert(result)
+   :`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
+    `${result.amount} ${ticker(result.amount_coin)} по лимиту ${result.limit_price} USDG за штуку.`)+
         (result.quoted_proceeds?`\nКотировка: ${result.quoted_proceeds} USDG.`:'')+`\n${result.note}`);
   pending=null;load();
  }catch(e){$('sellError').textContent=e.message;}
@@ -365,7 +405,8 @@ function openBuy(address,symbol){
  // Off on every open: a waiver granted to one coin must not be inherited by
  // the next coin the operator happens to click.
  $('buyIgnoreLiq').checked=false;$('buyLiqWarn').textContent='';
- $('buyForm').buyType.value='market';$('buyLimit').disabled=true;
+ $('buyForm').buyType.value='market';$('buyLadder').checked=true;$('buyStep').value='1.0';
+ syncLimit('buy');buyPreview();
  $('buyWarn').textContent=state.dry_run
   ?'DEX_DRY_RUN включён — сделка не будет подписана.'
   :'DEX_DRY_RUN выключен — воркер подпишет и отправит эту сделку.';
@@ -378,10 +419,19 @@ $('buyIgnoreLiq').onchange=()=>{
   ? 'Гейты ликвидности и объёма сняты для этого ордера. Пул может опустеть до того, как цена дойдёт до уровня — обычно это одно и то же событие.'
   : '';
 };
+function buyPreview(){
+ const step=ladderStep('buy');
+ const price=Number($('buyLimit').value.replace(',','.'));
+ const amount=Number($('buyAmount').value.replace(',','.'));
+ $('buyLadderPreview').textContent=step>0&&price>0
+  ?`Ступени: ${ladderPrices(price,step)}${amount>0?` · по ${num(amount/5,6)} USDG`:''}`:'';
+}
 [...document.querySelectorAll('input[name=buyType]')].forEach(radio=>radio.onchange=()=>{
- $('buyLimit').disabled=$('buyForm').buyType.value!=='limit';
- if(!$('buyLimit').disabled)$('buyLimit').focus();
+ if(syncLimit('buy'))$('buyLimit').focus();
+ buyPreview();
 });
+$('buyLadder').onchange=()=>{syncLimit('buy');buyPreview();};
+$('buyLimit').oninput=$('buyStep').oninput=$('buyAmount').oninput=buyPreview;
 $('cancelBuy').onclick=()=>{buying=null;$('buy').close();};
 $('openForm').onsubmit=event=>{
  event.preventDefault();
@@ -397,6 +447,9 @@ $('buyForm').onsubmit=async event=>{
  if($('buyForm').buyType.value==='limit'){
   if(!$('buyLimit').value.trim()){$('buyError').textContent='Укажите цену лимитки.';return;}
   body.limit_price=$('buyLimit').value.trim().replace(',','.');
+  const step=ladderStep('buy');
+  if(Number.isNaN(step)){$('buyError').textContent='Шаг лесенки: от 0.1 до 49.9 %.';return;}
+  if(step)body.ladder_step_pct=step.toFixed(1);
  }
  if($('buyIgnoreLiq').checked)body.ignore_liquidity=true;
  $('doBuy').disabled=true;
@@ -404,8 +457,9 @@ $('buyForm').onsubmit=async event=>{
   const result=await api(`/api/dex/positions/${buying.address}/buy`,
    {method:'POST',body:JSON.stringify(body)});
   $('buy').close();
-  alert(`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
-        `${result.amount} ${ticker(result.amount_coin)} по лимиту ${result.limit_price} USDG за штуку.`+
+  alert((result.levels.length>1?ladderAlert(result)
+   :`Ордер поставлен (intent ${result.intent_id}, ${result.order_type==='market'?'по рынку':'лимитка'}).\n`+
+    `${result.amount} ${ticker(result.amount_coin)} по лимиту ${result.limit_price} USDG за штуку.`)+
         (result.quoted_receive?`\nКотировка: ${result.quoted_receive}.`:'')+
         (result.ignore_liquidity?'\nГейты ликвидности и объёма сняты.':'')+`\n${result.note}`);
   buying=null;load();
