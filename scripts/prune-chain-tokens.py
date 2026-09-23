@@ -40,18 +40,26 @@ from app.db.session import SessionLocal  # noqa: E402
 # ``quote_address`` and would otherwise look untraded. ``dex_wallet_tokens``
 # is checked too -- an airdrop sitting in our wallet has no swap anywhere and
 # is the last thing to forget the decimals of.
+#
+# Written as NOT EXISTS against one materialised set of traded addresses.
+# Both obvious forms are slow here: a correlated NOT EXISTS with an OR
+# rescans half a million swaps per token, since ``quote_address`` has no
+# index; and NOT IN cannot become a hash anti-join at all, because of what
+# it has to do with NULLs. A few thousand distinct addresses, hashed once,
+# answers the same question in seconds.
+_TRADED = """
+    WITH traded AS MATERIALIZED (
+        SELECT lower(token_address) AS address FROM chain_swaps
+         UNION
+        SELECT lower(quote_address) FROM chain_swaps WHERE quote_address IS NOT NULL
+         UNION
+        SELECT lower(address) FROM dex_wallet_tokens WHERE chain_id = :chain_id
+    )
+"""
 _JUNK = """
     FROM chain_tokens AS t
    WHERE t.chain_id = :chain_id
-     AND NOT EXISTS (
-         SELECT 1 FROM chain_swaps s
-          WHERE lower(s.token_address) = lower(t.address)
-             OR lower(s.quote_address) = lower(t.address)
-     )
-     AND NOT EXISTS (
-         SELECT 1 FROM dex_wallet_tokens w
-          WHERE w.chain_id = t.chain_id AND lower(w.address) = lower(t.address)
-     )
+     AND NOT EXISTS (SELECT 1 FROM traded x WHERE x.address = lower(t.address))
 """
 
 
@@ -75,7 +83,7 @@ async def main(apply: bool) -> int:
             text("SELECT count(*) FROM chain_tokens WHERE chain_id = :chain_id"),
             {"chain_id": chain_id},
         )
-        junk = await session.scalar(text("SELECT count(*) " + _JUNK), {"chain_id": chain_id})
+        junk = await session.scalar(text(_TRADED + "SELECT count(*) " + _JUNK), {"chain_id": chain_id})
 
         print(f"chain_tokens (chain {chain_id}): {total}")
         print(f"  never a leg of any swap, and not ours: {junk}")
@@ -85,7 +93,7 @@ async def main(apply: bool) -> int:
             return 0
         if not apply:
             sample = (await session.execute(
-                text("SELECT t.address, t.symbol " + _JUNK + " ORDER BY t.created_at DESC LIMIT 5"),
+                text(_TRADED + "SELECT t.address, t.symbol " + _JUNK + " ORDER BY t.created_at DESC LIMIT 5"),
                 {"chain_id": chain_id},
             )).all()
             print("\n  a few of them:")
@@ -94,7 +102,7 @@ async def main(apply: bool) -> int:
             print("\nDry run. Re-run with --apply to delete.")
             return 0
 
-        result = await session.execute(text("DELETE " + _JUNK), {"chain_id": chain_id})
+        result = await session.execute(text(_TRADED + "DELETE " + _JUNK), {"chain_id": chain_id})
         await session.commit()
         print(f"\ndeleted {result.rowcount} row(s)")
         return result.rowcount or 0

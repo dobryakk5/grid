@@ -123,3 +123,25 @@ async def test_only_tokens_that_turned_out_to_be_trades_are_kept(monkeypatch):
     # ...and only the two that were legs of a swap were written down.
     assert sorted(kept) == sorted([traded, quote])
     assert spam not in kept
+
+
+def test_the_ranking_takes_the_biggest_known_traders_and_nobody_idle():
+    from decimal import Decimal
+
+    volumes = [
+        ("0xAAA", Decimal("500")),
+        ("0xbbb", Decimal("900")),
+        ("0xccc", Decimal("0")),        # traded nothing priced: never a slot
+        ("0xddd", Decimal("700")),
+        ("0xeee", Decimal("800")),      # not in fomo_traders: no row to scan
+    ]
+    known = {"0xaaa", "0xbbb", "0xccc", "0xddd"}
+
+    assert chain_tape.top_wallets(volumes, known, limit=2) == ["0xbbb", "0xddd"]
+    # Case is normalised: the tape writes checksummed and lowercase alike.
+    assert chain_tape.top_wallets(volumes, known, limit=10) == ["0xbbb", "0xddd", "0xaaa"]
+
+
+def test_ties_break_on_address_so_the_roster_does_not_reshuffle():
+    volumes = [("0xb", 5), ("0xa", 5), ("0xc", 5)]
+    assert chain_tape.top_wallets(volumes, {"0xa", "0xb", "0xc"}, limit=2) == ["0xa", "0xb"]

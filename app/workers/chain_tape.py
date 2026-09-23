@@ -45,7 +45,7 @@ import asyncio
 import logging
 import time
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.chain.tape import (
@@ -255,6 +255,24 @@ async def _fetch_chunked(client, wallets: list[str], from_block: int, to_block: 
 # ---- roster ------------------------------------------------------------
 
 
+def top_wallets(volumes, known: set[str], *, limit: int) -> list[str]:
+    """The ``limit`` known wallets with the most priced volume, biggest first.
+
+    Pure, so the rule is testable without a database. Only wallets already in
+    ``fomo_traders`` can rank -- a slot is a row the tape will scan, and it
+    scans rows, not addresses that merely appear in someone's history. A
+    wallet with no priced volume never ranks: the roster is a fixed budget,
+    and a row that has not traded is the cheapest thing to leave out of it.
+    Ties break on address so the roster does not reshuffle between passes.
+    """
+    ranked = sorted(
+        ((wallet.lower(), volume) for wallet, volume in volumes
+         if wallet and volume and volume > 0 and wallet.lower() in known),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [wallet for wallet, _volume in ranked[: max(1, limit)]]
+
+
 async def rerank_wallets(*, chain_id: int) -> int:
     """Re-decide which wallets are worth following. Returns how many rank.
 
@@ -273,49 +291,44 @@ async def rerank_wallets(*, chain_id: int) -> int:
     """
     window = max(1, settings.chain_tape_rank_window_days)
     async with SessionLocal() as session:
-        # One statement, so no moment exists where the roster is empty: a
-        # pass that read it between a DELETE and an INSERT would scan
-        # nothing and silently move the cursor past those blocks.
-        result = await session.execute(text("""
-            WITH volumes AS (
-                SELECT lower(cs.wallet_address) AS wallet,
-                       SUM(COALESCE(cs.value_usd, 0)) AS volume
-                  FROM chain_swaps cs
-                 WHERE cs.chain_id = :chain_id
-                   AND cs.block_time_ms >= :since_ms
-                 GROUP BY 1
-            ), ranked AS (
-                SELECT wallet, row_number() OVER (ORDER BY volume DESC, wallet) AS rank
-                  FROM volumes
-                 WHERE volume > 0
+        # Measured once, in one aggregate: ~2s over half a million swaps on
+        # the time index. The first version joined this aggregate straight
+        # into an UPDATE and cleared stale ranks with a NOT IN over the same
+        # table; the planner re-evaluated it per trader row and the pass took
+        # nearly two minutes -- all of it with the tape loop stood still.
+        volumes = (await session.execute(text("""
+            SELECT lower(wallet_address) AS wallet,
+                   SUM(COALESCE(value_usd, 0)) AS volume
+              FROM chain_swaps
+             WHERE chain_id = :chain_id AND block_time_ms >= :since_ms
+             GROUP BY 1
+        """), {
+            "chain_id": chain_id,
+            "since_ms": int((time.time() - window * 86400) * 1000),
+        })).all()
+        known = {
+            row.lower() for row in (await session.execute(
+                select(FomoTrader.evm_address).where(FomoTrader.evm_address.is_not(None))
+            )).scalars()
+        }
+        top = top_wallets(volumes, known, limit=settings.chain_tape_wallet_limit)
+
+        # Clear and re-set in one transaction, so no reader ever sees an
+        # empty roster -- a pass that did would scan nothing and move the
+        # cursor past those blocks for good. Only the top N carry a rank:
+        # that is all ``_tracked_wallets`` reads, and it keeps this a few
+        # dozen single-row updates on a table of a few hundred.
+        await session.execute(
+            update(FomoTrader).where(FomoTrader.volume_rank.is_not(None)).values(volume_rank=None)
+        )
+        for rank, wallet in enumerate(top, start=1):
+            await session.execute(
+                update(FomoTrader)
+                .where(func.lower(FomoTrader.evm_address) == wallet)
+                .values(volume_rank=rank)
             )
-            UPDATE fomo_traders t
-               SET volume_rank = r.rank
-              FROM ranked r
-             WHERE lower(t.evm_address) = r.wallet
-        """), {
-            "chain_id": chain_id,
-            "since_ms": int((time.time() - window * 86400) * 1000),
-        })
-        ranked = result.rowcount or 0
-        # Everyone else loses their rank in the same transaction, so the
-        # roster is exactly "the current ranking" and never the union of
-        # this ranking and a stale one.
-        await session.execute(text("""
-            UPDATE fomo_traders t
-               SET volume_rank = NULL
-             WHERE t.volume_rank IS NOT NULL
-               AND lower(t.evm_address) NOT IN (
-                    SELECT lower(cs.wallet_address) FROM chain_swaps cs
-                     WHERE cs.chain_id = :chain_id AND cs.block_time_ms >= :since_ms
-                       AND COALESCE(cs.value_usd, 0) > 0
-               )
-        """), {
-            "chain_id": chain_id,
-            "since_ms": int((time.time() - window * 86400) * 1000),
-        })
         await session.commit()
-    return ranked
+    return len(top)
 
 
 # ---- discovery ---------------------------------------------------------
