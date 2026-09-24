@@ -271,6 +271,24 @@ async def _init_db() -> None:
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS ignore_liquidity_gate "
             "BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS parent_intent_id INTEGER REFERENCES dex_intents(id) ON DELETE SET NULL",
+            "ALTER TABLE dex_intents ADD COLUMN IF NOT EXISTS token_address VARCHAR(42)",
+            # Levels armed before the column: pin each to the one known
+            # contract its key names -- ticker and address prefix both. A key
+            # that fits two contracts stays unpinned rather than guessed.
+            """UPDATE dex_intents i SET token_address = m.address
+               FROM (
+                   SELECT i2.id, min(t.address) AS address
+                   FROM dex_intents i2
+                   JOIN (SELECT address, symbol FROM dex_wallet_tokens
+                         UNION SELECT address, symbol FROM chain_tokens) t
+                     ON lower(t.address) LIKE '0x' || lower(substring(i2.symbol from '-([0-9A-Fa-f]{8})')) || '%'
+                    AND left(upper(regexp_replace(coalesce(t.symbol, ''), '[^A-Za-z0-9]', '', 'g')), 12)
+                        = split_part(i2.symbol, '-', 1)
+                   WHERE i2.token_address IS NULL AND i2.symbol ~ '-[0-9A-Fa-f]{8}'
+                   GROUP BY i2.id
+                   HAVING count(DISTINCT lower(t.address)) = 1
+               ) m
+               WHERE i.id = m.id""",
             # v4 pool ids are 32 bytes, not a 20-byte address.
             "ALTER TABLE dex_price_observations ALTER COLUMN pair_address TYPE VARCHAR(80)",
             "CREATE INDEX IF NOT EXISTS ix_grid_profiles_current_range_id ON grid_profiles(current_range_id)",

@@ -1904,6 +1904,7 @@ async def fomo_limit_order(payload: LimitOrderPayload) -> dict:
         repository = DexIntentRepository(session)
         intent = await repository.create_level(
             symbol=symbol,
+            token_address=pair.base.address,
             side=payload.side,
             limit_price=payload.limit_price,
             amount_in=payload.amount,

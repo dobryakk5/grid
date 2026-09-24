@@ -216,6 +216,7 @@ class RobinhoodClient:
         async with SessionLocal() as session:
             intent = await DexIntentRepository(session).create_level(
                 symbol=pair.symbol,
+                token_address=pair.base.address,
                 side="Sell" if selling else "Buy",
                 limit_price=price,
                 amount_in=qty if selling else qty * price,

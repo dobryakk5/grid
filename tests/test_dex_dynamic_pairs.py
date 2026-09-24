@@ -11,6 +11,7 @@ from app.dex.tokens import (
     dynamic_tokens,
     register_dynamic_token,
     resolve_pair,
+    resolve_pair_at,
 )
 
 MEME = "0x" + "55" * 20
@@ -128,3 +129,19 @@ def test_a_pair_resolves_however_the_symbol_is_cased():
     assert resolve_pair(f"{key}USDG").base.address == MEME
     assert resolve_pair(f"{key}USDG".lower()).base.address == MEME
     assert resolve_pair(f"{key}USDG".upper()).base.address == MEME
+
+
+def test_a_contract_ground_to_match_a_key_cannot_take_it_over():
+    # Same ticker, same first eight hex characters, different contract.
+    twin = MEME[:10] + "66" * 16
+    key = register_dynamic_token("MEME", MEME, 18)
+    with pytest.raises(DexConfigError):
+        register_dynamic_token("MEME", twin, 18)
+    assert resolve_pair(f"{key}USDG").base.address == MEME
+
+
+def test_a_pair_is_refused_when_its_key_names_another_contract():
+    key = register_dynamic_token("MEME", MEME, 18)
+    assert resolve_pair_at(f"{key}USDG", MEME.upper().replace("0X", "0x")).base.address == MEME
+    with pytest.raises(DexConfigError):
+        resolve_pair_at(f"{key}USDG", "0x" + "77" * 20)

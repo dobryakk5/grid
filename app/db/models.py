@@ -382,6 +382,12 @@ class DexIntent(Base):
     )
     order_link_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # The contract this level trades -- its identity. ``symbol`` is only the
+    # registry key used to look the pair up, and a key carrying eight hex
+    # characters of address can be matched by a contract ground for it; the
+    # worker refuses to trade when the key resolves anywhere but here.
+    # Null for builtin pairs armed before the column existed.
+    token_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="WAITING", index=True)
 

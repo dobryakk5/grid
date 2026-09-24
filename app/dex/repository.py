@@ -69,6 +69,7 @@ class DexIntentRepository:
         amount_in: Decimal,
         amount_in_coin: str,
         order_link_id: str,
+        token_address: str | None = None,
         profile_id: int | None = None,
         expires_at: datetime | None = None,
         parent_intent_id: int | None = None,
@@ -81,6 +82,7 @@ class DexIntentRepository:
             ignore_liquidity_gate=ignore_liquidity_gate,
             order_link_id=order_link_id,
             symbol=symbol,
+            token_address=token_address.lower() if token_address else None,
             side=side,
             status=IntentStatus.WAITING,
             limit_price=limit_price,
@@ -191,6 +193,7 @@ class DexIntentRepository:
             return None
         return await self.create_level(
             symbol=intent.symbol,
+            token_address=intent.token_address,
             side=intent.side,
             limit_price=intent.limit_price,
             amount_in=intent.amount_in,

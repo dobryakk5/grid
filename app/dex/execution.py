@@ -41,7 +41,7 @@ from app.dex.pricing import GasCost, PricingError, convert_gas
 from app.dex.receipts import FillReport, ReceiptError, parse_swap_fill
 from app.dex.repository import DexIntentRepository
 from app.dex.risk import evaluate
-from app.dex.tokens import DexPair, Token, resolve_pair
+from app.dex.tokens import DexConfigError, DexPair, Token, resolve_pair_at
 from app.dex.uniswap import UniswapClient, UniswapError
 from app.notify.events import dex_kind
 from app.notify.outbox import enqueue
@@ -200,7 +200,16 @@ async def execute_swap(
     quote above it, a sell declines one below. That is what keeps a synthetic
     limit order from degenerating into a market order.
     """
-    pair = resolve_pair(symbol)
+    progress = _Progress(repository, intent)
+    try:
+        pair = resolve_pair_at(symbol, intent.token_address if intent is not None else None)
+    except DexConfigError as exc:
+        # Blocked, not skipped: a level stuck on the wrong contract has to be
+        # visible on the history page, not only in the worker's log.
+        await progress.block(str(exc))
+        return SwapOutcome(
+            status=IntentStatus.BLOCKED, symbol=symbol, side=side, reason=str(exc),
+        )
     selling = _is_sell(side)
     token_in, token_out = _direction(pair, side)
     dry = settings.dex_dry_run if dry_run is None else dry_run
@@ -211,8 +220,6 @@ async def execute_swap(
     # the worst possible moment -- and the most expensive one.
     if not dry:
         await _require_storage(session)
-
-    progress = _Progress(repository, intent)
 
     snapshot = await market.snapshot(pair)
     # A sale is never gated on liquidity. The floors exist to stop us *entering*

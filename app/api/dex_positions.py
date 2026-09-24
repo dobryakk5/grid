@@ -440,7 +440,8 @@ def _plan(
 
 
 async def _arm(
-    symbol: str, side: str, plan: list[tuple[Decimal, Decimal]], coin: str, **extra
+    symbol: str, side: str, plan: list[tuple[Decimal, Decimal]], coin: str,
+    token_address: str, **extra,
 ) -> list[dict]:
     # One transaction for the whole ladder: half a ladder is a position traded
     # on a shape nobody chose.
@@ -448,8 +449,8 @@ async def _arm(
         repository = DexIntentRepository(session)
         intents = [
             await repository.create_level(
-                symbol=symbol, side=side, limit_price=level_price,
-                amount_in=level_amount, amount_in_coin=coin,
+                symbol=symbol, token_address=token_address, side=side,
+                limit_price=level_price, amount_in=level_amount, amount_in_coin=coin,
                 order_link_id=str(uuid4()), **extra,
             )
             for level_price, level_amount in plan
@@ -538,7 +539,7 @@ async def sell(payload: SellRequest, address: str = ADDRESS) -> dict:
     # re-checks them at execution, which is the only moment they mean anything.
 
     plan = _plan(amount, limit, payload.ladder_step_pct, position.decimals)
-    levels = await _arm(pair.symbol, "Sell", plan, pair.base_coin)
+    levels = await _arm(pair.symbol, "Sell", plan, pair.base_coin, address)
     intent_id = levels[0]["intent_id"]
 
     return {
@@ -629,7 +630,7 @@ async def buy(payload: BuyRequest, address: str = ADDRESS) -> dict:
             f"{settings.dex_min_order_quote} {QUOTE_SYMBOL}",
         )
     levels = await _arm(
-        pair.symbol, "Buy", plan, pair.quote_coin,
+        pair.symbol, "Buy", plan, pair.quote_coin, address,
         ignore_liquidity_gate=payload.ignore_liquidity,
     )
     intent_id = levels[0]["intent_id"]

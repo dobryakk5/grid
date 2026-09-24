@@ -271,6 +271,15 @@ def register_dynamic_token(symbol: str, address: str, decimals: int) -> str | No
             f"pins {plain} to {builtin.address}"
         )
     key = dynamic_key(plain, address)
+    held = _DYNAMIC_TOKENS.get(key)
+    if held is not None and held.address != address.lower():
+        # Eight hex characters are 32 bits: a contract can be ground to match
+        # a real coin's key. First registered keeps it; the other is refused
+        # instead of silently taking over every level armed on the key.
+        raise DexConfigError(
+            f"refusing to register {plain} at {address}: key {key} already "
+            f"belongs to {held.address}"
+        )
     _DYNAMIC_TOKENS[key] = Token(symbol=key, address=address.lower(), decimals=int(decimals))
     return key
 
@@ -292,6 +301,22 @@ def _split_dynamic(key: str) -> tuple[str, str] | None:
         if key.endswith(quote) and len(key) > len(quote):
             return key[: -len(quote)], quote
     return None
+
+
+def resolve_pair_at(symbol: str, token_address: str | None) -> DexPair:
+    """``resolve_pair``, refusing a pair whose base is not ``token_address``.
+
+    The key names the pair; the address is what the order was placed on. When
+    the two disagree nothing is traded -- the alternative is selling or buying
+    a contract the operator never chose.
+    """
+    pair = resolve_pair(symbol)
+    if token_address and (pair.base.address or "").lower() != token_address.lower():
+        raise DexConfigError(
+            f"{symbol} resolves to {pair.base.address}, but the order was placed "
+            f"on {token_address}"
+        )
+    return pair
 
 
 def resolve_pair(symbol: str) -> DexPair:

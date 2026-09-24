@@ -150,8 +150,17 @@ const ticker=s=>String(s??'').replace(/-[0-9A-F]{8}$/,'');
 // name. A chain missing here gets no link rather than a 404.
 const fomoSlugs={1:'ethereum',56:'bnb',143:'monad',1337:'hyperliquid',4663:'robinhood',
  8453:'base',1399811149:'solana'};
+// Tickers are free text: "Al" with a lower-case L renders exactly like "AI",
+// and a copy airdropped next to the real coin sits one row away from it. Fold
+// the characters that look alike and flag every position that shares a shape
+// with another -- the address is then the only thing telling them apart.
+const shape=symbol=>(symbol||'').replace(/[l1|]/g,'I').replace(/0/g,'O').toUpperCase();
+function twin(p){
+ return !!p.symbol&&state.positions.some(o=>o!==p&&o.token_address!==p.token_address&&shape(o.symbol)===shape(p.symbol));
+}
+const TWIN_NOTE='В кошельке есть другая монета с похожим тикером — сверяйте адрес';
 function coinLink(p){
- const name=esc(p.symbol||'без тикера');
+ const name=esc(p.symbol||'без тикера')+(twin(p)?` <span class="warn" title="${TWIN_NOTE}">⚠ двойник</span>`:'');
  const slug=fomoSlugs[state.chain_id];
  if(!slug||!p.token_address)return name;
  const href=`https://fomo.family/tokens/${slug}/${encodeURIComponent(p.token_address)}`;
@@ -335,7 +344,9 @@ function openSell(address){
  const position=state.positions.find(p=>p.token_address===address);
  if(!position)return;
  pending={address:position.token_address,percent:25,symbol:position.symbol,position};
- $('sellTitle').textContent=`Продажа ${position.symbol||'позиции'} → USDG`;
+ $('sellTitle').innerHTML=`Продажа ${esc(position.symbol||'позиции')} → USDG`+
+  `<div class="muted" style="font-size:12px;font-weight:400;margin-top:4px">${esc(position.token_address)}</div>`+
+  (twin(position)?`<div class="warn" style="font-size:12px;font-weight:400;margin-top:4px">⚠ ${TWIN_NOTE}</div>`:'');
  $('sellError').textContent='';
  // Twice what the coin cost is the take-profit this page is most often opened
  // to place, so it is filled in rather than typed. Unknown cost leaves it

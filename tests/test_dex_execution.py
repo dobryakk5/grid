@@ -173,7 +173,7 @@ async def test_a_dry_run_quotes_but_signs_nothing():
 async def test_a_level_armed_without_the_liquidity_gate_trades_a_thin_pool():
     """What the «без ликв» checkbox buys: the same pool, quoted instead of blocked."""
     uniswap = FakeUniswap()
-    waived = type("Intent", (), {"ignore_liquidity_gate": True, "id": 1, "status": "WAITING"})()
+    waived = type("Intent", (), {"ignore_liquidity_gate": True, "id": 1, "status": "WAITING", "token_address": None})()
     outcome = await buy(uniswap=uniswap, market=FakeMarket(liquidity="100000"), intent=waived)
 
     assert outcome.status != IntentStatus.BLOCKED, outcome.reason
@@ -182,11 +182,25 @@ async def test_a_level_armed_without_the_liquidity_gate_trades_a_thin_pool():
 
 async def test_a_level_without_the_waiver_still_blocks_on_the_same_pool():
     """The waiver is per level: an ordinary one keeps its floors."""
-    ordinary = type("Intent", (), {"ignore_liquidity_gate": False, "id": 2, "status": "WAITING"})()
+    ordinary = type("Intent", (), {"ignore_liquidity_gate": False, "id": 2, "status": "WAITING", "token_address": None})()
     outcome = await buy(market=FakeMarket(liquidity="100000"), intent=ordinary)
 
     assert outcome.status == IntentStatus.BLOCKED
     assert "liquidity" in outcome.reason
+
+
+async def test_a_level_placed_on_another_contract_never_trades():
+    """The address the order was placed on decides, not the pair key."""
+    uniswap = FakeUniswap()
+    elsewhere = type("Intent", (), {
+        "ignore_liquidity_gate": False, "id": 3, "status": "WAITING",
+        "token_address": "0x" + "77" * 20,
+    })()
+    outcome = await buy(uniswap=uniswap, intent=elsewhere)
+
+    assert outcome.status == IntentStatus.BLOCKED
+    assert "0x" + "77" * 20 in outcome.reason
+    assert uniswap.calls == []
 
 
 async def test_a_collapsing_pool_blocks_before_the_chain_is_touched():
