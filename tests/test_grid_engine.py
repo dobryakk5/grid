@@ -538,3 +538,42 @@ async def test_a_live_order_that_goes_missing_is_never_closed_by_guesswork():
     await GridEngine(LinkLookupExchange()).sync_open_orders(FakeSession([order]), profile())
 
     assert order.status == "New"
+
+
+async def test_a_disabled_profile_keeps_what_the_sync_learned(monkeypatch):
+    """Nothing after the sync commits for a disabled profile with nothing to
+    cancel, and the worker's session rolls back on close. So its sync -- a
+    settled cancel, or a fill -- was thrown away and redone every tick."""
+    from app.trading import grid as grid_module
+
+    calls = []
+    disabled = SimpleNamespace(id=4, name="xrp", enabled=False, regime_state="RANGE", exchange="bybit")
+
+    class Session(FakeSession):
+        async def commit(self):
+            calls.append("commit")
+
+    engine = GridEngine(FakeExchange())
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    async def sync(_session, _profile):
+        calls.append("sync")
+
+    async def cancel(_session, _profile_id):
+        calls.append("cancel")
+
+    async def no_expired(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(engine, "_select_exchange_for", lambda _p: None)
+    monkeypatch.setattr(engine, "backfill_filled_executions", noop)
+    monkeypatch.setattr(engine, "ensure_current_range", noop)
+    monkeypatch.setattr(engine, "sync_open_orders", sync)
+    monkeypatch.setattr(engine, "cancel_open_orders", cancel)
+    monkeypatch.setattr(grid_module, "expire_recommendations", no_expired)
+
+    await engine.tick(Session([disabled]))
+
+    assert calls[:2] == ["sync", "commit"], calls

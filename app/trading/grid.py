@@ -162,6 +162,12 @@ class GridEngine:
                     await session.commit()
 
                 await self.sync_open_orders(session, profile)
+                # What the venue reported is a fact, not a decision, and is
+                # kept whatever this tick does next. Before this commit a
+                # disabled profile's sync was simply rolled back: nothing below
+                # commits when there is nothing left to cancel, so its orders
+                # were re-synced -- and re-settled, and re-logged -- every tick.
+                await session.commit()
                 if not profile.enabled:
                     await self.cancel_open_orders(session, profile.id)
                     continue
