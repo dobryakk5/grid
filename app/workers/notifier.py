@@ -29,6 +29,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+# httpx logs every request URL at INFO, and a Bot API URL carries the token --
+# once every NOTIFY_POLL_SECONDS, for as long as the journal is kept.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def tick(session, client: TelegramClient) -> int:
