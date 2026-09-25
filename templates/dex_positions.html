@@ -85,6 +85,7 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums;overflow-wr
 <th class="num" style="width:170px">Действия</th></tr></thead>
 <tbody id="rows"><tr><td colspan="7" class="empty">Загрузка…</td></tr></tbody></table></div></section>
 
+<p id="twinsToggle" style="margin:8px 0 0"></p>
 <p class="muted" id="note"></p>
 
 <dialog id="buy"><h2 style="margin:0;font-size:17px">Покупка за USDG</h2>
@@ -154,13 +155,25 @@ const fomoSlugs={1:'ethereum',56:'bnb',143:'monad',1337:'hyperliquid',4663:'robi
 // and a copy airdropped next to the real coin sits one row away from it. Fold
 // the characters that look alike and flag every position that shares a shape
 // with another -- the address is then the only thing telling them apart.
-const shape=symbol=>(symbol||'').replace(/[l1|]/g,'I').replace(/0/g,'O').toUpperCase();
+const shape=symbol=>(symbol||'').replace(/[^\p{L}\p{N}|]/gu,'').replace(/[l1|]/g,'I').replace(/0/g,'O').toUpperCase();
 function twin(p){
  return !!p.symbol&&state.positions.some(o=>o!==p&&o.token_address!==p.token_address&&shape(o.symbol)===shape(p.symbol));
 }
+// Bought means the trade history prices it. A coin that was never bought but
+// wears the ticker of one that was is the airdropped lookalike, and is hidden
+// until asked for. A coin sent in with no bought namesake stays in view: the
+// operator may well have transferred it in on purpose.
+const bought=p=>p.average_price!=null;
+function fake(p){
+ return !bought(p)&&!!p.symbol&&state.positions.some(o=>bought(o)&&
+  o.token_address!==p.token_address&&shape(o.symbol)===shape(p.symbol));
+}
+// Junk: an airdropped lookalike, or anything worth less than a dollar.
+const junk=p=>fake(p)||(p.value_quote!=null&&Number(p.value_quote)<1);
+let showTwins=false;
 const TWIN_NOTE='В кошельке есть другая монета с похожим тикером — сверяйте адрес';
 function coinLink(p){
- const name=esc(p.symbol||'без тикера')+(twin(p)?` <span class="warn" title="${TWIN_NOTE}">⚠ двойник</span>`:'');
+ const name=esc(p.symbol||'без тикера')+(twin(p)&&!bought(p)?` <span class="warn" title="${TWIN_NOTE}">⚠ двойник</span>`:'');
  const slug=fomoSlugs[state.chain_id];
  if(!slug||!p.token_address)return name;
  const href=`https://fomo.family/tokens/${slug}/${encodeURIComponent(p.token_address)}`;
@@ -190,10 +203,6 @@ async function api(path,options={}){
 function banners(){
  const out=[];
  if(state.dry_run)out.push('<div class="banner dry">DEX_DRY_RUN включён: уровень будет наблюдаться и котироваться, но ничего не подписывается.</div>');
- else out.push('<div class="banner live">DEX_DRY_RUN выключен. Подтверждённая продажа будет подписана и отправлена в сеть — это настоящие деньги.</div>');
- // Whether this is enough for gas is decided against the router's own
- // estimate when a sale is armed; here it is only shown.
- out.push(`<div class="banner gas">Нативный баланс на газ: ${esc(state.native_balance)} ETH. Без него сделку невозможно отправить.</div>`);
  $('banners').innerHTML=out.join('');
 }
 
@@ -241,9 +250,13 @@ function render(){
  const cash=state.cash;
  $('tiles').innerHTML=`
   <div class="tile"><div class="label">Свободно USDG</div><div class="value good">${cash?num(cash.amount,6):'0'}</div></div>
-  <div class="tile"><div class="label">Открытых позиций</div><div class="value">${state.positions.length}</div></div>
+  <div class="tile"><div class="label">Открытых позиций</div><div class="value">${state.positions.filter(p=>!junk(p)).length}</div></div>
   <div class="tile"><div class="label">Кошелёк</div><div class="value addr">${esc(state.wallet||'')}</div></div>`;
- $('rows').innerHTML=state.positions.length?state.positions.map(p=>`<tr>
+ const fakes=state.positions.filter(junk);
+ const shown=showTwins?state.positions:state.positions.filter(p=>!junk(p));
+ $('twinsToggle').innerHTML=fakes.length
+  ?`<a href="#" id="twinsLink">${showTwins?'Скрыть мусорные':'Показать мусорные'} (${fakes.length})</a>`:'';
+ $('rows').innerHTML=shown.length?shown.map(p=>`<tr${junk(p)?' style="opacity:.55"':''}>
   <td><b>${coinLink(p)}</b><div class="addr" title="${esc(p.token_address)}">${short(p.token_address)}</div></td>
   <td class="num">${num(p.amount,8)}</td>
   <td class="num">${p.average_price?num(p.average_price,8):unknown(p)}</td>
@@ -274,6 +287,10 @@ async function load(){
  finally{$('refresh').disabled=false;}
 }
 
+$('twinsToggle').onclick=event=>{
+ if(!event.target.closest('#twinsLink'))return;
+ event.preventDefault();showTwins=!showTwins;render();
+};
 $('rows').onclick=event=>{
  const buyButton=event.target.closest('button[data-buy]');
  if(buyButton){
@@ -346,7 +363,7 @@ function openSell(address){
  pending={address:position.token_address,percent:25,symbol:position.symbol,position};
  $('sellTitle').innerHTML=`Продажа ${esc(position.symbol||'позиции')} → USDG`+
   `<div class="muted" style="font-size:12px;font-weight:400;margin-top:4px">${esc(position.token_address)}</div>`+
-  (twin(position)?`<div class="warn" style="font-size:12px;font-weight:400;margin-top:4px">⚠ ${TWIN_NOTE}</div>`:'');
+  (twin(position)&&!bought(position)?`<div class="warn" style="font-size:12px;font-weight:400;margin-top:4px">⚠ ${TWIN_NOTE}</div>`:'');
  $('sellError').textContent='';
  // Twice what the coin cost is the take-profit this page is most often opened
  // to place, so it is filled in rather than typed. Unknown cost leaves it
