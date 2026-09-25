@@ -62,7 +62,7 @@ def test_star_subscribes_to_everything(monkeypatch):
 def test_default_subscription_is_money_and_attention(monkeypatch):
     # Значения по умолчанию — это тоже решение: исполнения и ошибки да,
     # бухгалтерия и переспрашивание риск-гейта каждые 30 секунд нет.
-    for kind in ("dex.filled", "dex.failed", "dex.missed", "grid.order_filled"):
+    for kind in ("dex.opened", "dex.filled", "dex.failed", "dex.missed", "grid.order_filled"):
         assert is_enabled(kind), kind
     for kind in ("dex.blocked", "grid.order_synced", "grid.position_lot_created"):
         assert not is_enabled(kind), kind

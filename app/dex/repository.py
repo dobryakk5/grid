@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import DexIntent, DexWallet
 from app.dex.intents import TERMINAL_STATUSES, IntentStatus, assert_transition
-from app.notify.events import DEX_NOTIFIABLE, dex_kind
+from app.notify.events import DEX_NOTIFIABLE, DEX_OPENED, dex_kind
 from app.notify.outbox import enqueue
 
 __all__ = ["DexIntentRepository"]
@@ -95,6 +95,10 @@ class DexIntentRepository:
         )
         self.session.add(intent)
         await self.session.flush()
+        # After the flush, because the message is addressed by the row's id.
+        # A retry is the same order re-armed under a new nonce, not a new one.
+        if parent_intent_id is None:
+            enqueue(self.session, DEX_OPENED, _intent_payload(intent))
         return intent
 
     async def by_id(self, intent_id: int) -> DexIntent | None:

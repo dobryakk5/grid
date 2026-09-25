@@ -10,6 +10,11 @@ engine moved the money:
     is never notifiable, so a level on its way to a fill produces one message,
     not six.
 
+``dex.opened``
+    A new level started watching its price -- armed by hand or placed by a
+    grid. A re-armed retry of an abandoned attempt is the same order, not a new
+    one, and says nothing.
+
 ``grid.<event_type>``
     A strategy transition recorded through :func:`app.trading.events.record_strategy_event`,
     lowercased: ``ORDER_FILLED`` becomes ``grid.order_filled``.
@@ -34,6 +39,7 @@ from app.dex.intents import IntentStatus
 
 __all__ = [
     "DEX_NOTIFIABLE",
+    "DEX_OPENED",
     "chat_ids",
     "dex_kind",
     "grid_kind",
@@ -53,6 +59,11 @@ DEX_NOTIFIABLE = frozenset(
         IntentStatus.CANCELLED,
     }
 )
+
+
+#: A level was armed. Not a status: WAITING is also where BLOCKED and MISSED
+#: return to, and those returns are not new orders.
+DEX_OPENED = "dex.opened"
 
 
 def dex_kind(status: str) -> str:

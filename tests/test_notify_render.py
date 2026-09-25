@@ -94,6 +94,17 @@ async def test_hand_placed_level_says_so():
     assert "вручную" in text
 
 
+async def test_opened_level_is_announced_with_its_terms():
+    session = FakeSession(intents={7: intent(status="WAITING")})
+    text = await render(session, note("dex.opened", {
+        "intent_id": 7, "symbol": "PONSUSDG", "side": "Buy", "status": "WAITING",
+        "amount_in": "250", "amount_in_coin": "USDG", "limit_price": "0.203",
+    }))
+    assert "Открыта заявка" in text
+    assert "Покупка: 250 USDG по 0.203" in text
+    assert "вручную" in text
+
+
 async def test_grid_level_names_its_profile():
     profile = GridProfile(id=3, name="PONS 0.19–0.21", symbol="PONSUSDG")
     session = FakeSession(

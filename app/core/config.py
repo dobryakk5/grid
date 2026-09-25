@@ -292,7 +292,7 @@ class Settings(BaseSettings):
     # (`dex.filled`, `grid.order_filled`, `grid.recovery_*`, `*` — всё подряд).
     # По умолчанию — то, что двигало деньги, и то, что требует человека.
     notify_events: str = (
-        "dex.filled,dex.failed,dex.missed,dex.expired,dex.cancelled,"
+        "dex.opened,dex.filled,dex.failed,dex.missed,dex.expired,dex.cancelled,"
         "grid.order_filled,grid.order_cancel_refused,grid.grid_budget_blocked,"
         "grid.recovery_*,grid.trailing_buy_*,grid.recommendation_created"
     )

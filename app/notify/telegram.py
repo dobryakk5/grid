@@ -1,8 +1,8 @@
-"""Minimal Telegram Bot API client: one method, and honest error classes.
+"""Minimal Telegram Bot API client: a few methods, and honest error classes.
 
-Only ``sendMessage`` is implemented, because only ``sendMessage`` is needed --
-this is a one-way channel out of the bot, not a conversation. The one piece of
-real logic is telling apart the two failures that matter:
+``sendMessage`` carries the outbox; ``getUpdates`` and ``setMyCommands`` exist
+only for the handful of commands the bot answers (see :mod:`app.notify.commands`).
+The one piece of real logic is telling apart the two failures that matter:
 
 ``TelegramRetry``
     Rate limit, a 5xx, or the network. The message is still good; try later.
@@ -68,19 +68,43 @@ class TelegramClient:
 
     async def send_message(self, chat_id: str, text: str) -> int:
         """Send one HTML message; returns Telegram's message id."""
-        if not self.token:
-            raise TelegramError("TELEGRAM_BOT_TOKEN is not set")
-        payload = {
+        result = await self._call("sendMessage", {
             "chat_id": chat_id,
             "text": text[:MESSAGE_LIMIT],
             "parse_mode": "HTML",
             # A contract address in a message must not drag a preview card of
             # whatever site happens to recognise it into the chat.
             "disable_web_page_preview": True,
-        }
+        })
+        return int((result or {}).get("message_id") or 0)
+
+    async def get_updates(self, offset: int | None = None) -> list[dict]:
+        """Updates not yet confirmed, without waiting for new ones.
+
+        A short poll rather than a long one: the notifier already wakes every
+        ``NOTIFY_POLL_SECONDS``, and a request held open for thirty seconds
+        would hold the outbox up behind it.
+        """
+        payload: dict = {"timeout": 0, "allowed_updates": ["message"]}
+        if offset is not None:
+            payload["offset"] = offset
+        return list(await self._call("getUpdates", payload) or [])
+
+    async def set_commands(self, commands: dict[str, str]) -> None:
+        """The menu Telegram shows next to the input field."""
+        await self._call("setMyCommands", {
+            "commands": [
+                {"command": name, "description": description}
+                for name, description in commands.items()
+            ],
+        })
+
+    async def _call(self, method: str, payload: dict):
+        if not self.token:
+            raise TelegramError("TELEGRAM_BOT_TOKEN is not set")
         try:
             response = await self.client.post(
-                f"{self.base_url}/bot{self.token}/sendMessage", json=payload
+                f"{self.base_url}/bot{self.token}/{method}", json=payload
             )
         except httpx.HTTPError as exc:
             raise TelegramRetry(f"telegram unreachable: {exc}") from exc
@@ -103,4 +127,4 @@ class TelegramClient:
             # The token never reaches a log line: this message is what ends up
             # in `notifications.last_error`, which the API can serve.
             raise TelegramError(f"telegram {response.status_code}: {description}")
-        return int((body.get("result") or {}).get("message_id") or 0)
+        return body.get("result")

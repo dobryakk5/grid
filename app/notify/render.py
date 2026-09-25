@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.db.models import DexIntent, GridProfile, Notification
 from app.dex.intents import IntentStatus
 from app.dex.tokens import DexConfigError, plain_symbol, resolve_pair
+from app.notify.events import DEX_OPENED
 from app.notify.telegram import escape
 
 __all__ = ["display_symbol", "render"]
@@ -36,6 +37,8 @@ DEX_HEADLINES = {
     IntentStatus.EXPIRED: ("⌛️", "Истёк срок"),
     IntentStatus.CANCELLED: ("🚫", "Отменено"),
 }
+#: Not a status: an armed level is WAITING, and so is one back from BLOCKED.
+OPENED_HEADLINE = ("🆕", "Открыта заявка")
 
 #: Strategy events phrased for a reader. Anything missing falls back to its own
 #: name, so a new event type is a plain message rather than a silent one.
@@ -146,6 +149,8 @@ async def _render_dex(session: AsyncSession, notification: Notification) -> str 
     payload = notification.payload or {}
     status = str(payload.get("status") or "").upper()
     emoji, headline = DEX_HEADLINES.get(status, ("•", status or "Событие"))
+    if notification.kind == DEX_OPENED:
+        emoji, headline = OPENED_HEADLINE
 
     intent = None
     if payload.get("intent_id"):
@@ -157,7 +162,7 @@ async def _render_dex(session: AsyncSession, notification: Notification) -> str 
 
     lines = [f"{emoji} <b>{escape(headline)}</b> · {escape(pair)}"]
 
-    if status == IntentStatus.FILLED and intent is not None:
+    if notification.kind != DEX_OPENED and status == IntentStatus.FILLED and intent is not None:
         spent, got = number(intent.filled_amount_in), number(intent.filled_amount_out)
         # Which coin is spent and which received flips with the side; the
         # intent only stores what it pays *in*, so the other one comes off the

@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.db.init import init_db
 from app.db.session import SessionLocal
 from app.dex.dynamic_tokens import load_dynamic_tokens
+from app.notify.commands import CommandPoller
 from app.notify.events import is_configured
 from app.notify.outbox import claim, mark_failed, mark_sent
 from app.notify.render import render
@@ -86,6 +87,7 @@ async def main() -> None:
             "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set: nothing is queued or sent"
         )
     client = TelegramClient()
+    commands = CommandPoller(client)
     logger.info("Notifier started (every %ss)", settings.notify_poll_seconds)
 
     try:
@@ -99,6 +101,21 @@ async def main() -> None:
                     await tick(session, client)
             except Exception:
                 logger.exception("Notifier tick failed")
+            if commands is not None and is_configured():
+                # Apart from the outbox, so that a bad command can never hold
+                # up a fill notice, nor a stuck queue leave /open unanswered.
+                try:
+                    await commands.poll(SessionLocal)
+                except TelegramRetry as exc:
+                    logger.warning("Telegram commands deferred: %s", exc)
+                except TelegramError as exc:
+                    # Typically a 409: a webhook is set on this bot, and
+                    # getUpdates cannot be used next to one. Asking again
+                    # every few seconds would only fill the log.
+                    logger.warning("Telegram commands disabled: %s", exc)
+                    commands = None
+                except Exception:
+                    logger.exception("Telegram commands failed")
             await asyncio.sleep(settings.notify_poll_seconds)
     finally:
         await client.close()
