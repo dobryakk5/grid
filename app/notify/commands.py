@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DexIntent
 from app.dex.intents import TERMINAL_STATUSES, IntentStatus
+from app.dex.tokens import plain_symbol
 from app.notify.events import chat_ids
 from app.notify.render import SIDES, display_symbol, number
 from app.notify.telegram import MESSAGE_LIMIT, TelegramClient, TelegramError, escape
@@ -34,25 +35,32 @@ COMMANDS = {"open": "Открытые заявки"}
 #: answer a question nobody is still asking.
 STALE_SECONDS = 120
 
-#: How an open level reads. Anything past TRIGGERED is a swap in flight.
-OPEN_STATES = {
-    IntentStatus.WAITING: "ждёт",
+#: Said only when a level is not simply waiting: those are the ones to look at.
+ATTENTION = {
     IntentStatus.BLOCKED: "🚧 риск-фильтр",
     IntentStatus.MISSED: "⚠️ не хватило средств",
 }
 
 
 def _line(intent: DexIntent) -> str:
+    """``Продажа 723.44 PONS по 0.723`` -- the pair is already in the heading."""
     side = SIDES.get(intent.side.strip().lower(), intent.side)
     amount, limit = number(intent.amount_in), number(intent.limit_price)
-    text = f"<b>{escape(display_symbol(intent.symbol))}</b> · {escape(side)}"
+    text = escape(side)
     if amount:
-        text += f" {amount} {escape(intent.amount_in_coin)}"
+        text += f" {amount} {escape(plain_symbol(intent.amount_in_coin))}"
     if limit:
         text += f" по {limit}"
-    text += f" · {OPEN_STATES.get(intent.status, '⏳ исполняется')}"
-    text += " · сетка" if intent.profile_id else " · вручную"
+    if intent.status != IntentStatus.WAITING:
+        text += f" · {ATTENTION.get(intent.status, '⏳ исполняется')}"
     return text
+
+
+def _order(intent: DexIntent) -> tuple:
+    """Sells, then buys; each nearest-to-market first, so the next fill leads."""
+    selling = intent.side.strip().lower() == "sell"
+    price = intent.limit_price or 0
+    return (0, price) if selling else (1, -price)
 
 
 def _chunks(header: str, lines: list[str]) -> list[str]:
@@ -69,7 +77,8 @@ def _chunks(header: str, lines: list[str]) -> list[str]:
 
 
 async def open_orders_messages(session: AsyncSession) -> list[str]:
-    """The ``/open`` answer: every level the history page lists as open."""
+    """The ``/open`` answer: every level the history page lists as open,
+    under one heading per pair."""
     statement = (
         select(DexIntent)
         .where(DexIntent.status.not_in(tuple(TERMINAL_STATUSES)))
@@ -78,7 +87,15 @@ async def open_orders_messages(session: AsyncSession) -> list[str]:
     intents = list((await session.execute(statement)).scalars())
     if not intents:
         return ["Открытых заявок нет"]
-    return _chunks(f"📋 <b>Открытые заявки: {len(intents)}</b>", [_line(i) for i in intents])
+    # Grouped in order of first appearance, so the oldest position leads.
+    groups: dict[str, list[DexIntent]] = {}
+    for intent in intents:
+        groups.setdefault(display_symbol(intent.symbol), []).append(intent)
+    lines: list[str] = []
+    for pair, levels in groups.items():
+        lines += ["", f"<b>{escape(pair)}</b>"]
+        lines += [_line(intent) for intent in sorted(levels, key=_order)]
+    return _chunks(f"📋 <b>Открытые заявки: {len(intents)}</b>", lines)
 
 
 def _command(text: str) -> str | None:

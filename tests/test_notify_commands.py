@@ -100,14 +100,27 @@ def test_command_spellings():
     assert _command("") is None
 
 
-async def test_open_lists_levels_with_their_terms():
-    session = FakeSession([level(1), level(2, side="Sell", status="MISSED", profile_id=3,
-                                     amount_in=Decimal("1000"), amount_in_coin="PONS")])
+async def test_open_groups_levels_under_their_pair():
+    session = FakeSession([
+        level(1, side="Sell", limit_price=Decimal("0.723"), amount_in=Decimal("723.44"),
+              amount_in_coin="PONS"),
+        level(2, symbol="AI2E8C3116USDG", side="Sell", limit_price=Decimal("0.31"),
+              amount_in=Decimal("556.8"), amount_in_coin="AI-2E8C3116"),
+        level(3, side="Sell", limit_price=Decimal("0.714"), amount_in=Decimal("723.44"),
+              amount_in_coin="PONS", status="MISSED"),
+        level(4),
+    ])
     [text] = await open_orders_messages(session)
-    assert "Открытые заявки: 2" in text
-    assert "PONS-USDG" in text
-    assert "Покупка 250 USDG по 0.203 · ждёт · вручную" in text
-    assert "не хватило средств · сетка" in text
+    lines = text.split("\n")
+    assert lines[0] == "📋 <b>Открытые заявки: 4</b>"
+    pons = lines.index("<b>PONS-USDG</b>")
+    assert lines[pons + 1:pons + 4] == [
+        "Продажа 723.44 PONS по 0.714 · ⚠️ не хватило средств",
+        "Продажа 723.44 PONS по 0.723",
+        "Покупка 250 USDG по 0.203",
+    ]
+    assert "Продажа 556.8 AI по 0.31" in lines
+    assert "вручную" not in text
 
 
 async def test_no_open_levels_is_said_plainly():
