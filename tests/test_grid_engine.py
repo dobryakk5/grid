@@ -493,3 +493,48 @@ async def test_an_unreadable_balance_leaves_the_cell_unarmed():
     )
 
     assert exchange.placed == []
+
+
+# ---- an order the venue has forgotten -------------------------------------
+
+
+def _missing_order(status, age_days):
+    from datetime import datetime, timedelta, timezone
+
+    return SimpleNamespace(
+        id=45, profile_id=1, symbol="XRPUSDT",
+        exchange_order_id="2285715138592115968", order_link_id="g3-x",
+        status=status, filled_qty=None, avg_price=None,
+        updated_at=datetime.now(timezone.utc) - timedelta(days=age_days),
+    )
+
+
+async def test_a_long_requested_cancel_the_venue_forgot_is_settled():
+    """The disk-filler. Three orders we asked Bybit demo to cancel in August
+    were no longer in its history, so every tick asked about them again and
+    warned again -- 300k lines in five days. A cancel we requested, that the
+    venue no longer knows at all, is done."""
+    order = _missing_order("CancelRequestedByUser", age_days=30)
+
+    await GridEngine(LinkLookupExchange()).sync_open_orders(FakeSession([order]), profile())
+
+    assert order.status == "CancelledByUser"
+
+
+async def test_a_fresh_cancel_is_not_settled_on_one_missing_answer():
+    # Minutes after the request, "not found" may just be the venue catching up.
+    order = _missing_order("CancelRequested", age_days=0)
+
+    await GridEngine(LinkLookupExchange()).sync_open_orders(FakeSession([order]), profile())
+
+    assert order.status == "CancelRequested"
+
+
+async def test_a_live_order_that_goes_missing_is_never_closed_by_guesswork():
+    # Unlike a cancel we asked for, a live order that vanishes may have
+    # filled. Closing it would lose the fill; it stays for a human.
+    order = _missing_order("New", age_days=30)
+
+    await GridEngine(LinkLookupExchange()).sync_open_orders(FakeSession([order]), profile())
+
+    assert order.status == "New"

@@ -11,6 +11,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+# httpx logs every request at INFO. This worker polls the venue several times
+# a tick per open order, so that alone was two syslog lines per order per
+# tick -- the bulk of what filled the disk. Failures still surface as WARNING.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def main() -> None:

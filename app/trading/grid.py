@@ -43,6 +43,12 @@ OPEN_STATUSES = {"New", "PartiallyFilled", "Untriggered", "Created", "CancelRefu
 # CancelRefused stays open (still syncs, still counts as the one BUY) but is
 # never worth asking the venue to cancel again -- it already said no.
 CANCELLABLE_STATUSES = OPEN_STATUSES - {"CancelRefused"}
+# How long a requested cancel may go unanswered before "the venue does not
+# know this order" is read as "it is gone" rather than "not visible yet".
+# Far longer than any propagation delay, far shorter than a history window.
+FORGOTTEN_CANCEL_AFTER = timedelta(days=1)
+# Exchange order ids already reported missing by this process.
+_REPORTED_MISSING: set[str] = set()
 SYNC_STATUSES = OPEN_STATUSES | {
     "CancelRequested", "CancelRequestedBreakdown", "CancelRequestedByUser",
 }
@@ -844,6 +850,50 @@ class GridEngine:
         logger.warning("Profile %s stopped by price guard at %s", profile.id, market_price)
         return True
 
+    def _close_forgotten_cancel(
+        self, session: AsyncSession, profile: GridProfile, order: GridOrder,
+    ) -> bool:
+        """Settle a cancel we asked for that the venue no longer remembers.
+
+        A venue keeps order history for a window, not forever -- Bybit demo
+        certainly does not. An order we asked to cancel, which the venue
+        still reported afterwards but now does not know at all, will never
+        be answered again, and polling it every tick only writes the same
+        warning forever.
+
+        Only a *cancel-requested* order is settled this way, and only once
+        the request is old enough that "not found" cannot be a venue still
+        catching up. An order we believe is live and cannot find is a
+        different fact -- it may have filled -- and is left open for a human.
+        Returns True when the order was settled.
+        """
+        if not order.status.startswith("CancelRequested"):
+            return False
+        requested_at = order.updated_at
+        if requested_at is None:
+            return False
+        if requested_at.tzinfo is None:
+            requested_at = requested_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - requested_at < FORGOTTEN_CANCEL_AFTER:
+            return False
+
+        old_status = order.status
+        order.status = f"Cancelled{old_status.removeprefix('CancelRequested')}"
+        record_strategy_event(
+            session, profile_id=profile.id, event_type="ORDER_SYNCED",
+            from_state=old_status, to_state=order.status,
+            reason="venue no longer reports this order; the requested cancel is taken as done",
+            metadata={
+                "order_id": order.id, "exchange_order_id": order.exchange_order_id,
+                "cancel_requested_at": requested_at.isoformat(),
+            },
+        )
+        logger.info(
+            "Order %s: cancel requested %s, venue no longer reports it -> %s",
+            order.exchange_order_id, requested_at.date(), order.status,
+        )
+        return True
+
     async def sync_open_orders(
         self, session: AsyncSession, profile: GridProfile,
     ) -> list[GridOrder]:
@@ -883,7 +933,18 @@ class GridEngine:
                     order_id=order.exchange_order_id, symbol=order.symbol
                 )
                 if remote is None:
-                    logger.warning("Order %s not found on exchange", order.exchange_order_id)
+                    if self._close_forgotten_cancel(session, profile, order):
+                        continue
+                    # Said once per order per process. This used to warn on
+                    # every tick, forever: three orders the venue had
+                    # forgotten wrote 300k lines in five days and, with the
+                    # request logging around them, filled the disk.
+                    if order.exchange_order_id not in _REPORTED_MISSING:
+                        _REPORTED_MISSING.add(order.exchange_order_id)
+                        logger.warning(
+                            "Order %s (%s) not found on exchange; will keep checking quietly",
+                            order.exchange_order_id, order.status,
+                        )
                     continue
 
             old_status = order.status
