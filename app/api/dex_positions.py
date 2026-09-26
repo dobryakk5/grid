@@ -722,7 +722,9 @@ async def orders(status: str = "all", limit: int = 200) -> dict:
         "display_symbol": display.get(row.symbol, row.symbol),
         # Carried so a copy of this order can be armed the way this one was.
         "ignore_liquidity": bool(row.ignore_liquidity_gate),
-        "token_address": addresses.get(row.symbol),
+        # The address the level was placed on wins over what its key resolves
+        # to today; older builtin levels have only the key.
+        "token_address": row.token_address or addresses.get(row.symbol),
         "chain_id": settings.rh_chain_id,
         "limit_price": money(row.limit_price),
         "amount_in": money(row.amount_in),

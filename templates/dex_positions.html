@@ -257,7 +257,8 @@ function render(){
  $('twinsToggle').innerHTML=fakes.length
   ?`<a href="#" id="twinsLink">${showTwins?'Скрыть мусорные':'Показать мусорные'} (${fakes.length})</a>`:'';
  $('rows').innerHTML=shown.length?shown.map(p=>`<tr${junk(p)?' style="opacity:.55"':''}>
-  <td><b>${coinLink(p)}</b><div class="addr" title="${esc(p.token_address)}">${short(p.token_address)}</div></td>
+  <td><b>${coinLink(p)}</b><div class="addr" title="${esc(p.token_address)}">${short(p.token_address)}
+   · <a href="history?token=${encodeURIComponent(p.token_address)}" title="Все сделки по этой монете">сделки</a></div></td>
   <td class="num">${num(p.amount,8)}</td>
   <td class="num">${p.average_price?num(p.average_price,8):unknown(p)}</td>
   <td class="num">${p.cost_quote?num(p.cost_quote,6):'—'}</td>
